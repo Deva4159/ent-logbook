@@ -226,11 +226,24 @@
     passwordResets: [],
     passwordResetsLoaded: false,
     consultantScope: null,
+    capabilities: null, // {isDeveloper,isHod,isCoordinator,isHeadOfUnit,canApprove,canManageProfiles} -- from the server, alongside `user`
     showCreateUserForm: false,
     newUserRole: "resident",
     viewingEntryId: null,
+    signupPendingMessage: "",
+    signupRequests: [],
+    signupRequestsLoaded: false,
+    manageUsers: [],
+    manageUsersLoaded: false,
     toast: ""
   };
+
+  // Every role that logs entries and gets the resident-style logbook/
+  // dashboard experience -- "PG Resident" is one of three now.
+  var TRAINEE_ROLES = ["resident","senior_resident","fellow"];
+  function isTraineeRole(role){ return TRAINEE_ROLES.indexOf(role)!==-1; }
+  var ROLE_LABELS = { resident:"PG Resident", senior_resident:"Senior Resident", fellow:"Fellow", consultant:"Consultant", developer:"Developer" };
+  function roleLabel(role){ return ROLE_LABELS[role] || role; }
 
   var DEFAULT_CATEGORIES = [
     { key:"ear", name:"Ear", color:"var(--cat-ear)" },
@@ -253,7 +266,8 @@
   var DEFAULT_ROLE_LEVELS = ["Observed only","Assisted (2nd assistant)","Assisted (1st assistant)","Performed under direct supervision","Performed under indirect supervision","Performed independently"];
   var DEFAULT_SETTINGS_OPT = ["Elective","Emergency"];
   var DEFAULT_LATERALITY_OPT = ["Right","Left","Bilateral","Not required"];
-  var DEFAULT_PG_YEAR_OPT = ["JR-1","JR-2","JR-3","Senior Resident"];
+  var DEFAULT_PG_YEAR_OPT = ["JR-1","JR-2","JR-3"];
+  var DEFAULT_CONSULTANT_DESIGNATIONS = ["Assistant Professor","Associate Professor","Professor"];
   var DEFAULT_DIAGNOSES = ["Chronic Otitis Media","Chronic Rhinosinusitis","Deviated Nasal Septum","Obstructive Sleep Apnea","Head & Neck Malignancy","Vocal Cord Palsy","Otosclerosis","Congenital Aural Atresia","Allergic Rhinitis","Laryngeal Papillomatosis","Cholesteatoma","Thyroid Nodule / Goitre"];
   var DEFAULT_COMORBIDITIES = ["Diabetes Mellitus","Hypertension","Coronary Artery Disease","Chronic Kidney Disease","COPD / Asthma","Hypothyroidism","Immunocompromised","None"];
   var DEFAULT_ACADEMIC_TYPES = ["CME","Journal club","Paper presentation","University"];
@@ -299,7 +313,8 @@
       academicTypes: DEFAULT_ACADEMIC_TYPES.slice(),
       otherProcedureSettings: DEFAULT_OTHER_SETTINGS.slice(),
       sexOptions: DEFAULT_SEX_OPT.slice(),
-      seminarTypes: DEFAULT_SEMINAR_TYPES.slice()
+      seminarTypes: DEFAULT_SEMINAR_TYPES.slice(),
+      consultantDesignations: DEFAULT_CONSULTANT_DESIGNATIONS.slice()
     };
   }
 
@@ -488,7 +503,11 @@
     await api("POST","/users",{ username:username, password:data.password, role:data.role, displayName:data.displayName, pgYear:data.pgYear, designation:data.designation, unit:data.unit });
   }
   async function dUpdateUser(username, patch){ await api("PATCH","/users/"+encodeURIComponent(username), patch); }
+  async function dDeleteUser(username){ await api("DELETE","/users/"+encodeURIComponent(username)); }
   async function dListUsers(){ return (await api("GET","/users")).users; }
+  async function dListSignupRequests(){ return (await api("GET","/signup-requests")).requests; }
+  async function dApproveSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/approve"); }
+  async function dRejectSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/reject"); }
   async function dAddEntry(data){ return (await api("POST","/entries", data)).entry.id; }
   async function dUpdateEntry(id, data){ return (await api("PATCH","/entries/"+id, data)).entry; }
   async function dDeleteEntry(id){ await api("DELETE","/entries/"+id); }
@@ -519,6 +538,7 @@
       var me = await api("GET","/auth/me");
       if(me.user){
         state.user = me.user;
+        state.capabilities = me.capabilities;
         state.view = defaultViewFor(me.user.role);
         try{ state.user.postings = (await api("GET","/postings")).postings; }catch(e){ state.user.postings = []; }
       }
@@ -537,6 +557,7 @@
     try{
       var res = await api("POST","/auth/login",{ username: cleanUsername(username), password: password, requireRole: requireRole });
       state.user = res.user;
+      state.capabilities = res.capabilities;
       try{ state.user.postings = (await api("GET","/postings")).postings; }catch(e){ state.user.postings = []; }
       state.view = defaultViewFor(res.user.role);
       state.authBusy=false;
@@ -559,7 +580,15 @@
         displayName: fields.displayName, role: fields.role, pgYear: fields.pgYear,
         designation: fields.designation, unit: fields.unit
       });
+      if(res.pending){
+        state.authBusy=false;
+        state.authMode = "signup-pending";
+        state.signupPendingMessage = res.message || "Your account is awaiting approval.";
+        render();
+        return;
+      }
       state.user = res.user;
+      state.capabilities = res.capabilities;
       state.user.postings = [];
       state.view = defaultViewFor(res.user.role);
       state.authBusy=false;
@@ -591,9 +620,11 @@
   function doLogout(){
     api("POST","/auth/logout").catch(function(){});
     state.user = null;
+    state.capabilities = null;
     state.authMode = "login";
     state.myEntriesLoaded=false; state.rosterLoaded=false; state.devUsersLoaded=false; state.detailUser=null;
     state.passwordResetsLoaded=false; state.consultantsLoaded=false;
+    state.signupRequestsLoaded=false; state.signupRequests=[]; state.manageUsersLoaded=false; state.manageUsers=[];
     render();
   }
 
@@ -645,15 +676,26 @@
     try{ state.passwordResets = await dListPasswordRequests(); }catch(e){}
     state.passwordResetsLoaded = true;
   }
+  async function loadSignupRequests(){
+    try{ state.signupRequests = await dListSignupRequests(); }catch(e){}
+    state.signupRequestsLoaded = true;
+  }
+  async function loadManageUsers(){
+    try{ state.manageUsers = await dListUsers(); }catch(e){}
+    state.manageUsersLoaded = true;
+  }
 
   async function loadForView(){
     if(!state.user) return;
-    var v = state.view, role = state.user.role;
+    var v = state.view, role = state.user.role, caps = state.capabilities || {};
     if(v==="dashboard"){
       state.loading = true; render();
-      if(role==="resident"){ await loadMyEntries(); }
-      else if(role==="consultant"){ await loadRoster(); }
-      else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); }
+      if(isTraineeRole(role)){ await loadMyEntries(); }
+      else if(role==="consultant"){
+        await loadRoster();
+        if(caps.canApprove){ await loadSignupRequests(); }
+      }
+      else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); await loadSignupRequests(); }
       state.loading=false; render(); return;
     }
     if(v==="resident-log"){ await loadConsultants(); render(); return; }
@@ -663,6 +705,8 @@
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
     if(v==="developer-data"){ state.loading=true; render(); await loadDevUsers(); await loadDevEntries(); state.loading=false; render(); return; }
     if(v==="developer-password-requests"){ state.loading=!state.passwordResetsLoaded; render(); await loadDevUsers(); await loadPasswordRequests(); state.loading=false; render(); return; }
+    if(v==="signup-approvals"){ state.loading=!state.signupRequestsLoaded; render(); await loadSignupRequests(); state.loading=false; render(); return; }
+    if(v==="manage-users"){ state.loading=!state.manageUsersLoaded; render(); await loadManageUsers(); state.loading=false; render(); return; }
   }
 
   async function openResidentDetail(username){
@@ -1071,10 +1115,49 @@
   async function setUserActive(username, active){
     try{
       await dUpdateUser(username, {active:active});
-      state.devUsers = state.devUsers.map(function(u){ if(u.username===username) u.active=active; return u; });
+      function applyActive(list){ return list.map(function(u){ if(u.username===username) u.active=active; return u; }); }
+      state.devUsers = applyActive(state.devUsers);
+      state.manageUsers = applyActive(state.manageUsers);
       render();
       toast(active ? "Account reactivated." : "Account deactivated.");
     }catch(e){ toast("Could not update account status."); }
+  }
+  async function updateUserProfile(username, patch){
+    try{
+      await dUpdateUser(username, patch);
+      function applyProfile(list){ return list.map(function(u){ return u.username===username ? Object.assign({}, u, patch) : u; }); }
+      state.devUsers = applyProfile(state.devUsers);
+      state.manageUsers = applyProfile(state.manageUsers);
+      render();
+      toast("Profile updated for "+username+".");
+    }catch(e){ toast(e.message || "Could not update this profile."); }
+  }
+  async function deleteUserAccount(username){
+    if(!confirm("Delete "+username+"’s account? This cannot be undone. Accounts with logged entries can't be deleted this way — deactivate them instead.")) return;
+    try{
+      await dDeleteUser(username);
+      state.devUsers = state.devUsers.filter(function(u){ return u.username!==username; });
+      state.manageUsers = state.manageUsers.filter(function(u){ return u.username!==username; });
+      render();
+      toast("Account deleted.");
+    }catch(e){ toast(e.message || "Could not delete this account."); }
+  }
+  async function approveSignupRequest(username){
+    try{
+      await dApproveSignup(username);
+      state.signupRequests = state.signupRequests.filter(function(u){ return u.username!==username; });
+      render();
+      toast("Approved "+username+" — they can now sign in.");
+    }catch(e){ toast(e.message || "Could not approve this account."); }
+  }
+  async function rejectSignupRequest(username){
+    if(!confirm("Reject and delete this sign-up request? The person will need to sign up again.")) return;
+    try{
+      await dRejectSignup(username);
+      state.signupRequests = state.signupRequests.filter(function(u){ return u.username!==username; });
+      render();
+      toast("Sign-up request rejected.");
+    }catch(e){ toast(e.message || "Could not reject this request."); }
   }
   async function adminCreateUser(fields){
     try{
@@ -1341,6 +1424,7 @@
 
   function renderSignup(){
     var role = state.signupRole;
+    var isTrainee = isTraineeRole(role);
     return ''+
     '<div class="center-shell"><div class="auth-card" style="max-width:460px;">'+
       '<div class="auth-eyebrow">ENT Postgraduate Programme</div>'+
@@ -1349,7 +1433,9 @@
       (state.authError ? '<div class="error-banner">'+esc(state.authError)+'</div>' : '')+
       '<div class="field"><label>I am a</label><div class="radio-group">'+
         radioCard("signup-role","resident",role==="resident","PG Resident","Log your own surgeries, procedures and interesting cases.")+
-        radioCard("signup-role","consultant",role==="consultant","Consultant / Faculty","View resident progress across the unit.")+
+        radioCard("signup-role","senior_resident",role==="senior_resident","Senior Resident","Same logbook and dashboard as a PG Resident.")+
+        radioCard("signup-role","fellow",role==="fellow","Fellow","Same logbook and dashboard as a PG Resident.")+
+        radioCard("signup-role","consultant",role==="consultant","Consultant / Faculty","View trainee progress in your unit.")+
       '</div></div>'+
       '<div class="field"><label for="su-username">Username</label><input id="su-username" type="text" placeholder="e.g. devashish.pg"></div>'+
       '<div class="row2">'+
@@ -1357,17 +1443,28 @@
         '<div class="field"><label for="su-confirm">Confirm password</label><input id="su-confirm" type="password"></div>'+
       '</div>'+
       '<div class="field"><label for="su-displayName">Display name</label><input id="su-displayName" type="text" placeholder="e.g. Dr. Devashish Chaudhary"></div>'+
-      (role==="resident" ?
-        '<div class="field"><label for="su-pgYear">PG Year</label><select id="su-pgYear">'+state.config.pgYears.map(function(o){return '<option>'+o+'</option>';}).join("")+'</select></div>'+
+      (isTrainee ?
+        '<div class="field"><label for="su-pgYear">Batch / Year</label><select id="su-pgYear">'+state.config.pgYears.map(function(o){return '<option>'+o+'</option>';}).join("")+'</select></div>'+
         '<p class="hint">You’ll add your unit posting (with dates) after signing in, under My Postings.</p>'
         :
         '<div class="row2">'+
-          '<div class="field"><label for="su-designation">Designation</label><input id="su-designation" type="text" placeholder="e.g. Associate Professor"></div>'+
-          '<div class="field"><label for="su-unit">Home unit</label><select id="su-unit">'+unitOptions(null)+'</select></div>'+
+          '<div class="field"><label for="su-designation">Designation</label><select id="su-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
+          '<div class="field"><label for="su-unit">Department / unit</label><select id="su-unit">'+unitOptions(null)+'</select></div>'+
         '</div>'
       )+
+      '<p class="hint">Your account needs approval before you can sign in — a Head of Department, Course Coordinator'+(role==="fellow"?", Head of Unit,":"")+' or Developer will review it.</p>'+
       '<button class="btn btn-primary" style="width:100%; margin-top:6px;" id="btn-signup" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Creating account…":"Create account")+'</button>'+
       '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Already have an account? <button class="link-btn" id="go-login">Sign in</button></div>'+
+    '</div></div>';
+  }
+
+  function renderSignupPending(){
+    return ''+
+    '<div class="center-shell"><div class="auth-card" style="text-align:center;">'+
+      '<div class="auth-eyebrow">Account created</div>'+
+      '<h1>Awaiting approval</h1>'+
+      '<div class="auth-sub">'+esc(state.signupPendingMessage)+'</div>'+
+      '<button class="btn btn-primary" style="width:100%; margin-top:16px;" id="go-login-from-pending">Back to sign in</button>'+
     '</div></div>';
   }
 
@@ -1392,22 +1489,31 @@
     return state.passwordResets.filter(function(r){ return r.status==="pending"; }).length;
   }
   function navItems(){
-    if(state.user.role==="resident") return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["account","My Account"],["about","About / Roadmap"]];
-    if(state.user.role==="consultant") return [["dashboard","Dashboard"],["consultant-roster","Roster"],["account","My Account"],["about","About / Roadmap"]];
-    return [["dashboard","Dashboard"],["developer-users","Users"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["account","My Account"],["about","About / Roadmap"]];
+    var caps = state.capabilities || {};
+    if(isTraineeRole(state.user.role)) return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["account","My Account"],["about","About / Roadmap"]];
+    if(state.user.role==="consultant"){
+      var items = [["dashboard","Dashboard"],["consultant-roster","Roster"]];
+      if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
+      if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
+      items.push(["account","My Account"],["about","About / Roadmap"]);
+      return items;
+    }
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["account","My Account"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
-    var roleLabel = role==="resident" ? "Resident" : (role==="consultant" ? "Consultant" : "Developer");
+    var roleLabelText = roleLabel(role);
     var pendingCount = role==="developer" ? pendingPasswordRequestCount() : 0;
     return ''+
     '<div class="topbar">'+
       '<div class="brand"><div class="brand-mark">EL</div><div class="brand-text"><h1>ENT Surgical Logbook</h1><div class="sub">'+"De-identified logbook"+'</div></div></div>'+
-      '<div class="user-chip"><span class="role-badge">'+roleLabel+'</span><span>'+esc(state.user.displayName)+'</span><button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
+      '<div class="user-chip"><span class="role-badge">'+esc(roleLabelText)+'</span><span>'+esc(state.user.displayName)+'</span><button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
     '</div>'+
     '<div class="shell-body">'+
       '<nav class="sidenav">'+navItems().map(function(item){
-        var badge = (item[0]==="developer-password-requests" && pendingCount>0) ? '<span class="alert-count">'+pendingCount+'</span>' : "";
+        var badge = "";
+        if(item[0]==="developer-password-requests" && pendingCount>0) badge = '<span class="alert-count">'+pendingCount+'</span>';
+        if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
@@ -1450,32 +1556,38 @@
 
   function renderDashboardConsultant(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
+    var caps = state.capabilities || {};
     var allEntries = [];
     state.roster.forEach(function(r){ allEntries = allEntries.concat(r.entries); });
     var s = computeStats(allEntries);
     return ''+
     renderScopeBanner()+
     '<div class="stat-grid">'+
-      statTile(state.roster.length,"Residents visible")+statTile(s.total,"Total entries")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar")+
+      statTile(state.roster.length,"Trainees visible")+statTile(s.total,"Total entries")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar")+
     '</div>'+
-    '<div class="card"><h2>Roster</h2><div class="dash-grid">'+dashCard("consultant-roster","Open Roster","See every resident’s progress within your scope.")+'</div></div>';
+    '<div class="card"><h2>Roster</h2><div class="dash-grid">'+dashCard("consultant-roster","Open Roster","See every trainee’s progress within your scope.")+'</div></div>'+
+    ((caps.canApprove || caps.canManageProfiles) ? '<div class="card"><h2>Accounts</h2><div class="dash-grid">'+
+      (caps.canApprove ? dashCard("signup-approvals","Approvals","Review pending sign-ups.", state.signupRequests.length>0?'<span class="alert-count">'+state.signupRequests.length+'</span>':"") : "")+
+      (caps.canManageProfiles ? dashCard("manage-users","Manage Users","Update batches/designations, deactivate or delete accounts.") : "")+
+    '</div></div>' : '');
   }
 
   function renderDashboardDeveloper(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
-    var residentCount = state.devUsers.filter(function(u){return u.role==="resident";}).length;
+    var traineeCount = state.devUsers.filter(function(u){return isTraineeRole(u.role);}).length;
     var consultantCount = state.devUsers.filter(function(u){return u.role==="consultant";}).length;
     var pending = pendingPasswordRequestCount();
     return ''+
     (pending>0 ? '<div class="notice-banner">'+pending+' password reset request'+(pending>1?"s":"")+' waiting on you.</div>' : '')+
     '<div class="stat-grid">'+
-      statTile(residentCount,"Residents")+statTile(consultantCount,"Consultants")+statTile(state.devAllEntries.length,"Total entries")+statTile((state.config.units||[]).length,"Units")+
+      statTile(traineeCount,"Trainees")+statTile(consultantCount,"Consultants")+statTile(state.devAllEntries.length,"Total entries")+statTile((state.config.units||[]).length,"Units")+
     '</div>'+
     '<div class="card"><h2>Quick links</h2><div class="dash-grid">'+
       dashCard("developer-users","Users","Create, promote or deactivate accounts.")+
+      dashCard("signup-approvals","Approvals","Review pending sign-ups.", state.signupRequests.length>0?'<span class="alert-count">'+state.signupRequests.length+'</span>':"")+
       dashCard("developer-password-requests","Password Requests","Set a new password for someone locked out.", pending>0?'<span class="alert-count">'+pending+'</span>':"")+
       dashCard("developer-roles","Units & Roles","Manage the units list and Head of Unit / Coordinator / HOD appointments.")+
-      dashCard("developer-lists","Manage Lists","Edit every dropdown residents and consultants see.")+
+      dashCard("developer-lists","Manage Lists","Edit every dropdown trainees and consultants see.")+
       dashCard("developer-data","Data & Export","CSV export and storage status.")+
     '</div></div>';
   }
@@ -1871,15 +1983,15 @@
   function renderConsultantRoster(){
     if(state.loading) return '<div class="empty-state">Loading roster…</div>';
     var banner = renderScopeBanner();
-    if(state.roster.length===0) return banner+'<div class="card"><div class="empty-state">No residents’ entries are visible to you right now.</div></div>';
+    if(state.roster.length===0) return banner+'<div class="card"><div class="empty-state">No trainees’ entries are visible to you right now.</div></div>';
     return banner+''+
-    '<div class="card"><h2>Resident roster</h2>'+
-    '<div class="table-wrap"><table><thead><tr><th>Resident</th><th>PG Year</th><th>Current unit</th><th>Total</th><th>Surgical</th><th>Other</th><th>Cases</th><th>Academic</th><th>Seminars</th><th>Last entry</th><th></th></tr></thead><tbody>'+
+    '<div class="card"><h2>Trainee roster</h2>'+
+    '<div class="table-wrap"><table><thead><tr><th>Trainee</th><th>Role</th><th>Batch</th><th>Current unit</th><th>Total</th><th>Surgical</th><th>Other</th><th>Cases</th><th>Academic</th><th>Seminars</th><th>Last entry</th><th></th></tr></thead><tbody>'+
       state.roster.map(function(r){
         var s = computeStats(r.entries);
         var last = r.entries.map(function(e){return e.date;}).sort().slice(-1)[0];
         var currentUnit = unitForDate(r.user.postings, todayISO());
-        return '<tr><td>'+esc(r.user.displayName)+'</td><td>'+esc(r.user.pgYear||"—")+'</td><td>'+(currentUnit?unitShortHtml(currentUnit):"—")+'</td><td class="tabular">'+s.total+'</td><td class="tabular">'+s.surgical+'</td><td class="tabular">'+s.other+'</td><td class="tabular">'+s["case"]+'</td><td class="tabular">'+s.academic+'</td><td class="tabular">'+s.seminar+'</td><td class="tabular">'+fmtDate(last)+'</td><td><button class="btn btn-sm" data-view-resident="'+esc(r.user.username)+'">View</button></td></tr>';
+        return '<tr><td>'+esc(r.user.displayName)+'</td><td><span class="chip chip-grey">'+esc(roleLabel(r.user.role))+'</span></td><td>'+esc(r.user.pgYear||"—")+'</td><td>'+(currentUnit?unitShortHtml(currentUnit):"—")+'</td><td class="tabular">'+s.total+'</td><td class="tabular">'+s.surgical+'</td><td class="tabular">'+s.other+'</td><td class="tabular">'+s["case"]+'</td><td class="tabular">'+s.academic+'</td><td class="tabular">'+s.seminar+'</td><td class="tabular">'+fmtDate(last)+'</td><td><button class="btn btn-sm" data-view-resident="'+esc(r.user.username)+'">View</button></td></tr>';
       }).join("")+
     '</tbody></table></div></div>';
   }
@@ -1915,6 +2027,8 @@
         '<p class="muted" style="margin-bottom:14px;">This is in addition to open sign-up — use it to hand someone a ready-made login instead of waiting for them to register themselves.</p>'+
         '<div class="field"><label>Role</label><div class="radio-group">'+
           radioCard("newuser-role","resident",role==="resident","PG Resident","")+
+          radioCard("newuser-role","senior_resident",role==="senior_resident","Senior Resident","")+
+          radioCard("newuser-role","fellow",role==="fellow","Fellow","")+
           radioCard("newuser-role","consultant",role==="consultant","Consultant / Faculty","")+
           radioCard("newuser-role","developer",role==="developer","Developer","")+
         '</div></div>'+
@@ -1923,10 +2037,10 @@
           '<div class="field"><label for="nu-password">Temporary password</label><input id="nu-password" type="text"></div>'+
         '</div>'+
         '<div class="field"><label for="nu-displayName">Display name</label><input id="nu-displayName" type="text"></div>'+
-        (role==="resident" ? '<div class="field"><label for="nu-pgYear">PG Year</label><select id="nu-pgYear">'+opts_(state.config.pgYears,state.config.pgYears[0])+'</select></div>' : '')+
+        (isTraineeRole(role) ? '<div class="field"><label for="nu-pgYear">Batch / Year</label><select id="nu-pgYear">'+opts_(state.config.pgYears,state.config.pgYears[0])+'</select></div>' : '')+
         (role==="consultant" ? (
           '<div class="row2">'+
-            '<div class="field"><label for="nu-designation">Designation</label><input id="nu-designation" type="text"></div>'+
+            '<div class="field"><label for="nu-designation">Designation</label><select id="nu-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
             '<div class="field"><label for="nu-unit">Home unit</label><select id="nu-unit">'+unitOptions(null)+'</select></div>'+
           '</div>'
         ) : '')+
@@ -1935,22 +2049,74 @@
     '</div>';
   }
 
+  // Shared account-row renderer for both the Developer "All accounts" table
+  // and the HOD/Coordinator/Head-of-Unit "Manage accounts" table. `canChangeRole`
+  // gates the role dropdown (Developer only, per spec); the batch/designation
+  // inline edit and deactivate/delete controls are available to both, since
+  // canManageProfiles already restricts who reaches this table at all.
+  function userAccountRow(u, canChangeRole){
+    var statusChip = u.active===false ? '<span class="chip chip-red">Deactivated</span>' : '<span class="chip chip-green">Active</span>';
+    var roleCell = canChangeRole ?
+      ('<select data-role-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+
+        ["resident","senior_resident","fellow","consultant","developer"].map(function(r){ return '<option value="'+r+'" '+(r===u.role?"selected":"")+'>'+esc(roleLabel(r))+'</option>'; }).join("")+
+      '</select> <button class="btn btn-sm" data-apply-role="'+esc(u.username)+'">Apply</button>')
+      : '<span class="chip chip-grey">'+esc(roleLabel(u.role))+'</span>';
+    var profileField = isTraineeRole(u.role) ? "pgYear" : (u.role==="consultant" ? "designation" : null);
+    var profileCell = "—";
+    if(profileField==="pgYear"){
+      profileCell = '<select data-profile-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.pgYears, u.pgYear)+'</select> '+
+        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="pgYear">Save</button>';
+    } else if(profileField==="designation"){
+      profileCell = '<select data-profile-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.consultantDesignations, u.designation)+'</select> '+
+        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="designation">Save</button>';
+    }
+    return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td>'+roleCell+'</td><td>'+profileCell+'</td><td>'+statusChip+'</td>'+
+      '<td style="white-space:nowrap;">'+
+        '<button class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-toggle-active="'+esc(u.username)+'" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> '+
+        '<button class="btn btn-sm btn-danger" data-delete-user="'+esc(u.username)+'">Delete</button>'+
+      '</td></tr>';
+  }
+  function renderUserAccountsTable(rows, canChangeRole){
+    return '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Status</th><th></th></tr></thead><tbody>'+
+      rows.map(function(u){ return userAccountRow(u, canChangeRole); }).join("")+
+    '</tbody></table></div>';
+  }
+
   function renderDeveloperUsers(){
     if(state.loading) return '<div class="empty-state">Loading users…</div>';
     var rows = state.devUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
     renderCreateUserForm()+
     '<div class="card"><h2>All accounts ('+rows.length+')</h2>'+
-    '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th>Change role</th><th></th></tr></thead><tbody>'+
-      rows.map(function(u){
-        var statusChip = u.active===false ? '<span class="chip chip-red">Deactivated</span>' : '<span class="chip chip-green">Active</span>';
-        return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td><span class="chip chip-grey">'+esc(u.role)+'</span></td><td>'+statusChip+'</td>'+
-        '<td><select data-role-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+
-          ["resident","consultant","developer"].map(function(r){ return '<option '+(r===u.role?"selected":"")+'>'+r+'</option>'; }).join("")+
-        '</select> <button class="btn btn-sm" data-apply-role="'+esc(u.username)+'">Apply</button></td>'+
-        '<td><button class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-toggle-active="'+esc(u.username)+'" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button></td></tr>';
-      }).join("")+
-    '</tbody></table></div></div>';
+    renderUserAccountsTable(rows, true)+
+    '</div>';
+  }
+
+  function renderManageUsers(){
+    if(state.loading) return '<div class="empty-state">Loading accounts…</div>';
+    var rows = state.manageUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
+    return ''+
+    '<div class="card"><h2>Manage accounts ('+rows.length+')</h2>'+
+      '<p class="muted" style="margin-bottom:14px;">Update a trainee’s batch as they progress, or a consultant’s designation on promotion, and deactivate or delete accounts that no longer need access. Role changes and password resets stay Developer-only.</p>'+
+      renderUserAccountsTable(rows, false)+
+    '</div>';
+  }
+
+  function renderSignupApprovals(){
+    if(state.loading) return '<div class="empty-state">Loading sign-up requests…</div>';
+    var rows = state.signupRequests.slice().sort(function(a,b){ return (a.createdAt||"").localeCompare(b.createdAt||""); });
+    return ''+
+    '<div class="card"><h2>Pending sign-ups ('+rows.length+')</h2>'+
+      '<p class="muted" style="margin-bottom:14px;">New accounts wait here until someone eligible approves them — approving lets them sign in right away; rejecting deletes the request outright.</p>'+
+      (rows.length===0 ? '<div class="empty-state">Nothing waiting on you.</div>' :
+      '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Unit</th><th>Requested</th><th></th></tr></thead><tbody>'+
+        rows.map(function(u){
+          return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td><span class="chip chip-grey">'+esc(roleLabel(u.role))+'</span></td>'+
+          '<td>'+esc(u.pgYear || u.designation || "—")+'</td><td>'+unitShortHtml(u.unit)+'</td><td class="tabular">'+fmtDateTime(u.createdAt)+'</td>'+
+          '<td style="white-space:nowrap;"><button class="btn btn-sm btn-primary" data-approve-signup="'+esc(u.username)+'">Approve</button> <button class="btn btn-sm btn-danger" data-reject-signup="'+esc(u.username)+'">Reject</button></td></tr>';
+        }).join("")+
+      '</tbody></table></div>')+
+    '</div>';
   }
 
   function renderDeveloperPasswordRequests(){
@@ -1978,13 +2144,13 @@
 
   function renderDeveloperData(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
-    var residentCount = state.devUsers.filter(function(u){return u.role==="resident";}).length;
+    var traineeCount = state.devUsers.filter(function(u){return isTraineeRole(u.role);}).length;
     var consultantCount = state.devUsers.filter(function(u){return u.role==="consultant";}).length;
     var devCount = state.devUsers.filter(function(u){return u.role==="developer";}).length;
     return ''+
     '<div class="stat-grid">'+
       statTile(state.devAllEntries.length,"Total entries")+
-      statTile(residentCount,"Residents")+
+      statTile(traineeCount,"Trainees")+
       statTile(consultantCount,"Consultants")+
       statTile(devCount,"Developers")+
     '</div>'+
@@ -2172,13 +2338,13 @@
     }
     if(!state.user){
       var mode = state.authMode;
-      app.innerHTML = mode==="signup" ? renderSignup() : (mode==="dev-login" ? renderDevLogin() : (mode==="forgot" ? renderForgot() : renderLogin()));
+      app.innerHTML = mode==="signup" ? renderSignup() : (mode==="dev-login" ? renderDevLogin() : (mode==="forgot" ? renderForgot() : (mode==="signup-pending" ? renderSignupPending() : renderLogin())));
       wireAuthEvents();
       return;
     }
     var inner = "";
     if(state.view==="dashboard"){
-      inner = state.user.role==="resident" ? renderDashboardResident() : (state.user.role==="consultant" ? renderDashboardConsultant() : renderDashboardDeveloper());
+      inner = isTraineeRole(state.user.role) ? renderDashboardResident() : (state.user.role==="consultant" ? renderDashboardConsultant() : renderDashboardDeveloper());
     }
     else if(state.view==="resident-log") inner = renderResidentLog();
     else if(state.view==="resident-entries") inner = renderResidentEntries();
@@ -2191,6 +2357,8 @@
     else if(state.view==="developer-lists") inner = renderDeveloperLists();
     else if(state.view==="developer-roles") inner = renderDeveloperRoles();
     else if(state.view==="developer-data") inner = renderDeveloperData();
+    else if(state.view==="signup-approvals") inner = renderSignupApprovals();
+    else if(state.view==="manage-users") inner = renderManageUsers();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "");
@@ -2251,6 +2419,10 @@
         displayName: el("su-displayName").value, role: state.signupRole,
         pgYear: (el("su-pgYear")||{}).value, designation: (el("su-designation")||{}).value, unit: (el("su-unit")||{}).value
       });
+    };
+
+    var goLoginFromPending = el("go-login-from-pending"); if(goLoginFromPending) goLoginFromPending.onclick = function(){
+      state.authMode="login"; state.authError=""; render();
     };
   }
 
@@ -2350,6 +2522,29 @@
         setUserActive(u, next);
       };
     });
+    document.querySelectorAll("[data-apply-profile]").forEach(function(b){
+      b.onclick = function(){
+        var u = b.getAttribute("data-apply-profile");
+        var field = b.getAttribute("data-profile-field");
+        var sel = document.querySelector('[data-profile-select="'+u+'"]');
+        if(sel){
+          var patch = {}; patch[field] = sel.value;
+          updateUserProfile(u, patch);
+        }
+      };
+    });
+    document.querySelectorAll("[data-delete-user]").forEach(function(b){
+      b.onclick = function(){ deleteUserAccount(b.getAttribute("data-delete-user")); };
+    });
+
+    // signup approvals (developer + HOD/coordinator/head-of-unit)
+    document.querySelectorAll("[data-approve-signup]").forEach(function(b){
+      b.onclick = function(){ approveSignupRequest(b.getAttribute("data-approve-signup")); };
+    });
+    document.querySelectorAll("[data-reject-signup]").forEach(function(b){
+      b.onclick = function(){ rejectSignupRequest(b.getAttribute("data-reject-signup")); };
+    });
+
     var expE = el("export-entries"); if(expE) expE.onclick = exportEntriesCSV;
     var expU = el("export-users"); if(expU) expU.onclick = exportUsersCSV;
 
