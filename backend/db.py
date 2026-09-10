@@ -58,8 +58,9 @@ DEFAULT_CONFIG = {
     "roleLevels": ["Observed only", "Assisted (2nd assistant)", "Assisted (1st assistant)", "Performed under direct supervision", "Performed under indirect supervision", "Performed independently"],
     "settings": ["Elective", "Emergency"],
     "laterality": ["Right", "Left", "Bilateral", "Not required"],
-    "pgYears": ["JR-1", "JR-2", "JR-3", "Senior Resident"],
+    "pgYears": ["JR-1", "JR-2", "JR-3"],
     "units": DEFAULT_UNITS,
+    "consultantDesignations": ["Assistant Professor", "Associate Professor", "Professor"],
     "diagnoses": ["Chronic Otitis Media", "Chronic Rhinosinusitis", "Deviated Nasal Septum", "Obstructive Sleep Apnea", "Head & Neck Malignancy", "Vocal Cord Palsy", "Otosclerosis", "Congenital Aural Atresia", "Allergic Rhinitis", "Laryngeal Papillomatosis", "Cholesteatoma", "Thyroid Nodule / Goitre"],
     "comorbidities": ["Diabetes Mellitus", "Hypertension", "Coronary Artery Disease", "Chronic Kidney Disease", "COPD / Asthma", "Hypothyroidism", "Immunocompromised", "None"],
     "academicTypes": ["CME", "Journal club", "Paper presentation", "University"],
@@ -69,8 +70,61 @@ DEFAULT_CONFIG = {
 }
 
 
+def _existing_tables(conn):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    return {r["name"] for r in rows}
+
+
+def migrate_users_table(conn):
+    """Adds senior_resident/fellow to the role CHECK constraint and adds the
+    approval_status column. SQLite can't ALTER a CHECK constraint or add a
+    NOT NULL column with a CHECK in place, so an existing `users` table (from
+    a database deployed before this feature) has to be rebuilt: create the
+    new-shape table, copy every row across (existing accounts default to
+    'approved' -- they were already active users, nothing should lock them
+    out), drop the old table, rename the new one into place. A brand new
+    database has no `users` table yet at this point, so this is a no-op and
+    the CREATE TABLE below just makes it fresh with the new shape directly.
+    """
+    if "users" not in _existing_tables(conn):
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "approval_status" in cols:
+        return  # already migrated
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        """CREATE TABLE users_new (
+          username        TEXT PRIMARY KEY,
+          password_hash   TEXT NOT NULL,
+          role            TEXT NOT NULL CHECK (role IN ('resident','senior_resident','fellow','consultant','developer')),
+          display_name    TEXT NOT NULL,
+          pg_year         TEXT,
+          designation     TEXT,
+          unit            TEXT,
+          active          INTEGER NOT NULL DEFAULT 1,
+          approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending','approved')),
+          created_at      TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO users_new
+             (username, password_hash, role, display_name, pg_year, designation, unit, active, approval_status, created_at)
+           SELECT username, password_hash, role, display_name, pg_year, designation, unit, active, 'approved', created_at
+           FROM users"""
+    )
+    conn.execute("DROP TABLE users")
+    conn.execute("ALTER TABLE users_new RENAME TO users")
+    problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+    conn.execute("PRAGMA foreign_keys = ON")
+    if problems:
+        conn.rollback()
+        raise RuntimeError(f"users table migration left dangling foreign keys: {[dict(p) for p in problems]}")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
+    migrate_users_table(conn)
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
