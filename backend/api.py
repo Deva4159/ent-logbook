@@ -167,21 +167,28 @@ def login():
     password = body.get("password") or ""
     require_role = body.get("requireRole")
 
-    rl_key = f"login:{username}:{client_ip()}"
-    if rate_limit(rl_key):
+    # Two separate limits: one keyed to this IP (stops one attacker hammering
+    # from one place), and one keyed to the account alone regardless of IP
+    # (stops an attacker spreading guesses across many IPs/proxies to dodge
+    # the first one -- a real gap in a pure per-IP limit).
+    rl_key_ip = f"login:{username}:{client_ip()}"
+    rl_key_account = f"login:{username}"
+    if rate_limit(rl_key_ip) or rate_limit(rl_key_account):
         return jsonify({"error": "Too many attempts. Wait 15 minutes and try again."}), 429
 
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row:
-        record_attempt(rl_key)
+        record_attempt(rl_key_ip)
+        record_attempt(rl_key_account)
         return jsonify({"error": "No account with that username."}), 401
     if not row["active"]:
         return jsonify({"error": "This account has been deactivated. Ask your Developer admin to reactivate it."}), 403
     if require_role and row["role"] != require_role:
         return jsonify({"error": f"This account is not a {require_role} account."}), 403
     if not verify_password(row["password_hash"], password):
-        record_attempt(rl_key)
+        record_attempt(rl_key_ip)
+        record_attempt(rl_key_account)
         return jsonify({"error": "Incorrect password."}), 401
 
     token = create_session(username)
