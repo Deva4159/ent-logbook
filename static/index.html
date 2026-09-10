@@ -440,9 +440,12 @@
     return allEntries.filter(function(x){ return x.linkedFromId===surgicalEntryId; })[0] || null;
   }
   function findEntryById(id){
+    // id may arrive as a string (every DOM data-* attribute reads back as a
+    // string) while entry.id is a number straight from the JSON API --
+    // compare loosely (==) so a string "12" still matches the number 12.
     var pools = [state.myEntries||[], state.detailEntries||[], state.devAllEntries||[]];
     for(var i=0;i<pools.length;i++){
-      var hit = pools[i].filter(function(x){ return x.id===id; })[0];
+      var hit = pools[i].filter(function(x){ return x.id==id; })[0];
       if(hit) return hit;
     }
     return null;
@@ -487,6 +490,7 @@
   async function dUpdateUser(username, patch){ await api("PATCH","/users/"+encodeURIComponent(username), patch); }
   async function dListUsers(){ return (await api("GET","/users")).users; }
   async function dAddEntry(data){ return (await api("POST","/entries", data)).entry.id; }
+  async function dUpdateEntry(id, data){ return (await api("PATCH","/entries/"+id, data)).entry; }
   async function dDeleteEntry(id){ await api("DELETE","/entries/"+id); }
   async function dListEntriesByAuthor(username){
     var path = username===state.user.username ? "/entries/mine" : "/entries/by-author/"+encodeURIComponent(username);
@@ -720,10 +724,92 @@
       Object.assign(fields, { seminarType:state.config.seminarTypes[0], seminarTypeOther:"", topic:"", venue:"", details:"" });
     }
     if(prefill) Object.assign(fields, prefill);
-    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null };
+    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, linkedCaseId:null, origSnapshot:null };
     render();
   }
   function cancelWizard(){ state.wiz=null; render(); }
+
+  // Re-opens the wizard pre-filled from an existing entry, in edit mode
+  // (state.wiz.editingId set) so the submitX() functions PATCH instead of
+  // creating a new row. Field names already match 1:1 with the wizard's
+  // `fields` shape (both came from the same camelCase convention) except
+  // `consultantChoice`, which the dropdown needs derived from consultantUsername.
+  //
+  // For a surgical entry specifically, also remember (a) whether it already
+  // has a linked Interesting Case entry (so submitSurgical can offer to sync
+  // edits into it) and (b) a snapshot of the fields that case entry actually
+  // shares with this one, so that offer only fires when something shared
+  // really changed.
+  async function editEntry(id){
+    var e = findEntryById(id);
+    if(!e) return;
+    await loadConsultants(); // normally loaded on the way into "Log Entry"; edit jumps straight to the form
+    var type = normType(e);
+    var fields = Object.assign({}, e);
+    fields.consultantChoice = e.consultantUsername || "__other__";
+    startWizard(type, fields);
+    state.wiz.editingId = id;
+    if(type==="surgical"){
+      var linked = findLinkedCase(e.id, state.myEntries||[]);
+      state.wiz.linkedCaseId = linked ? linked.id : null;
+      state.wiz.origSnapshot = {
+        hospitalNumber: e.hospitalNumber||"", age: e.age||"", sex: e.sex||"",
+        diagnoses: (e.diagnoses||[]).slice(), diagnosesSecondary: (e.diagnosesSecondary||[]).slice(),
+        comorbidities: (e.comorbidities||[]).slice(), procedures: (e.procedures||[]).slice()
+      };
+    }
+    state.view = "resident-log";
+    render();
+  }
+
+  // Shallow "did anything the Interesting Case would care about actually
+  // change" check, used to decide whether editing a linked surgical entry
+  // should prompt to sync those changes into the case -- order-insensitive
+  // for the multi-select fields so re-ticking the same set in a different
+  // order doesn't trigger a needless prompt.
+  function arraysEqualLoose(a,b){
+    a = (a||[]).slice().sort(); b = (b||[]).slice().sort();
+    if(a.length!==b.length) return false;
+    for(var i=0;i<a.length;i++){ if(a[i]!==b[i]) return false; }
+    return true;
+  }
+  function sharedCaseFieldsChanged(a,b){
+    if((a.hospitalNumber||"")!==(b.hospitalNumber||"")) return true;
+    if((a.age||"")!==(b.age||"")) return true;
+    if((a.sex||"")!==(b.sex||"")) return true;
+    if(!arraysEqualLoose(a.diagnoses,b.diagnoses)) return true;
+    if(!arraysEqualLoose(a.diagnosesSecondary,b.diagnosesSecondary)) return true;
+    if(!arraysEqualLoose(a.comorbidities,b.comorbidities)) return true;
+    if(!arraysEqualLoose(a.procedures,b.procedures)) return true;
+    return false;
+  }
+
+  // Pushes the shared clinical fields from a just-edited surgical entry into
+  // its linked Interesting Case entry. The case entry's own fields (date,
+  // history, examination, comments) are left exactly as they are -- only the
+  // fields the two forms actually have in common are overwritten. Because
+  // the PATCH endpoint replaces every column on the row, the case's own
+  // values for those other fields must be sent back unchanged rather than
+  // omitted, or they'd be wiped to blank.
+  async function applyCaseSync(caseId, source){
+    var caseEntry = findEntryById(caseId);
+    if(!caseEntry) return;
+    var patch = {
+      entryType: "case", date: caseEntry.date,
+      hospitalNumber: source.hospitalNumber, age: source.age, sex: source.sex,
+      diagnoses: source.diagnoses, diagnosesSecondary: source.diagnosesSecondary||[],
+      comorbidities: source.comorbidities, procedures: source.procedures,
+      history: caseEntry.history, examination: caseEntry.examination,
+      comments: caseEntry.comments, linkedFromId: caseEntry.linkedFromId
+    };
+    try{
+      await dUpdateEntry(caseId, patch);
+      state.myEntriesLoaded = false;
+      toast("Linked Interesting Case updated to match.");
+      render();
+      await loadForView();
+    }catch(err){ toast("Could not update the linked Interesting Case."); }
+  }
 
   // Multi-select-with-free-text-add: shared mutation helpers used by every
   // checkbox/add-button wired in wireShellEvents for a state.wiz.fields[key] array.
@@ -810,7 +896,36 @@
       assistants: (el("f-assistants")||{}).value || "", comments: (el("f-comments")||{}).value || "",
       caseReport: caseReport
     };
+    var editingId = state.wiz.editingId;
     try{
+      if(editingId){
+        var linkedCaseId = state.wiz.linkedCaseId || null;
+        var origSnapshot = state.wiz.origSnapshot || null;
+        await dUpdateEntry(editingId, data);
+        state.wiz = null; state.myEntriesLoaded = false;
+        toast("Entry updated.");
+        state.view = "resident-entries";
+        render();
+        await loadForView();
+        if(caseReport==="Yes" && linkedCaseId){
+          // Already chained to an Interesting Case -- only bother asking if
+          // something the two entries actually share has changed.
+          if(!origSnapshot || sharedCaseFieldsChanged(origSnapshot, data)){
+            if(confirm("This surgical entry is linked to an Interesting Case report. Apply these changes (Hospital Number, age/sex, diagnoses, co-morbidities, procedures) to that case entry too?")){
+              await applyCaseSync(linkedCaseId, data);
+            }
+          }
+        } else if(caseReport==="Yes" && !linkedCaseId){
+          // Not linked yet, but the PG has now opted into a case report --
+          // same chain that happens when this option is picked at creation.
+          // (Must switch back to the "resident-log" view before starting the
+          // wizard -- that's the only view that ever renders it.)
+          state.view = "resident-log";
+          toast("Entry updated. Add the interesting-case details below to finish the case report.");
+          startWizard("case", { hospitalNumber:data.hospitalNumber, age:data.age, sex:data.sex, diagnoses:data.diagnoses.slice(), diagnosesSecondary:(data.diagnosesSecondary||[]).slice(), comorbidities:data.comorbidities.slice(), procedures:data.procedures.slice(), linkedFromId:editingId });
+        }
+        return;
+      }
       var newId = await dAddEntry(data);
       state.myEntriesLoaded = false;
       if(caseReport==="Yes"){
@@ -844,10 +959,11 @@
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
       assistants: (el("f-assistants")||{}).value || "", comments: (el("f-comments")||{}).value || ""
     };
+    var otherEditingId = state.wiz.editingId;
     try{
-      await dAddEntry(data);
+      if(otherEditingId){ await dUpdateEntry(otherEditingId, data); } else { await dAddEntry(data); }
       state.wiz = null; state.myEntriesLoaded = false;
-      toast("Entry logged.");
+      toast(otherEditingId ? "Entry updated." : "Entry logged.");
       state.view = "resident-entries";
       render();
       loadForView();
@@ -871,10 +987,11 @@
       procedures: f.procedures, history: history.trim(), examination: examination.trim(),
       comments: (el("f-comments")||{}).value || "", linkedFromId: state.wiz.linkedFromId || null
     };
+    var caseEditingId = state.wiz.editingId;
     try{
-      await dAddEntry(data);
+      if(caseEditingId){ await dUpdateEntry(caseEditingId, data); } else { await dAddEntry(data); }
       state.wiz = null; state.myEntriesLoaded = false;
-      toast("Case logged.");
+      toast(caseEditingId ? "Case updated." : "Case logged.");
       state.view = "resident-entries";
       render();
       loadForView();
@@ -895,10 +1012,11 @@
       date: entryDate, seminarType: typeVal, seminarTypeOther: typeVal==="Other" ? typeOther.trim() : "",
       topic: topic.trim(), venue: (el("f-venue")||{}).value || "", details: details.trim()
     };
+    var seminarEditingId = state.wiz.editingId;
     try{
-      await dAddEntry(data);
+      if(seminarEditingId){ await dUpdateEntry(seminarEditingId, data); } else { await dAddEntry(data); }
       state.wiz = null; state.myEntriesLoaded = false;
-      toast("Seminar/presentation logged.");
+      toast(seminarEditingId ? "Entry updated." : "Seminar/presentation logged.");
       state.view = "resident-entries";
       render();
       loadForView();
@@ -918,10 +1036,11 @@
       date: entryDate, academicType: typeVal, academicTypeOther: typeVal==="Other" ? typeOther.trim() : "",
       details: details.trim()
     };
+    var academicEditingId = state.wiz.editingId;
     try{
-      await dAddEntry(data);
+      if(academicEditingId){ await dUpdateEntry(academicEditingId, data); } else { await dAddEntry(data); }
       state.wiz = null; state.myEntriesLoaded = false;
-      toast("Academic activity logged.");
+      toast(academicEditingId ? "Entry updated." : "Academic activity logged.");
       state.view = "resident-entries";
       render();
       loadForView();
@@ -932,7 +1051,7 @@
     if(!confirm("Delete this entry? This cannot be undone.")) return;
     try{
       await dDeleteEntry(id);
-      state.myEntries = state.myEntries.filter(function(e){ return e.id!==id; });
+      state.myEntries = state.myEntries.filter(function(e){ return e.id!=id; });
       render();
       toast("Entry deleted.");
     }catch(e){ toast("Could not delete this entry."); }
@@ -979,7 +1098,7 @@
       await dUpdateUser(username, {password: newPassword});
       if(requestId){
         await dResolvePasswordRequest(requestId);
-        state.passwordResets = state.passwordResets.map(function(r){ if(r.id===requestId){ r.status="resolved"; r.resolvedBy=state.user.username; } return r; });
+        state.passwordResets = state.passwordResets.map(function(r){ if(r.id==requestId){ r.status="resolved"; r.resolvedBy=state.user.username; } return r; });
       }
       toast("Password reset for "+username+".");
       render();
@@ -1009,10 +1128,20 @@
     if(!confirm("End this appointment now?")) return;
     try{
       await dRemoveRoleAssignment(id);
-      state.roleAssignments = state.roleAssignments.filter(function(a){ return a.id!==id; });
+      state.roleAssignments = state.roleAssignments.filter(function(a){ return a.id!=id; });
       render();
       toast("Appointment ended.");
     }catch(e){ toast("Could not remove this appointment."); }
+  }
+
+  // Whether a role assignment (HOD / Course Coordinator / Head of Unit) is
+  // currently in force, given its start/end datetime-local strings. No end
+  // means open-ended; no start means already started.
+  function isAssignmentActive(a){
+    var now = Date.now();
+    var start = a.startAt ? new Date(a.startAt).getTime() : null;
+    var end = a.endAt ? new Date(a.endAt).getTime() : null;
+    return (start===null || start<=now) && (end===null || now<=end);
   }
 
   async function addUnit(fullName, shortForm, group){
@@ -1473,7 +1602,7 @@
     var f = state.wiz.fields;
     var procOptions = state.config.procedures[f.site] || [];
     return ''+
-    '<div class="card"><h2>Surgical Procedure</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Surgical Procedure</h2>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-site">Site</label><select id="f-site" onchange="window.__entlog_setSite(this.value)">'+
           state.config.categories.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===f.site?"selected":"")+'>'+esc(c.name)+'</option>'; }).join("")+
@@ -1500,7 +1629,7 @@
       '<div class="field"><label for="f-assistants">Assistants <span class="muted">(optional)</span></label><input id="f-assistants" type="text" value="'+esc(f.assistants||"")+'"></div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">Save entry</button></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
     '</div>';
   }
 
@@ -1508,7 +1637,7 @@
     var f = state.wiz.fields;
     var procOptions = state.config.procedures[f.site] || [];
     return ''+
-    '<div class="card"><h2>Other Procedure</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure</h2>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
         '<div class="field"><label for="f-site">Site</label><select id="f-site" onchange="window.__entlog_setSite(this.value)">'+
@@ -1532,7 +1661,7 @@
       consultantField()+
       '<div class="field"><label for="f-assistants">Assistants <span class="muted">(optional)</span></label><input id="f-assistants" type="text" value="'+esc(f.assistants||"")+'"></div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">Save entry</button></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
     '</div>';
   }
 
@@ -1543,7 +1672,7 @@
     return ''+
     '<div class="card">'+
       (state.wiz.linkedFromId ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Pre-filled from the surgical procedure you just logged — add the history and examination findings to finish.</div>' : '')+
-      '<h2>Interesting Case</h2>'+
+      '<h2>'+(state.wiz.editingId?"Edit ":"")+'Interesting Case</h2>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
@@ -1559,14 +1688,14 @@
       '<div class="field"><label for="f-history">Brief History</label><textarea id="f-history">'+esc(f.history||"")+'</textarea></div>'+
       '<div class="field"><label for="f-examination">Examination Findings</label><textarea id="f-examination">'+esc(f.examination||"")+'</textarea></div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">Save case</button></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save case")+'</button></div>'+
     '</div>';
   }
 
   function renderAcademicForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>Academic Participation</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Academic Participation</h2>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
         '<div class="field"><label for="f-academicType">Type</label><select id="f-academicType" onchange="window.__entlog_toggleAcademicOther(this.value)">'+
@@ -1576,14 +1705,14 @@
       '</div>'+
       '<div class="field" id="academic-other-wrap" style="'+(f.academicType==="Other"?"":"display:none;")+'"><label for="f-academicTypeOther">Describe the activity type</label><input id="f-academicTypeOther" type="text" value="'+esc(f.academicTypeOther||"")+'"></div>'+
       '<div class="field"><label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">Save activity</button></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
     '</div>';
   }
 
   function renderSeminarForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>Seminar / Presentation</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Seminar / Presentation</h2>'+
       '<p class="muted" style="margin-bottom:16px;">For seminars, lectures or case presentations <b>you</b> conducted — not ones you attended (log those as Academic Participation).</p>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
@@ -1596,7 +1725,7 @@
       '<div class="field"><label for="f-topic">Topic / Title</label><input id="f-topic" type="text" value="'+esc(f.topic||"")+'" placeholder="e.g. Approach to vertigo in primary care"></div>'+
       '<div class="field"><label for="f-venue">Venue / audience <span class="muted">(optional)</span></label><input id="f-venue" type="text" value="'+esc(f.venue||"")+'" placeholder="e.g. Departmental seminar, Unit 4"></div>'+
       '<div class="field"><label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">Save activity</button></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
     '</div>';
   }
 
@@ -1640,7 +1769,7 @@
           '<td>'+entryConsultantAndAssistants(r)+'</td>'+
           '<td>'+caseReportCell(r, rows)+'</td>'+
           '<td>'+unitShortHtml(r.unit)+'</td>'+
-          '<td><button class="btn btn-sm btn-danger" data-del="'+r.id+'">Delete</button></td>'+
+          '<td style="white-space:nowrap;"><button class="btn btn-sm" data-view-entry="'+r.id+'">View</button> <button class="btn btn-sm" data-edit-entry="'+r.id+'">Edit</button> <button class="btn btn-sm btn-danger" data-del="'+r.id+'">Delete</button></td>'+
         '</tr>';
       }).join(""))+
     '</tbody></table></div></div>';
@@ -2143,12 +2272,16 @@
     });
     var logout = el("btn-logout"); if(logout) logout.onclick = doLogout;
 
-    // entry-detail modal (opened from the Case Report "Yes" link in My Entries)
+    // entry-detail modal (opened from the Case Report "Yes" link, or the
+    // View button, in My Entries)
     document.querySelectorAll("[data-view-entry]").forEach(function(b){
       b.onclick = function(){ state.viewingEntryId = b.getAttribute("data-view-entry"); render(); };
     });
     var entryDetailClose = el("entry-detail-close"); if(entryDetailClose) entryDetailClose.onclick = function(){ state.viewingEntryId = null; render(); };
     var entryDetailOverlay = el("entry-detail-overlay"); if(entryDetailOverlay) entryDetailOverlay.onclick = function(ev){ if(ev.target===entryDetailOverlay){ state.viewingEntryId = null; render(); } };
+    document.querySelectorAll("[data-edit-entry]").forEach(function(b){
+      b.onclick = function(){ editEntry(b.getAttribute("data-edit-entry")); };
+    });
 
     // entry wizard
     document.querySelectorAll("[data-start]").forEach(function(b){
