@@ -11,12 +11,13 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
   username        TEXT PRIMARY KEY,
   password_hash   TEXT NOT NULL,
-  role            TEXT NOT NULL CHECK (role IN ('resident','consultant','developer')),
+  role            TEXT NOT NULL CHECK (role IN ('resident','senior_resident','fellow','consultant','developer')),
   display_name    TEXT NOT NULL,
   pg_year         TEXT,
   designation     TEXT,
   unit            TEXT,
   active          INTEGER NOT NULL DEFAULT 1,
+  approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending','approved')),
   created_at      TEXT NOT NULL
 );
 
