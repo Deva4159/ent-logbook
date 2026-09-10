@@ -1015,16 +1015,6 @@
     }catch(e){ toast("Could not remove this appointment."); }
   }
 
-  // Whether a role assignment (HOD / Course Coordinator / Head of Unit) is
-  // currently in force, given its start/end datetime-local strings. No end
-  // means open-ended; no start means already started.
-  function isAssignmentActive(a){
-    var now = Date.now();
-    var start = a.startAt ? new Date(a.startAt).getTime() : null;
-    var end = a.endAt ? new Date(a.endAt).getTime() : null;
-    return (start===null || start<=now) && (end===null || now<=end);
-  }
-
   async function addUnit(fullName, shortForm, group){
     fullName=(fullName||"").trim(); shortForm=(shortForm||"").trim();
     if(!fullName || !shortForm){ toast("Enter both a full name and a short form."); return; }
