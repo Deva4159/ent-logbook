@@ -28,9 +28,16 @@ def row_to_user(row):
     if row is None:
         return None
     d = dict(row)
-    d.pop("password_hash", None)
-    d["active"] = bool(d.get("active", 1))
-    return d
+    return {
+        "username": d["username"],
+        "role": d["role"],
+        "displayName": d["display_name"],
+        "pgYear": d["pg_year"],
+        "designation": d["designation"],
+        "unit": d["unit"],
+        "active": bool(d.get("active", 1)),
+        "createdAt": d["created_at"],
+    }
 
 
 def get_config():
@@ -452,9 +459,9 @@ def export_entries_csv():
 def export_users_csv():
     rows = [row_to_user(r) for r in get_db().execute("SELECT * FROM users").fetchall()]
     columns = [
-        ("username", "Username"), ("display_name", "Display Name"), ("role", "Role"),
-        ("unit", "Unit"), ("pg_year", "PG Year"), ("designation", "Designation"),
-        ("active", "Active"), ("created_at", "Created At"),
+        ("username", "Username"), ("displayName", "Display Name"), ("role", "Role"),
+        ("unit", "Unit"), ("pgYear", "PG Year"), ("designation", "Designation"),
+        ("active", "Active"), ("createdAt", "Created At"),
     ]
     csv_text = _export_csv(rows, columns)
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=ent-logbook-users.csv"})
@@ -588,6 +595,21 @@ def update_config():
 
 
 # ---------------------------------------------------------- role assigns
+def role_assignment_row_to_dict(row):
+    d = dict(row)
+    return {
+        "id": d["id"],
+        "consultantUsername": d["consultant_username"],
+        "consultantDisplayName": d["consultant_display_name"],
+        "role": d["assignment_role"],
+        "unit": d["unit"],
+        "startAt": d["start_at"],
+        "endAt": d["end_at"],
+        "assignedBy": d["assigned_by"],
+        "assignedAt": d["assigned_at"],
+    }
+
+
 @api.get("/role-assignments")
 @login_required()
 def list_role_assignments():
@@ -599,7 +621,7 @@ def list_role_assignments():
             "SELECT * FROM role_assignments WHERE consultant_username = ? ORDER BY assigned_at DESC",
             (g.user["username"],),
         ).fetchall()
-    return jsonify({"roleAssignments": [dict(r) for r in rows]})
+    return jsonify({"roleAssignments": [role_assignment_row_to_dict(r) for r in rows]})
 
 
 @api.post("/role-assignments")
@@ -617,7 +639,7 @@ def add_role_assignment():
     )
     db.commit()
     row = db.execute("SELECT * FROM role_assignments WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify({"roleAssignment": dict(row)})
+    return jsonify({"roleAssignment": role_assignment_row_to_dict(row)})
 
 
 @api.delete("/role-assignments/<int:assignment_id>")
