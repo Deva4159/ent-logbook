@@ -385,6 +385,56 @@ def delete_entry(entry_id):
     return jsonify({"ok": True})
 
 
+@api.patch("/entries/<int:entry_id>")
+@login_required()
+def update_entry(entry_id):
+    # Same-author-only edit (developer can also fix a resident's entry), so
+    # mistakes and incomplete entries can be corrected after the fact instead
+    # of only ever being deletable. Recomputes unit from the (possibly
+    # changed) date, exactly like create_entry does.
+    db = get_db()
+    existing = db.execute("SELECT author_username, entry_type FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not existing:
+        return jsonify({"error": "not_found"}), 404
+    if existing["author_username"] != g.user["username"] and g.user["role"] != "developer":
+        return jsonify({"error": "forbidden"}), 403
+
+    body = request.get_json(force=True, silent=True) or {}
+    entry_type = body.get("entryType") or existing["entry_type"]
+    if entry_type not in ENTRY_TYPES:
+        return jsonify({"error": "Unknown entry type."}), 400
+    entry_date = body.get("date") or datetime.date.today().isoformat()
+    unit = _resolve_unit_for_entry(existing["author_username"], entry_date)
+
+    db.execute(
+        """UPDATE entries SET
+            entry_type=?, unit=?, entry_date=?, site=?, procedures=?,
+            setting=?, other_setting_type=?, hospital_number=?, age=?, sex=?, diagnoses=?,
+            diagnoses_secondary=?, comorbidities=?, laterality=?, role_level=?, consultant=?,
+            consultant_username=?, assistants=?, comments=?, case_report=?, linked_from_id=?,
+            history=?, examination=?, academic_type=?, academic_type_other=?, seminar_type=?,
+            seminar_type_other=?, topic=?, venue=?, details=?
+        WHERE id = ?""",
+        (
+            entry_type, unit, entry_date,
+            body.get("site"), json.dumps(body.get("procedures") or []),
+            body.get("setting"), body.get("otherSettingType"), body.get("hospitalNumber"),
+            body.get("age"), body.get("sex"), json.dumps(body.get("diagnoses") or []),
+            json.dumps(body.get("diagnosesSecondary") or []), json.dumps(body.get("comorbidities") or []),
+            body.get("laterality"), body.get("role"), body.get("consultant"),
+            body.get("consultantUsername"), body.get("assistants"), body.get("comments"),
+            body.get("caseReport"), body.get("linkedFromId"),
+            body.get("history"), body.get("examination"), body.get("academicType"),
+            body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
+            body.get("topic"), body.get("venue"), body.get("details"),
+            entry_id,
+        ),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    return jsonify({"entry": entry_row_to_dict(row)})
+
+
 @api.get("/entries/roster")
 @login_required(role="consultant")
 def roster_entries():
@@ -546,11 +596,24 @@ def update_user(username):
 
 
 # --------------------------------------------------------- password admin
+def password_reset_row_to_dict(row):
+    d = dict(row)
+    return {
+        "id": d["id"],
+        "username": d["username"],
+        "note": d["note"],
+        "status": d["status"],
+        "requestedAt": d["requested_at"],
+        "resolvedAt": d["resolved_at"],
+        "resolvedBy": d["resolved_by"],
+    }
+
+
 @api.get("/password-requests")
 @login_required(role="developer")
 def list_password_requests():
     rows = get_db().execute("SELECT * FROM password_resets ORDER BY requested_at DESC").fetchall()
-    return jsonify({"requests": [dict(r) for r in rows]})
+    return jsonify({"requests": [password_reset_row_to_dict(r) for r in rows]})
 
 
 @api.post("/password-requests/<int:req_id>/resolve")
