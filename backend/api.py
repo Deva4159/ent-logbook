@@ -109,7 +109,27 @@ def entry_row_to_dict(row):
         "topic": d["topic"],
         "venue": d["venue"],
         "details": d["details"],
+        "paperStatus": d.get("paper_status"),
     }
+
+
+# Fields excluded from the edit-history diff: identity/authorship never
+# changes, and createdAt is set once at insert and never touched by an edit.
+ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt"}
+
+PAPER_STATUSES = {"not_done", "in_progress", "done"}
+
+
+def _entry_can_set_paper_status(user, entry_row):
+    """Only the PG who wrote an Interesting Case linked to a surgical entry
+    can move its paper-status to-do -- Senior Residents/Fellows don't get
+    this tracker, and it's a private to-do, not something anyone else sets."""
+    return (
+        entry_row["entry_type"] == "case"
+        and entry_row["linked_from_id"] is not None
+        and user["username"] == entry_row["author_username"]
+        and user["role"] == "resident"
+    )
 
 
 def is_assignment_active(a):
@@ -198,10 +218,18 @@ def signup():
     # nobody exists yet who could approve it).
     approval_status = "approved" if is_first_user else "pending"
 
+    # A Fellow belongs to one parent/home unit, same idea as a consultant's
+    # home unit, chosen at sign-up -- their day-to-day postings (including to
+    # other units) are still tracked separately via Postings, unaffected by
+    # this. Required, unlike a consultant's unit, because it's how a Fellow
+    # shows up in that unit's consultant/assistant picker from day one.
+    unit = body.get("unit") if final_role in ("consultant", "fellow") else None
+    if final_role == "fellow" and not unit:
+        return jsonify({"error": "Fellows must select a parent unit at sign-up."}), 400
+
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = body.get("pgYear") if final_role in TRAINEE_ROLES else None
     designation = body.get("designation") if final_role == "consultant" else None
-    unit = body.get("unit") if final_role == "consultant" else None
 
     db.execute(
         "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active, approval_status, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)",
@@ -375,6 +403,12 @@ def create_entry():
     unit = _resolve_unit_for_entry(g.user["username"], entry_date)
     now = datetime.datetime.utcnow().isoformat() + "Z"
 
+    linked_from_id = body.get("linkedFromId")
+    # A case entry linked to a surgical entry starts its PG paper-writeup
+    # to-do at 'not_done'; every other entry (including an unlinked case,
+    # or a case logged by a Senior Resident/Fellow) gets no tracker at all.
+    paper_status = "not_done" if (entry_type == "case" and linked_from_id and g.user["role"] == "resident") else None
+
     db = get_db()
     cur = db.execute(
         """INSERT INTO entries (
@@ -383,8 +417,8 @@ def create_entry():
             diagnoses_secondary, comorbidities, laterality, role_level, consultant,
             consultant_username, assistants, comments, case_report, linked_from_id,
             history, examination, academic_type, academic_type_other, seminar_type,
-            seminar_type_other, topic, venue, details
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            seminar_type_other, topic, venue, details, paper_status
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             g.user["username"], entry_type, unit, entry_date, now,
             body.get("site"), json.dumps(body.get("procedures") or []),
@@ -393,10 +427,10 @@ def create_entry():
             json.dumps(body.get("diagnosesSecondary") or []), json.dumps(body.get("comorbidities") or []),
             body.get("laterality"), body.get("role"), body.get("consultant"),
             body.get("consultantUsername"), body.get("assistants"), body.get("comments"),
-            body.get("caseReport"), body.get("linkedFromId"),
+            body.get("caseReport"), linked_from_id,
             body.get("history"), body.get("examination"), body.get("academicType"),
             body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
-            body.get("topic"), body.get("venue"), body.get("details"),
+            body.get("topic"), body.get("venue"), body.get("details"), paper_status,
         ),
     )
     db.commit()
@@ -412,6 +446,58 @@ def list_my_entries():
         (g.user["username"],),
     ).fetchall()
     return jsonify({"entries": [entry_row_to_dict(r) for r in rows]})
+
+
+@api.get("/reminders")
+@login_required()
+def reminders():
+    # Trainee-only, on purpose: postings (and the paper to-do) are theirs,
+    # not a consultant's. Returns structured facts, not pre-written copy --
+    # the frontend composes the message using its own unit labels and shows
+    # only the single highest-priority one, so the dashboard never stacks
+    # more than one reminder line at a time.
+    if g.user["role"] not in TRAINEE_ROLES:
+        return jsonify({"reminders": []})
+    db = get_db()
+    username = g.user["username"]
+    today = datetime.date.today()
+    today_str = today.isoformat()
+    out = []
+
+    postings = get_postings(username)
+    current = [p for p in postings if p["startDate"] and p["startDate"] <= today_str and (not p["endDate"] or p["endDate"] >= today_str)]
+    for p in current:
+        if not p["endDate"]:
+            continue
+        days_left = (datetime.date.fromisoformat(p["endDate"]) - today).days
+        if 0 <= days_left <= 7:
+            has_next = any(q["startDate"] and q["startDate"] > p["endDate"] for q in postings)
+            out.append({
+                "type": "end_of_posting", "priority": 1, "unit": p["unit"],
+                "endDate": p["endDate"], "daysLeft": days_left, "hasNextPosting": has_next,
+            })
+
+    last7 = (today - datetime.timedelta(days=7)).isoformat()
+    week_count = db.execute(
+        "SELECT COUNT(*) AS n FROM entries WHERE author_username=? AND entry_date >= ?", (username, last7)
+    ).fetchone()["n"]
+    pending_papers = None
+    if g.user["role"] == "resident":
+        pending_papers = db.execute(
+            "SELECT COUNT(*) AS n FROM entries WHERE author_username=? AND entry_type='case' "
+            "AND linked_from_id IS NOT NULL AND (paper_status IS NULL OR paper_status != 'done')",
+            (username,),
+        ).fetchone()["n"]
+    out.append({"type": "weekly", "priority": 2, "weekCount": week_count, "pendingPapers": pending_papers})
+
+    last_entry = db.execute(
+        "SELECT MAX(entry_date) AS d FROM entries WHERE author_username=?", (username,)
+    ).fetchone()["d"]
+    if not last_entry or (today - datetime.date.fromisoformat(last_entry)).days >= 2:
+        out.append({"type": "daily", "priority": 3, "lastEntryDate": last_entry})
+
+    out.sort(key=lambda r: r["priority"])
+    return jsonify({"reminders": out})
 
 
 @api.get("/entries/<int:entry_id>")
@@ -452,9 +538,11 @@ def update_entry(entry_id):
     # Same-author-only edit (developer can also fix a resident's entry), so
     # mistakes and incomplete entries can be corrected after the fact instead
     # of only ever being deletable. Recomputes unit from the (possibly
-    # changed) date, exactly like create_entry does.
+    # changed) date, exactly like create_entry does. Every actual change is
+    # captured in entry_edits so the author and the relevant oversight roles
+    # can see what changed, when, and by whom.
     db = get_db()
-    existing = db.execute("SELECT author_username, entry_type FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    existing = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not existing:
         return jsonify({"error": "not_found"}), 404
     if existing["author_username"] != g.user["username"] and g.user["role"] != "developer":
@@ -464,8 +552,30 @@ def update_entry(entry_id):
     entry_type = body.get("entryType") or existing["entry_type"]
     if entry_type not in ENTRY_TYPES:
         return jsonify({"error": "Unknown entry type."}), 400
-    entry_date = body.get("date") or datetime.date.today().isoformat()
-    unit = _resolve_unit_for_entry(existing["author_username"], entry_date)
+    entry_date = body.get("date") or existing["entry_date"]
+    # Only re-resolve unit from postings when the caller is actually changing
+    # the date -- recomputing it unconditionally on every PATCH (including a
+    # lightweight one that only sets e.g. paperStatus or comments) silently
+    # blanks an entry's unit to "" whenever the author has no posting
+    # covering that date at PATCH time (a gap between postings, or a historic
+    # entry from before posting-based resolution existed). Otherwise, the
+    # entry keeps whatever unit it already had, exactly like every other
+    # field this function doesn't touch.
+    unit = _resolve_unit_for_entry(existing["author_username"], entry_date) if "date" in body else existing["unit"]
+
+    # paper_status is a separate, narrowly-gated to-do the PG sets on their
+    # own linked case -- never silently wiped by a regular edit that doesn't
+    # mention it, and never settable by anyone the entry doesn't belong to.
+    if "paperStatus" in body:
+        new_paper_status = body.get("paperStatus")
+        if new_paper_status not in PAPER_STATUSES:
+            return jsonify({"error": "Invalid paper status."}), 400
+        if not _entry_can_set_paper_status(g.user, existing):
+            return jsonify({"error": "forbidden"}), 403
+    else:
+        new_paper_status = existing["paper_status"]
+
+    before = entry_row_to_dict(existing)
 
     db.execute(
         """UPDATE entries SET
@@ -474,26 +584,77 @@ def update_entry(entry_id):
             diagnoses_secondary=?, comorbidities=?, laterality=?, role_level=?, consultant=?,
             consultant_username=?, assistants=?, comments=?, case_report=?, linked_from_id=?,
             history=?, examination=?, academic_type=?, academic_type_other=?, seminar_type=?,
-            seminar_type_other=?, topic=?, venue=?, details=?
+            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?
         WHERE id = ?""",
         (
             entry_type, unit, entry_date,
-            body.get("site"), json.dumps(body.get("procedures") or []),
-            body.get("setting"), body.get("otherSettingType"), body.get("hospitalNumber"),
-            body.get("age"), body.get("sex"), json.dumps(body.get("diagnoses") or []),
-            json.dumps(body.get("diagnosesSecondary") or []), json.dumps(body.get("comorbidities") or []),
-            body.get("laterality"), body.get("role"), body.get("consultant"),
-            body.get("consultantUsername"), body.get("assistants"), body.get("comments"),
-            body.get("caseReport"), body.get("linkedFromId"),
-            body.get("history"), body.get("examination"), body.get("academicType"),
-            body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
-            body.get("topic"), body.get("venue"), body.get("details"),
+            body.get("site", before["site"]), json.dumps(body.get("procedures", before["procedures"]) or []),
+            body.get("setting", before["setting"]), body.get("otherSettingType", before["otherSettingType"]),
+            body.get("hospitalNumber", before["hospitalNumber"]),
+            body.get("age", before["age"]), body.get("sex", before["sex"]),
+            json.dumps(body.get("diagnoses", before["diagnoses"]) or []),
+            json.dumps(body.get("diagnosesSecondary", before["diagnosesSecondary"]) or []),
+            json.dumps(body.get("comorbidities", before["comorbidities"]) or []),
+            body.get("laterality", before["laterality"]), body.get("role", before["role"]),
+            body.get("consultant", before["consultant"]),
+            body.get("consultantUsername", before["consultantUsername"]),
+            body.get("assistants", before["assistants"]), body.get("comments", before["comments"]),
+            body.get("caseReport", before["caseReport"]), body.get("linkedFromId", before["linkedFromId"]),
+            body.get("history", before["history"]), body.get("examination", before["examination"]),
+            body.get("academicType", before["academicType"]),
+            body.get("academicTypeOther", before["academicTypeOther"]),
+            body.get("seminarType", before["seminarType"]),
+            body.get("seminarTypeOther", before["seminarTypeOther"]),
+            body.get("topic", before["topic"]), body.get("venue", before["venue"]),
+            body.get("details", before["details"]), new_paper_status,
             entry_id,
         ),
     )
-    db.commit()
+
     row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
-    return jsonify({"entry": entry_row_to_dict(row)})
+    after = entry_row_to_dict(row)
+    changes = {
+        k: {"old": before[k], "new": after[k]}
+        for k in after
+        if k not in ENTRY_HISTORY_IGNORE and before.get(k) != after[k]
+    }
+    if changes:
+        db.execute(
+            "INSERT INTO entry_edits (entry_id, edited_by, edited_at, changes) VALUES (?,?,?,?)",
+            (entry_id, g.user["username"], datetime.datetime.utcnow().isoformat() + "Z", json.dumps(changes)),
+        )
+    db.commit()
+    return jsonify({"entry": after})
+
+
+def _can_view_entry_history(user, entry_row):
+    if user["role"] == "developer" or user["username"] == entry_row["author_username"]:
+        return True
+    if user["role"] != "consultant":
+        return False
+    caps = user_capabilities(user["username"])
+    if caps["isHod"] or caps["isCoordinator"]:
+        return True
+    if caps["isHeadOfUnit"]:
+        scope = consultant_scope(user["username"])
+        return entry_row["unit"] in scope["units"]
+    return False
+
+
+@api.get("/entries/<int:entry_id>/history")
+@login_required()
+def entry_history(entry_id):
+    db = get_db()
+    entry_row = db.execute("SELECT author_username, unit FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not entry_row:
+        return jsonify({"error": "not_found"}), 404
+    if not _can_view_entry_history(g.user, entry_row):
+        return jsonify({"error": "forbidden"}), 403
+    rows = db.execute(
+        "SELECT edited_by, edited_at, changes FROM entry_edits WHERE entry_id = ? ORDER BY id ASC", (entry_id,)
+    ).fetchall()
+    edits = [{"editedBy": r["edited_by"], "editedAt": r["edited_at"], "changes": json.loads(r["changes"])} for r in rows]
+    return jsonify({"edits": edits})
 
 
 @api.get("/entries/roster")
@@ -574,28 +735,63 @@ def _export_csv(rows, columns):
     return buf.getvalue()
 
 
+def _joined(field):
+    return lambda r: "; ".join(r.get(field) or [])
+
+
+ENTRY_EXPORT_COLUMNS = [
+    ("date", "Date"), ("authorUsername", "Resident"), ("entryType", "Type"), ("unit", "Unit"),
+    ("site", "Site"), (_joined("procedures"), "Procedures"), ("hospitalNumber", "Hospital Number"),
+    ("age", "Age"), ("sex", "Sex"), (_joined("diagnoses"), "Primary Diagnoses"),
+    (_joined("diagnosesSecondary"), "Secondary Diagnoses"), (_joined("comorbidities"), "Comorbidities"),
+    ("laterality", "Side"), ("setting", "Emergency/Elective"), ("role", "Role/Entrustment"),
+    ("consultant", "Consultant"), ("assistants", "Assistants"), ("otherSettingType", "Other-procedure setting"),
+    ("history", "Brief History"), ("examination", "Examination Findings"), ("academicType", "Academic Type"),
+    ("academicTypeOther", "Academic Type (other)"), ("seminarType", "Seminar Type"),
+    ("seminarTypeOther", "Seminar Type (other)"), ("topic", "Topic"), ("venue", "Venue"),
+    ("details", "Details"), ("comments", "Comments/Complications"), ("paperStatus", "Paper Status"),
+]
+
+
 @api.get("/entries/export.csv")
 @login_required(role="developer")
 def export_entries_csv():
     rows = [entry_row_to_dict(r) for r in get_db().execute("SELECT * FROM entries").fetchall()]
-
-    def joined(field):
-        return lambda r: "; ".join(r.get(field) or [])
-
-    columns = [
-        ("date", "Date"), ("authorUsername", "Resident"), ("entryType", "Type"), ("unit", "Unit"),
-        ("site", "Site"), (joined("procedures"), "Procedures"), ("hospitalNumber", "Hospital Number"),
-        ("age", "Age"), ("sex", "Sex"), (joined("diagnoses"), "Primary Diagnoses"),
-        (joined("diagnosesSecondary"), "Secondary Diagnoses"), (joined("comorbidities"), "Comorbidities"),
-        ("laterality", "Side"), ("setting", "Emergency/Elective"), ("role", "Role/Entrustment"),
-        ("consultant", "Consultant"), ("assistants", "Assistants"), ("otherSettingType", "Other-procedure setting"),
-        ("history", "Brief History"), ("examination", "Examination Findings"), ("academicType", "Academic Type"),
-        ("academicTypeOther", "Academic Type (other)"), ("seminarType", "Seminar Type"),
-        ("seminarTypeOther", "Seminar Type (other)"), ("topic", "Topic"), ("venue", "Venue"),
-        ("details", "Details"), ("comments", "Comments/Complications"),
-    ]
-    csv_text = _export_csv(rows, columns)
+    csv_text = _export_csv(rows, ENTRY_EXPORT_COLUMNS)
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=ent-logbook-entries.csv"})
+
+
+@api.get("/entries/export/mine.csv")
+@login_required()
+def export_my_entries_csv():
+    # Self-service export for everyone, not just the Developer: a trainee
+    # gets their own authored entries; a consultant gets whatever their
+    # consultant_scope() already lets them see (their unit, or everything for
+    # HOD/Coordinator/full-scope Head of Unit); the Developer gets the same
+    # everything the admin export gives them.
+    db = get_db()
+    user = g.user
+    if user["role"] == "developer":
+        rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
+    elif user["role"] == "consultant":
+        scope = consultant_scope(user["username"])
+        if scope["full"]:
+            rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
+        elif scope["units"]:
+            placeholders = ",".join("?" * len(scope["units"]))
+            rows = db.execute(
+                f"SELECT * FROM entries WHERE unit IN ({placeholders}) ORDER BY entry_date DESC, id DESC",
+                tuple(scope["units"]),
+            ).fetchall()
+        else:
+            rows = []
+    else:
+        rows = db.execute(
+            "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (user["username"],)
+        ).fetchall()
+    csv_text = _export_csv([entry_row_to_dict(r) for r in rows], ENTRY_EXPORT_COLUMNS)
+    filename = f"ent-logbook-my-entries-{user['username']}.csv"
+    return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 @api.get("/users/export.csv")
@@ -632,6 +828,34 @@ def list_consultants():
     return jsonify({"users": [row_to_user(r) for r in rows]})
 
 
+@api.get("/units/<unit>/people")
+@login_required()
+def unit_people(unit):
+    # Feeds the Consultant / Assistants pickers when logging a Surgical or
+    # Other Procedure entry: whoever is actually attached to this unit around
+    # this date. Consultants are matched on their static home unit; Senior
+    # Residents and Fellows (who rotate) are matched on an actual posting
+    # covering that date -- exactly the same date-window logic
+    # _resolve_unit_for_entry already uses to pick the entry's own unit, just
+    # run in reverse (who was posted here, not where was I posted).
+    date_str = (request.args.get("date") or "").strip() or datetime.date.today().isoformat()
+    db = get_db()
+    consultants = db.execute(
+        "SELECT username, display_name, role FROM users WHERE role='consultant' AND active=1 AND unit=? ORDER BY display_name",
+        (unit,),
+    ).fetchall()
+    trainees = db.execute(
+        """SELECT DISTINCT u.username, u.display_name, u.role FROM users u
+           JOIN postings p ON p.username = u.username
+           WHERE u.role IN ('senior_resident','fellow') AND u.active = 1 AND p.unit = ?
+             AND p.start_date <= ? AND (p.end_date IS NULL OR p.end_date >= ?)
+           ORDER BY u.display_name""",
+        (unit, date_str, date_str),
+    ).fetchall()
+    people = [{"username": r["username"], "displayName": r["display_name"], "role": r["role"]} for r in list(consultants) + list(trainees)]
+    return jsonify({"people": people})
+
+
 @api.get("/users/<username>")
 @login_required()
 def get_user(username):
@@ -659,10 +883,12 @@ def admin_create_user():
     db = get_db()
     if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": "That username is already taken."}), 409
+    unit = body.get("unit") if role in ("consultant", "fellow") else None
+    if role == "fellow" and not unit:
+        return jsonify({"error": "Fellows must have a parent unit."}), 400
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = body.get("pgYear") if role in TRAINEE_ROLES else None
     designation = body.get("designation") if role == "consultant" else None
-    unit = body.get("unit") if role == "consultant" else None
     # Admin-created accounts are pre-approved -- an admin creating the
     # account directly IS the approval.
     db.execute(
@@ -695,6 +921,11 @@ def update_user(username):
         db.execute("UPDATE users SET pg_year = ? WHERE username = ?", (body.get("pgYear"), username))
     if "designation" in body:
         db.execute("UPDATE users SET designation = ? WHERE username = ?", (body.get("designation"), username))
+    # A Fellow's parent unit, or a consultant's home unit, can change too
+    # (a Fellow reassigned, a consultant transferred) -- same gate as batch/
+    # designation.
+    if "unit" in body:
+        db.execute("UPDATE users SET unit = ? WHERE username = ?", (body.get("unit"), username))
     # Role changes and password resets stay Developer-only -- broader than
     # the specific batch/designation/delete powers HOD was given.
     if caps["isDeveloper"]:

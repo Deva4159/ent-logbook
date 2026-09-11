@@ -122,9 +122,28 @@ def migrate_users_table(conn):
     conn.commit()
 
 
+def migrate_entries_table(conn):
+    """Adds the nullable `paper_status` column to an existing `entries` table
+    (PG write-up tracking for interesting cases linked to a surgical entry).
+    Unlike the users-table role CHECK, this is a plain nullable column with
+    no CHECK constraint, so SQLite's ADD COLUMN handles it directly -- no
+    rebuild needed. A brand new database has no `entries` table yet at this
+    point, so this is a no-op and the CREATE TABLE below makes it fresh with
+    the column already in place.
+    """
+    if "entries" not in _existing_tables(conn):
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    if "paper_status" in cols:
+        return  # already migrated
+    conn.execute("ALTER TABLE entries ADD COLUMN paper_status TEXT")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
+    migrate_entries_table(conn)
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()

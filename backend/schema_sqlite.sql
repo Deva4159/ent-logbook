@@ -63,10 +63,27 @@ CREATE TABLE IF NOT EXISTS entries (
   seminar_type_other    TEXT,
   topic                 TEXT,
   venue                 TEXT,
-  details               TEXT
+  details               TEXT,
+  -- PG write-up tracking for an Interesting Case linked to a surgical entry:
+  -- 'not_done' | 'in_progress' | 'done'. NULL for every other entry --
+  -- validated in the app layer, not a CHECK, so it stays a plain ADD COLUMN
+  -- on an existing database (see migrate_entries_table in db.py).
+  paper_status          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_entries_author ON entries(author_username);
 CREATE INDEX IF NOT EXISTS idx_entries_unit ON entries(unit);
+
+-- One row per actual change made to an entry after it was first created,
+-- so authors and the relevant oversight roles can see who edited what and
+-- when -- never overwritten, entries.id cascade-deletes its history with it.
+CREATE TABLE IF NOT EXISTS entry_edits (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id        INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  edited_by       TEXT NOT NULL,
+  edited_at       TEXT NOT NULL,
+  changes         TEXT NOT NULL -- JSON: {"field": {"old": ..., "new": ...}, ...}
+);
+CREATE INDEX IF NOT EXISTS idx_entry_edits_entry ON entry_edits(entry_id);
 
 CREATE TABLE IF NOT EXISTS role_assignments (
   id                      INTEGER PRIMARY KEY AUTOINCREMENT,
