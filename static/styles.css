@@ -1,0 +1,294 @@
+  /* ---------------------------------------------------------------------
+     Design tokens -- clinical/minimal palette (2026 redesign). Cooler
+     neutrals than the original warm/editorial palette; per-site category
+     colors are kept (they're a real scanning aid) but coordinated to a
+     single muted family and moved off the new brand-accent hue so a
+     category swatch is never mistaken for a status chip. Token NAMES are
+     unchanged from the original palette on purpose -- app.js and the rest
+     of this file reference them by name in dozens of places, and keeping
+     names stable means this redesign is a values-only change here.
+  --------------------------------------------------------------------- */
+  :root{
+    --ink:#1B222C; --ink-soft:#5B6472; --paper:#F5F6F8; --surface:#FFFFFF; --surface-2:#EEF0F3;
+    --line:#DCE1E6; --teal:#1E6E82; --teal-ink:#14505F; --teal-bg:#E3EEF1;
+    --amber:#8A5D00; --amber-bg:#F6EFDD; --red:#9A3B39; --red-bg:#F5E4E3; --green:#2F7D5B; --green-bg:#E1F0E7;
+    --violet:#5C4FA0; --violet-bg:#EAE7F5;
+    --ink-line:#1B222C;
+    --shadow:0 1px 2px rgba(20,26,32,.06), 0 6px 18px rgba(20,26,32,.07);
+    --cat-ear:#8F7248; --cat-nose:#4C7C93; --cat-throat:#9C5252; --cat-hn:#6B8A5A; --cat-skull:#7A6BA8; --cat-trauma:#B06A3A;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ink:#E7EAEE; --ink-soft:#9AA3AF; --paper:#14181D; --surface:#1B2027; --surface-2:#232933;
+      --line:#313A45; --teal:#6FB3C4; --teal-ink:#9CD2DF; --teal-bg:#1E333A;
+      --amber:#E0B663; --amber-bg:#3A2F14; --red:#E08F8C; --red-bg:#3A2422; --green:#7FBF9E; --green-bg:#1E332A;
+      --violet:#B3A6DE; --violet-bg:#2A2640;
+      --ink-line:#E7EAEE;
+      --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.4);
+      --cat-ear:#C9A876; --cat-nose:#85B7CC; --cat-throat:#CB8B8B; --cat-hn:#A3C48F; --cat-skull:#ABA0D9; --cat-trauma:#D69A6E;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#E7EAEE; --ink-soft:#9AA3AF; --paper:#14181D; --surface:#1B2027; --surface-2:#232933;
+    --line:#313A45; --teal:#6FB3C4; --teal-ink:#9CD2DF; --teal-bg:#1E333A;
+    --amber:#E0B663; --amber-bg:#3A2F14; --red:#E08F8C; --red-bg:#3A2422; --green:#7FBF9E; --green-bg:#1E332A;
+    --violet:#B3A6DE; --violet-bg:#2A2640;
+    --ink-line:#E7EAEE;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.4);
+    --cat-ear:#C9A876; --cat-nose:#85B7CC; --cat-throat:#CB8B8B; --cat-hn:#A3C48F; --cat-skull:#ABA0D9; --cat-trauma:#D69A6E;
+    color-scheme: dark;
+  }
+
+  *{box-sizing:border-box;}
+  /* One clean sans throughout (headings + body) instead of a serif/sans
+     pairing -- the serif display face was the single biggest "editorial
+     magazine" cue in the old design; a clinical tool reads more like a
+     clinical tool with one consistent typeface and weight doing the work
+     of hierarchy instead. IBM Plex Mono stays for tabular/data figures. */
+  body{margin:0; padding:0; background:var(--paper); color:var(--ink); font-family:"Inter", system-ui, sans-serif; font-size:15px; line-height:1.5;}
+  h1,h2,h3{font-family:"Inter", system-ui, sans-serif; text-wrap:balance; margin:0; color:var(--ink); font-weight:700; letter-spacing:-.01em;}
+  .eyebrow{font-family:"IBM Plex Mono", ui-monospace, monospace; font-style:normal; text-transform:uppercase; font-weight:500; font-size:11px; letter-spacing:.08em; color:var(--ink-soft); margin-bottom:4px; display:block;}
+  .section-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px; border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:16px;}
+  .section-head h2{margin-bottom:0;}
+  .mono{font-family:"IBM Plex Mono", ui-monospace, monospace;}
+  .tabular{font-variant-numeric:tabular-nums;}
+  a{color:var(--teal-ink);}
+  button{font-family:inherit;}
+  ::selection{background:var(--teal-bg); color:var(--ink);}
+  .icon{display:inline-block; vertical-align:middle; flex:none;}
+  .icon-hatch{stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round;}
+  .icon-hatch .hatch{stroke-width:1.1; opacity:.55;}
+
+  #app{min-height:100vh; display:flex; flex-direction:column;}
+  /* The old ruled-notebook-paper background (a repeating-linear-gradient of
+     faint lines) was a warm/editorial flourish; dropped for a plain
+     background under the clinical/minimal direction. */
+  .center-shell{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:32px 16px; background:var(--paper);}
+  .auth-card{width:100%; max-width:420px; background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:32px 28px;}
+  .auth-eyebrow{font-family:"IBM Plex Mono"; font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--teal-ink); margin-bottom:6px;}
+  .auth-card h1{font-size:28px; margin-bottom:4px;}
+  .auth-sub{color:var(--ink-soft); font-size:13.5px; margin-bottom:22px;}
+
+  .topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--surface); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:center; gap:10px;}
+  /* Hamburger toggle for the collapsed mobile nav -- hidden on desktop,
+     where the sidenav is always visible as a sidebar. */
+  .nav-toggle{display:none; align-items:center; justify-content:center; width:34px; height:34px; padding:0; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; flex:none;}
+  .nav-toggle:hover{border-color:var(--teal);}
+  .nav-toggle .icon{width:18px; height:18px;}
+  .brand-mark{width:32px; height:32px; border-radius:8px; background:var(--teal); color:#fff; display:flex; align-items:center; justify-content:center; font-family:"Inter"; font-weight:700; font-size:16px;}
+  .brand-text h1{font-size:16.5px;}
+  .brand-text .sub{font-size:11px; color:var(--ink-soft); font-family:"IBM Plex Mono"; letter-spacing:.03em;}
+  .user-chip{display:flex; align-items:center; gap:10px; font-size:13px;}
+  .role-badge{font-family:"IBM Plex Mono"; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:99px; border:1px solid var(--line); color:var(--teal-ink); background:var(--teal-bg);}
+  .btn{cursor:pointer; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); padding:8px 14px; font-size:13.5px; font-weight:500; transition:background .12s, border-color .12s;}
+  .btn:hover{border-color:var(--teal);}
+  .btn-primary{background:var(--teal); border-color:var(--teal); color:#fff;}
+  .btn-primary:hover{background:var(--teal-ink); border-color:var(--teal-ink);}
+  .btn-ghost{border-color:transparent; background:transparent;}
+  .btn-danger{color:var(--red);}
+  .btn:disabled{opacity:.5; cursor:not-allowed;}
+  .btn-sm{padding:5px 10px; font-size:12.5px;}
+
+  .shell-body{display:grid; grid-template-columns:220px 1fr; flex:1; min-height:0;}
+  .sidenav{border-right:1px solid var(--line); background:var(--surface); padding:16px 10px;}
+  .sidenav button{display:flex; width:100%; text-align:left; align-items:center; gap:9px; padding:9px 12px; border-radius:8px; border:none; background:none; color:var(--ink-soft); font-size:13.5px; font-weight:500; cursor:pointer; margin-bottom:2px;}
+  .sidenav button:hover{background:var(--surface-2); color:var(--ink);}
+  .sidenav button.active{background:var(--teal-bg); color:var(--teal-ink);}
+  /* min-width:0 overrides the grid item's default min-width:auto, which
+     otherwise lets a wide table's intrinsic content width stretch the
+     WHOLE grid track (and with it the page) instead of respecting
+     .table-wrap's overflow-x:auto and scrolling just the table -- this was
+     the cause of the entries table pushing the entire page sideways and
+     clipping the last column off-screen. */
+  main{padding:24px; max-width:1080px; width:100%; margin:0 auto; min-width:0;}
+  main.wide{max-width:1440px;}
+
+  @media (max-width: 760px){
+    .shell-body{grid-template-columns:1fr;}
+    .nav-toggle{display:inline-flex;}
+    /* The old mobile nav was a horizontally-scrolling row with no visible
+       scrollbar and no indication there was more to see -- items past the
+       edge were just gone. It's now a collapsed drawer behind the hamburger
+       toggle instead, opened one item at a time down the page. */
+    .sidenav{display:none; flex-direction:column; border-right:none; border-bottom:1px solid var(--line); gap:2px; padding:8px 10px;}
+    .sidenav.open{display:flex;}
+    .sidenav button{white-space:normal; margin-bottom:0;}
+    main{padding:16px;}
+  }
+
+  label{display:block; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin-bottom:5px;}
+  .field{margin-bottom:14px;}
+  input[type=text], input[type=password], input[type=number], input[type=date], input[type=datetime-local], select, textarea{
+    width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); font-size:14px; font-family:inherit;
+  }
+  textarea{min-height:72px; resize:vertical;}
+  input:focus, select:focus, textarea:focus, button:focus-visible{outline:2px solid var(--teal); outline-offset:1px;}
+  .hint{font-size:12px; color:var(--ink-soft); margin-top:4px;}
+  .row2{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .row3{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;}
+  @media (max-width:520px){ .row2{grid-template-columns:1fr;} .row3{grid-template-columns:1fr;} }
+  .radio-group, .check-group{display:flex; flex-direction:column; gap:8px;}
+  .radio-card{display:flex; gap:10px; align-items:flex-start; border:1px solid var(--line); border-radius:10px; padding:12px; cursor:pointer;}
+  .radio-card:hover{border-color:var(--teal);}
+  .radio-card input{margin-top:3px;}
+  .radio-card .t{font-weight:600; font-size:13.5px;}
+  .radio-card .d{font-size:12.5px; color:var(--ink-soft);}
+  .error-banner{background:var(--red-bg); color:var(--red); border:1px solid var(--red); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:14px;}
+  .notice-banner{background:var(--amber-bg); color:var(--amber); border:1px solid var(--amber); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:flex; gap:8px; align-items:flex-start;}
+  /* Deliberately slimmer and quieter than .notice-banner -- at most ONE of
+     these ever shows at a time (see reminderBanner()), so it reads as a
+     gentle nudge rather than another alert competing for attention. */
+  .reminder-banner{background:var(--surface-2); color:var(--ink-soft); border-radius:8px; padding:7px 10px; font-size:12.5px; margin-bottom:14px; display:flex; gap:10px; align-items:center; justify-content:space-between;}
+  .reminder-dismiss{background:none; border:none; color:var(--ink-soft); font-size:15px; line-height:1; cursor:pointer; padding:0 2px;}
+  .reminder-dismiss:hover{color:var(--ink);}
+  .success-banner{background:var(--green-bg); color:var(--green); border:1px solid var(--green); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:14px;}
+
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:18px; box-shadow:var(--shadow);}
+  .card h2{font-size:19px; margin-bottom:14px;}
+
+  /* Visual grouping for the long Surgical/Other Procedure wizard forms --
+     purely presentational (a heading + a divider before each group); no
+     existing field id/name/class changes, so it's additive to the DOM the
+     wizard tests already exercise. The eyebrow-style title reuses the same
+     look as .stats-block h3 so form sections and stats sections read as the
+     same visual language elsewhere in the app. */
+  .form-section{margin-bottom:22px; padding-top:20px; border-top:1px solid var(--line);}
+  .form-section:first-of-type{padding-top:0; border-top:none;}
+  .form-section-title{font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--teal-ink); font-family:"Inter"; font-weight:600; margin-bottom:14px;}
+  .stat-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:12px; margin-bottom:18px;}
+  .stat-tile{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:14px 16px; box-shadow:var(--shadow); display:flex; align-items:center; gap:12px;}
+  .stat-tile .icon{width:26px; height:26px; color:var(--teal-ink); opacity:.75;}
+  .stat-tile .num{font-family:"IBM Plex Mono"; font-size:26px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--teal-ink); line-height:1;}
+  .stat-tile .lbl{font-size:12px; color:var(--ink-soft); margin-top:3px;}
+
+  .dash-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-bottom:18px;}
+  .dash-card{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px; box-shadow:var(--shadow); cursor:pointer; transition:border-color .12s, transform .12s; text-align:left;}
+  .dash-card:hover{border-color:var(--teal); transform:translateY(-1px);}
+  .dash-card .icn{width:40px; height:40px; border-radius:9px; background:var(--teal-bg); color:var(--teal-ink); display:flex; align-items:center; justify-content:center; margin-bottom:10px;}
+  .dash-card .icn .icon{width:22px; height:22px;}
+  .dash-card .t{font-weight:600; font-size:14.5px; margin-bottom:3px;}
+  .dash-card .d{font-size:12.5px; color:var(--ink-soft);}
+  .alert-count{display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 5px; border-radius:99px; background:var(--red); color:#fff; font-size:10.5px; font-weight:700; font-family:"IBM Plex Mono"; margin-left:6px;}
+  .short-form{font-weight:700;}
+
+  .bar-row{display:grid; grid-template-columns:190px 1fr 42px; gap:10px; align-items:center; margin-bottom:10px; font-size:12.5px;}
+  .bar-label{display:flex; align-items:center; gap:7px;}
+  .bar-label .icon{width:16px; height:16px; flex:none; opacity:.8;}
+  .bar-track{display:block; background:var(--surface-2); border-radius:5px; height:14px; overflow:hidden;}
+  .bar-fill{display:block; height:100%; border-radius:5px;}
+  .bar-count{font-family:"IBM Plex Mono"; text-align:right; font-variant-numeric:tabular-nums;}
+  .cat-dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;}
+  .stats-block{margin-bottom:22px;}
+  .stats-block:last-child{margin-bottom:0;}
+  .stats-block h3{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); font-family:"Inter"; font-weight:600; margin-bottom:12px;}
+
+  /* Scroll-shadow cue: a table wider than its container now scrolls
+     *within this box* (see the main{min-width:0} fix above) instead of
+     pushing the whole page sideways -- these edge gradients make it visible
+     that there's more to scroll to, rather than a wide table just quietly
+     clipping its last column with no indication anything was cut off. */
+  .table-wrap{
+    overflow-x:auto;
+    background:
+      linear-gradient(to right, var(--surface) 30%, rgba(255,255,255,0)) 0 0,
+      linear-gradient(to left, var(--surface) 30%, rgba(255,255,255,0)) 100% 0,
+      linear-gradient(to right, rgba(20,26,32,.12), rgba(20,26,32,0)) 0 0,
+      linear-gradient(to left, rgba(20,26,32,.12), rgba(20,26,32,0)) 100% 0;
+    background-repeat:no-repeat;
+    background-color:var(--surface);
+    background-size:24px 100%, 24px 100%, 10px 100%, 10px 100%;
+    background-attachment:local, local, scroll, scroll;
+  }
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-soft); border-bottom:1px solid var(--line); padding:8px 10px; white-space:nowrap;}
+  td{padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+
+  /* Card-per-row layout for wide tables below ~600px: a 10+ column table
+     never reads well as a horizontally-scrolled grid on a phone, however
+     good the scroll cue is. Opt-in via .table-wrap.cards-sm (added only to
+     the widest tables -- My Entries and the consultant-view entries table --
+     rather than every .table-wrap, since a plain 4-5 column table is still
+     fine as a contained-scroll table at this width). Each <td> needs a
+     data-label="<column name>" attribute; td:before renders it as the
+     row-local label that the <th> would have given it. */
+  @media (max-width:600px){
+    .table-wrap.cards-sm{overflow-x:visible; background:none;}
+    .table-wrap.cards-sm table{border:none;}
+    .table-wrap.cards-sm thead{display:none;}
+    .table-wrap.cards-sm tbody{display:block;}
+    .table-wrap.cards-sm tr{display:block; background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:4px 12px; margin-bottom:10px;}
+    .table-wrap.cards-sm tr:last-child{margin-bottom:0;}
+    .table-wrap.cards-sm td{display:flex; align-items:flex-start; justify-content:space-between; gap:14px; text-align:right; padding:7px 0; border-bottom:1px solid var(--line);}
+    .table-wrap.cards-sm td:last-child{border-bottom:none;}
+    .table-wrap.cards-sm td:before{content:attr(data-label); text-align:left; flex:0 0 auto; font-size:11px; text-transform:uppercase; letter-spacing:.04em; font-weight:600; color:var(--ink-soft);}
+    .table-wrap.cards-sm td:empty, .table-wrap.cards-sm td:not([data-label]){display:none;}
+    /* An empty data-label marks a cell with no natural column name (row
+       actions, typically) -- let its content (buttons) wrap normally on a
+       narrow card instead of forcing it into the label/value flex row. */
+    .table-wrap.cards-sm td[data-label=""]{display:block; text-align:left;}
+    .table-wrap.cards-sm td[data-label=""] .btn{margin:3px 6px 3px 0;}
+  }
+  .chip{display:inline-block; padding:2px 8px; border-radius:99px; font-size:11px; font-weight:600; font-family:"IBM Plex Mono";}
+  .chip-teal{background:var(--teal-bg); color:var(--teal-ink);}
+  .chip-amber{background:var(--amber-bg); color:var(--amber);}
+  .chip-red{background:var(--red-bg); color:var(--red);}
+  .chip-green{background:var(--green-bg); color:var(--green);}
+  .chip-violet{background:var(--violet-bg); color:var(--violet);}
+  .chip-grey{background:var(--surface-2); color:var(--ink-soft);}
+  .muted{color:var(--ink-soft);}
+  .empty-state{padding:32px 16px; text-align:center; color:var(--ink-soft); font-size:13.5px;}
+  .case-link{background:none; border:none; padding:0; color:var(--teal-ink); font-weight:600; font-size:13px; cursor:pointer; text-decoration:underline;}
+  .case-link-origin{color:var(--violet);}
+  .case-no{color:var(--ink-soft); font-size:13px;}
+  .ps-select{font-size:12.5px; font-weight:600; border-radius:6px; border:1px solid transparent; padding:3px 6px; cursor:pointer;}
+  .ps-not_done{background:var(--red-bg); color:var(--red);}
+  .ps-in_progress{background:var(--amber-bg); color:var(--amber);}
+  .ps-done{background:var(--green-bg); color:var(--green);}
+
+  .cat-pick{display:grid; grid-template-columns:repeat(auto-fill, minmax(210px,1fr)); gap:10px;}
+  .cat-card{border:1px solid var(--line); border-radius:10px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:center;}
+  .cat-card:hover{border-color:var(--teal);}
+  .cat-card .icn{width:38px; height:38px; border-radius:9px; display:flex; align-items:center; justify-content:center; flex:none; background:var(--surface-2);}
+  .cat-card .icn .icon{width:21px; height:21px;}
+  .cat-card .sw{width:10px; height:10px; border-radius:50%; flex:none;}
+  .proc-opt{border:1px solid var(--line); border-radius:8px; padding:9px 11px; cursor:pointer; font-size:13.5px;}
+  .proc-opt:hover{border-color:var(--teal);}
+  .btn-row{display:flex; gap:10px; justify-content:space-between; margin-top:18px;}
+  .footer-note{color:var(--ink-soft); font-size:11.5px; padding:16px 24px; text-align:center;}
+  .link-btn{background:none; border:none; color:var(--teal-ink); cursor:pointer; font-size:13px; padding:0; text-decoration:underline;}
+  .roadmap li{margin-bottom:10px; font-size:13.5px;}
+  .toggle-row{display:flex; align-items:center; gap:8px;}
+  .mp-box-wrap{max-height:220px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:10px;}
+  .sp-search{width:100%; margin-bottom:8px;}
+  .sp-row-hidden{display:none !important;}
+  .sp-empty-filter{padding:8px 2px; font-size:13px; color:var(--ink-soft);}
+
+  /* Searchable single-select ("ss-*"): a text input that filters an
+     always-in-the-DOM list of choices, shown while the input has focus
+     (CSS-only open/close, so it survives the app's full-innerHTML
+     re-renders without any JS state tracking whether it's "open"). */
+  .ss-wrap{position:relative;}
+  .ss-search{width:100%;}
+  .ss-list{position:absolute; z-index:20; left:0; right:0; top:calc(100% + 4px); max-height:240px; overflow-y:auto; background:var(--surface); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); display:none; padding:4px;}
+  .ss-wrap:focus-within .ss-list{display:block;}
+  .ss-row{padding:7px 9px; border-radius:6px; cursor:pointer; font-size:13.5px;}
+  .ss-row:hover, .ss-row.ss-row-active{background:var(--surface-2);}
+  .ss-row-selected{font-weight:600;}
+  .ss-row-selected .ss-check{color:var(--teal-ink);}
+  .ss-group-label{padding:6px 9px 2px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-soft);}
+
+  .modal-overlay{position:fixed; inset:0; background:rgba(20,22,18,.55); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50;}
+  .modal-card{background:var(--surface); border-radius:14px; box-shadow:var(--shadow); max-width:560px; width:100%; max-height:85vh; overflow-y:auto; padding:26px;}
+  .modal-card h2{font-size:19px; margin-bottom:4px;}
+  .modal-close{float:right; background:none; border:none; color:var(--ink-soft); cursor:pointer; font-size:20px; line-height:1; padding:2px;}
+  .detail-row{display:grid; grid-template-columns:150px 1fr; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px;}
+  .detail-row:last-child{border-bottom:none;}
+  .detail-row .k{color:var(--ink-soft); font-size:12px; text-transform:uppercase; letter-spacing:.03em; font-weight:600;}
+  .history-entry{padding:10px 0; border-bottom:1px solid var(--line);}
+  .history-entry:last-child{border-bottom:none;}
+  .history-entry-head{font-size:13px; margin-bottom:6px; display:flex; justify-content:space-between; gap:10px;}
+  .history-changes .detail-row{padding:5px 0; font-size:12.5px;}
