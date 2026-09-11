@@ -127,6 +127,17 @@
   textarea{min-height:72px; resize:vertical;}
   input:focus, select:focus, textarea:focus, button:focus-visible{outline:2px solid var(--teal); outline-offset:1px;}
   .hint{font-size:12px; color:var(--ink-soft); margin-top:4px;}
+  /* Inline per-field validation flagging (fieldGroup() in app.js) -- red
+     border on the specific offending field/section plus a message right
+     under it, instead of only a toast the user has to remember after it
+     fades. Deliberately covers .field's usual children AND .mp-box-wrap
+     (the multi-select checkbox list), since a required field is sometimes
+     a multiPicker rather than a plain input. */
+  .validation-error > label{color:var(--red);}
+  .validation-error > .form-section-title{color:var(--red);}
+  .validation-error > input, .validation-error > select, .validation-error > textarea,
+  .validation-error .mp-box-wrap{border-color:var(--red) !important;}
+  .validation-error-msg{color:var(--red); font-size:12px; margin-top:6px;}
   .row2{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
   .row3{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;}
   @media (max-width:520px){ .row2{grid-template-columns:1fr;} .row3{grid-template-columns:1fr;} }
@@ -231,6 +242,36 @@
        narrow card instead of forcing it into the label/value flex row. */
     .table-wrap.cards-sm td[data-label=""]{display:block; text-align:left;}
     .table-wrap.cards-sm td[data-label=""] .btn{margin:3px 6px 3px 0;}
+  }
+  /* Entries list: search + sort toolbar, and an expand-in-place accordion
+     row (replaces the old always-all-columns table -- see renderEntriesList
+     in app.js). Identical markup at every width; only the summary line's
+     wrapping and column count actually change with viewport, so mobile and
+     desktop share one implementation instead of two. */
+  .entries-toolbar{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:14px;}
+  .entries-search{flex:1 1 220px; min-width:0; padding:8px 12px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); font-size:13.5px; font-family:inherit;}
+  .entries-sort{display:flex; align-items:center; gap:6px; flex:0 0 auto;}
+  .entries-sort select{padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); font-size:12.5px; font-family:inherit;}
+  .entry-list{display:flex; flex-direction:column; gap:8px;}
+  .entry-card{border:1px solid var(--line); border-radius:10px; background:var(--surface); overflow:hidden;}
+  .entry-card-summary{display:flex; align-items:center; gap:10px; padding:10px 12px; cursor:pointer; flex-wrap:wrap;}
+  .entry-card-summary:hover{background:var(--surface-2);}
+  .entry-card-num{flex:0 0 auto; width:22px;}
+  .entry-card-date{flex:0 0 auto; font-size:12.5px;}
+  .entry-card-main{font-weight:600; font-size:13.5px;}
+  .entry-card-sub{font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:260px;}
+  .entry-card-chevron{margin-left:auto; font-size:10px; color:var(--ink-soft); flex:0 0 auto;}
+  .entry-card-open>.entry-card-summary{border-bottom:1px solid var(--line); background:var(--surface-2);}
+  .entry-card-detail{padding:4px 16px 12px;}
+  .entry-menu-wrap{position:relative; flex:0 0 auto;}
+  .entry-menu-btn{padding:4px 9px; line-height:1; font-size:15px; font-weight:700;}
+  .entry-menu{position:absolute; right:0; top:calc(100% + 4px); z-index:8; background:var(--surface); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); display:flex; flex-direction:column; min-width:150px; padding:4px; cursor:auto;}
+  .entry-menu button{display:block; width:100%; text-align:left; padding:8px 10px; border:none; background:none; color:var(--ink); font-size:13px; font-family:inherit; border-radius:6px; cursor:pointer;}
+  .entry-menu button:hover{background:var(--surface-2);}
+  .entry-menu button.entry-menu-danger{color:var(--red);}
+  @media (max-width:600px){
+    .entry-card-sub{max-width:150px;}
+    .entry-card-date{order:1;}
   }
   .chip{display:inline-block; padding:2px 8px; border-radius:99px; font-size:11px; font-weight:600; font-family:"IBM Plex Mono";}
   .chip-teal{background:var(--teal-bg); color:var(--teal-ink);}

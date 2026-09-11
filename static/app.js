@@ -53,7 +53,16 @@
     // mobile layout let the nav row overflow off-screen with no way to see
     // the rest of it; below the responsive breakpoint the nav is now
     // collapsed behind this toggle instead.
-    mobileNavOpen: false
+    mobileNavOpen: false,
+    // Per-entries-list UI state (search text, sort column/direction, which
+    // rows are expanded) keyed by a caller-chosen id -- "my-entries" for the
+    // resident/fellow/senior resident's own list, "detail:<username>" for a
+    // consultant's per-trainee drill-down. Session/render-only, never
+    // persisted -- see entriesUI() below.
+    entriesUI: {},
+    // Which row's "⋮" action menu is currently open, as "<uiKey>:<entryId>"
+    // -- at most one open at a time, across every entries list on screen.
+    openEntryMenu: null
   };
 
   // Every role that logs entries and gets the resident-style logbook/
@@ -671,7 +680,7 @@
       Object.assign(fields, { seminarType:state.config.seminarTypes[0], seminarTypeOther:"", topic:"", venue:"", details:"" });
     }
     if(prefill) Object.assign(fields, prefill);
-    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null };
+    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, status:"final", linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{} };
     render();
     if(type==="surgical" || type==="other") loadWizPeopleList();
   }
@@ -750,6 +759,7 @@
     }
     startWizard(type, fields);
     state.wiz.editingId = id;
+    state.wiz.status = e.status === "draft" ? "draft" : "final";
     if(type==="surgical"){
       var linked = findLinkedCase(e.id, state.myEntries||[]);
       state.wiz.linkedCaseId = linked ? linked.id : null;
@@ -851,6 +861,34 @@
       if(node) f[fieldFor[id]] = node.value;
     });
   }
+  // Inline per-field validation flagging: a submit function starts by
+  // clearing state.wiz.fieldErrors, then failField() records BOTH the toast
+  // (existing behavior) and which field to flag on the re-render toast()
+  // triggers -- so the user sees a red-bordered field with its own message
+  // instead of the whole form silently going blank (the actual bug report:
+  // "the entire form resets" was really "syncWizFieldsFromDom() was never
+  // called before the toast-triggered render, so unsync'd inputs collapsed
+  // back to their last known state.wiz.fields value, which was often
+  // empty"). Every submit* function must call syncWizFieldsFromDom() as its
+  // very first line, before this, so the values are never actually lost.
+  function failField(key, msg){
+    if(!state.wiz) return;
+    state.wiz.fieldErrors = state.wiz.fieldErrors || {};
+    state.wiz.fieldErrors[key] = msg;
+    toast(msg);
+  }
+  function fieldErr(key){
+    return (state.wiz && state.wiz.fieldErrors && state.wiz.fieldErrors[key]) || "";
+  }
+  // Wraps a field (or a whole form-section, for the procedure-blocks group)
+  // with a red border + inline message when fieldErr(key) is set. tag lets
+  // callers reuse this for a .form-section as well as a plain .field.
+  function fieldGroup(key, innerHtml, tag, extraAttrs){
+    var msg = fieldErr(key);
+    tag = tag || "field";
+    return '<div class="'+tag+(msg?' validation-error':'')+'"'+(extraAttrs||"")+'>'+innerHtml+
+      (msg?'<div class="validation-error-msg">'+esc(msg)+'</div>':'')+'</div>';
+  }
   // A multiPicker fieldKey is either a plain state.wiz.fields[key] array
   // (diagnoses, comorbidities, assistantsPicked) or, for a Surgical/Other
   // Procedure block's own procedures list, the path "pb:<index>:procedures"
@@ -945,16 +983,18 @@
   }
 
   async function submitSurgical(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
     var f = state.wiz.fields;
     var hospitalNumber = (el("f-hospitalNumber")||{}).value || "";
-    if(!hospitalNumber.trim()){ toast("Hospital number is required."); return; }
+    if(!hospitalNumber.trim()){ failField("hospitalNumber","Hospital number is required."); return; }
     var blocks = f.procedureBlocks||[];
     if(!blocks.length || blocks.some(function(b){ return !b.procedures || !b.procedures.length; })){
-      toast(blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
+      failField("procedures", blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
     }
-    if(!f.diagnoses.length){ toast("Pick at least one diagnosis."); return; }
+    if(!f.diagnoses.length){ failField("diagnoses","Pick at least one diagnosis."); return; }
     var cons = resolvedConsultant();
-    if(!cons.consultant.trim()){ toast("Supervising consultant is required."); return; }
+    if(!cons.consultant.trim()){ failField("consultant","Supervising consultant is required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var caseReport = (el("f-caseReport")||{}).value || "No";
     var flatProcedures = [];
@@ -967,7 +1007,7 @@
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
-      caseReport: caseReport
+      caseReport: caseReport, status: "final"
     };
     var editingId = state.wiz.editingId;
     try{
@@ -1015,16 +1055,18 @@
   }
 
   async function submitOther(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
     var f = state.wiz.fields;
     var hospitalNumber = (el("f-hospitalNumber")||{}).value || "";
-    if(!hospitalNumber.trim()){ toast("Hospital number is required."); return; }
+    if(!hospitalNumber.trim()){ failField("hospitalNumber","Hospital number is required."); return; }
     var blocks = f.procedureBlocks||[];
     if(!blocks.length || blocks.some(function(b){ return !b.procedures || !b.procedures.length; })){
-      toast(blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
+      failField("procedures", blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
     }
-    if(!f.diagnoses.length){ toast("Pick at least one diagnosis."); return; }
+    if(!f.diagnoses.length){ failField("diagnoses","Pick at least one diagnosis."); return; }
     var cons = resolvedConsultant();
-    if(!cons.consultant.trim()){ toast("Supervising consultant is required."); return; }
+    if(!cons.consultant.trim()){ failField("consultant","Supervising consultant is required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var flatProcedures = [];
     blocks.forEach(function(b){ (b.procedures||[]).forEach(function(p){ flatProcedures.push(p); }); });
@@ -1037,7 +1079,8 @@
       age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
-      assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || ""
+      assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
+      status: "final"
     };
     var otherEditingId = state.wiz.editingId;
     try{
@@ -1050,15 +1093,59 @@
     }catch(e){ toast("Could not save this entry. Please try again."); }
   }
 
+  // Deliberately skips the submit*() functions' field-by-field validation --
+  // a draft is a mid-fill save, so whatever's on the form right now (even
+  // blank) is written as-is; the backend's create/update handlers relax
+  // procedure-block validation the same way when status is "draft". Only
+  // ever called for Surgical/Other Procedure (the only two entry types
+  // wizDraftButtons() shows a "Save as draft" button for).
+  async function wizSaveDraft(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
+    var type = state.wiz.entryType;
+    var f = state.wiz.fields;
+    var entryDate = (el("f-date")||{}).value || f.date || todayISO();
+    var blocks = (f.procedureBlocks||[]).map(function(b){
+      return { site:b.site||"", procedures:(b.procedures||[]).slice(), laterality:b.laterality||"", role:b.role||"" };
+    });
+    var flatProcedures = [];
+    blocks.forEach(function(b){ (b.procedures||[]).forEach(function(p){ flatProcedures.push(p); }); });
+    var cons = resolvedConsultant();
+    var data = {
+      authorUsername: state.user.username, entryType: type, unit: unitForDate(state.user.postings, entryDate),
+      procedureBlocks: blocks, procedures: flatProcedures,
+      setting: (el("f-setting")||{}).value || f.setting || "", date: entryDate,
+      hospitalNumber: (el("f-hospitalNumber")||{}).value || "", age: (el("f-age")||{}).value || "",
+      sex: (el("f-sex")||{}).value || f.sex || "",
+      diagnoses: f.diagnoses||[], diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities||[],
+      consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
+      assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
+      status: "draft"
+    };
+    if(type==="surgical") data.caseReport = (el("f-caseReport")||{}).value || f.caseReport || "No";
+    if(type==="other") data.otherSettingType = (el("f-otherSettingType")||{}).value || f.otherSettingType || "";
+    var editingId = state.wiz.editingId;
+    try{
+      if(editingId){ await dUpdateEntry(editingId, data); } else { await dAddEntry(data); }
+      state.wiz = null; state.myEntriesLoaded = false;
+      toast("Draft saved — you can continue it later from My Entries.");
+      state.view = "resident-entries";
+      render();
+      loadForView();
+    }catch(e){ toast("Could not save this draft. Please try again."); }
+  }
+
   async function submitCase(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
     var f = state.wiz.fields;
     var hospitalNumber = (el("f-hospitalNumber")||{}).value || "";
-    if(!hospitalNumber.trim()){ toast("Hospital number is required."); return; }
-    if(!f.diagnoses.length){ toast("Pick at least one diagnosis."); return; }
+    if(!hospitalNumber.trim()){ failField("hospitalNumber","Hospital number is required."); return; }
+    if(!f.diagnoses.length){ failField("diagnoses","Pick at least one diagnosis."); return; }
     var history = (el("f-history")||{}).value || "";
-    if(!history.trim()){ toast("Brief history is required."); return; }
+    if(!history.trim()){ failField("history","Brief history is required."); return; }
     var examination = (el("f-examination")||{}).value || "";
-    if(!examination.trim()){ toast("Examination findings are required."); return; }
+    if(!examination.trim()){ failField("examination","Examination findings are required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var data = {
       authorUsername: state.user.username, entryType:"case", unit: unitForDate(state.user.postings, entryDate),
@@ -1079,13 +1166,15 @@
   }
 
   async function submitSeminar(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
     var typeVal = (el("f-seminarType")||{}).value;
     var typeOther = (el("f-seminarTypeOther")||{}).value || "";
-    if(typeVal==="Other" && !typeOther.trim()){ toast("Describe the activity type."); return; }
+    if(typeVal==="Other" && !typeOther.trim()){ failField("seminarTypeOther","Describe the activity type."); return; }
     var topic = (el("f-topic")||{}).value || "";
-    if(!topic.trim()){ toast("Give the seminar/presentation a topic or title."); return; }
+    if(!topic.trim()){ failField("topic","Give the seminar/presentation a topic or title."); return; }
     var details = (el("f-details")||{}).value || "";
-    if(!details.trim()){ toast("Details are required."); return; }
+    if(!details.trim()){ failField("details","Details are required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var data = {
       authorUsername: state.user.username, entryType:"seminar", unit: unitForDate(state.user.postings, entryDate),
@@ -1104,12 +1193,14 @@
   }
 
   async function submitAcademic(){
+    syncWizFieldsFromDom();
+    state.wiz.fieldErrors = {};
     var f = state.wiz.fields;
     var typeVal = (el("f-academicType")||{}).value;
     var typeOther = (el("f-academicTypeOther")||{}).value || "";
-    if(typeVal==="Other" && !typeOther.trim()){ toast("Describe the activity type."); return; }
+    if(typeVal==="Other" && !typeOther.trim()){ failField("academicTypeOther","Describe the activity type."); return; }
     var details = (el("f-details")||{}).value || "";
-    if(!details.trim()){ toast("Details are required."); return; }
+    if(!details.trim()){ failField("details","Details are required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var data = {
       authorUsername: state.user.username, entryType:"academic", unit: unitForDate(state.user.postings, entryDate),
@@ -1663,9 +1754,17 @@
       '<button type="button" class="reminder-dismiss" data-dismiss-reminder="'+esc(r.type)+'" aria-label="Dismiss reminder">×</button></div>';
   }
 
+  // A draft is a private, incomplete scratch entry -- it hasn't happened
+  // yet as far as the logbook's own record of achievement is concerned, so
+  // it's excluded from stat tiles and charts (but never from the My Entries
+  // list itself, where it stays visible with a "Continue editing" action).
+  function finalizedOnly(entries){
+    return (entries||[]).filter(function(e){ return e.status !== "draft"; });
+  }
+
   function renderDashboardResident(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
-    var s = computeStats(state.myEntries);
+    var s = computeStats(finalizedOnly(state.myEntries));
     var todayUnit = unitForDate(state.user.postings, todayISO());
     var recent = state.myEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
     return ''+
@@ -2004,43 +2103,66 @@
     '<button type="button" class="btn btn-sm" id="wiz-add-block" style="margin-bottom:14px;">+ Add another site / procedure (combined case)</button>';
   }
 
+  // Shared by the Surgical and Other Procedure forms -- the only two that
+  // get the Save-as-draft/Finalize workflow (the other three entry types
+  // have few enough required fields that a draft state was judged not
+  // worth the complexity). A brand-new entry, or a draft being continued,
+  // gets both buttons; editing an already-finalized entry keeps the plain
+  // single "Save changes" it always had -- flipping a finalized entry back
+  // to draft would silently pull it out of the roster/stats a supervisor
+  // may have already looked at.
+  function wizDraftButtons(){
+    var isDraftEdit = state.wiz.editingId && state.wiz.status === "draft";
+    var showDraftBtn = !state.wiz.editingId || isDraftEdit;
+    var finalizeLabel = state.wiz.editingId && !isDraftEdit ? "Save changes" : "Finalize entry";
+    return '<div class="btn-row">'+
+      '<button class="btn" id="wiz-back">Cancel</button>'+
+      (showDraftBtn ? '<button class="btn" id="wiz-save-draft">Save as draft</button>' : '')+
+      '<button class="btn btn-primary" id="wiz-submit">'+finalizeLabel+'</button>'+
+    '</div>';
+  }
+  function wizDraftBadge(){
+    return (state.wiz.editingId && state.wiz.status==="draft")
+      ? ' <span class="chip chip-amber" style="vertical-align:middle;">Draft</span>' : '';
+  }
+
   function renderSurgicalForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Surgical Procedure</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Surgical Procedure'+wizDraftBadge()+'</h2>'+
+      (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
         '</div>'+
         '<div class="row2">'+
-          '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
+          fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
           '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
         '</div>'+
         '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
       '</div>'+
       '<div class="form-section"><div class="form-section-title">Diagnoses &amp; comorbidities</div>'+
-        '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
+        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
         '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
         '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '</div>'+
-      '<div class="form-section"><div class="form-section-title">Sites &amp; procedures</div>'+
-        renderProcedureBlocks(true)+
-      '</div>'+
+      fieldGroup("procedures", '<div class="form-section-title">Sites &amp; procedures</div>'+renderProcedureBlocks(true), "form-section")+
       '<div class="form-section"><div class="form-section-title">Consultant &amp; sign-off</div>'+
-        consultantField()+
+        fieldGroup("consultant", consultantField())+
         '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
         '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
         '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
       '</div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
+      wizDraftButtons()+
     '</div>';
   }
 
   function renderOtherForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure</h2>'+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure'+wizDraftBadge()+'</h2>'+
+      (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
@@ -2048,7 +2170,7 @@
         '</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
-          '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
+          fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
         '</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
@@ -2056,19 +2178,17 @@
         '</div>'+
       '</div>'+
       '<div class="form-section"><div class="form-section-title">Diagnoses &amp; comorbidities</div>'+
-        '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
+        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
         '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
         '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '</div>'+
-      '<div class="form-section"><div class="form-section-title">Sites &amp; procedures</div>'+
-        renderProcedureBlocks(false)+
-      '</div>'+
+      fieldGroup("procedures", '<div class="form-section-title">Sites &amp; procedures</div>'+renderProcedureBlocks(false), "form-section")+
       '<div class="form-section"><div class="form-section-title">Consultant &amp; sign-off</div>'+
-        consultantField()+
+        fieldGroup("consultant", consultantField())+
         '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
         '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '</div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
+      wizDraftButtons()+
     '</div>';
   }
 
@@ -2081,19 +2201,19 @@
       (state.wiz.linkedFromId ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Pre-filled from the surgical procedure you just logged — add the history and examination findings to finish.</div>' : '')+
       '<h2>'+(state.wiz.editingId?"Edit ":"")+'Interesting Case</h2>'+
       '<div class="row2">'+
-        '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
+        fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
       '</div>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
         '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
       '</div>'+
-      '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
+      fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
       '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
       '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '<div class="field"><label>Procedure(s) performed <span class="muted">(optional)</span></label>'+multiPicker("procedures", allProcs, f.procedures)+'</div>'+
-      '<div class="field"><label for="f-history">Brief History</label><textarea id="f-history">'+esc(f.history||"")+'</textarea></div>'+
-      '<div class="field"><label for="f-examination">Examination Findings</label><textarea id="f-examination">'+esc(f.examination||"")+'</textarea></div>'+
+      fieldGroup("history", '<label for="f-history">Brief History</label><textarea id="f-history">'+esc(f.history||"")+'</textarea>')+
+      fieldGroup("examination", '<label for="f-examination">Examination Findings</label><textarea id="f-examination">'+esc(f.examination||"")+'</textarea>')+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save case")+'</button></div>'+
     '</div>';
@@ -2110,8 +2230,8 @@
           '<option '+(f.academicType==="Other"?"selected":"")+'>Other</option>'+
         '</select></div>'+
       '</div>'+
-      '<div class="field" id="academic-other-wrap" style="'+(f.academicType==="Other"?"":"display:none;")+'"><label for="f-academicTypeOther">Describe the activity type</label><input id="f-academicTypeOther" type="text" value="'+esc(f.academicTypeOther||"")+'"></div>'+
-      '<div class="field"><label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea></div>'+
+      fieldGroup("academicTypeOther", '<label for="f-academicTypeOther">Describe the activity type</label><input id="f-academicTypeOther" type="text" value="'+esc(f.academicTypeOther||"")+'">', "field", ' id="academic-other-wrap" style="'+(f.academicType==="Other"?"":"display:none;")+'"')+
+      fieldGroup("details", '<label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea>')+
       '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
     '</div>';
   }
@@ -2128,10 +2248,10 @@
           '<option '+(f.seminarType==="Other"?"selected":"")+'>Other</option>'+
         '</select></div>'+
       '</div>'+
-      '<div class="field" id="seminar-other-wrap" style="'+(f.seminarType==="Other"?"":"display:none;")+'"><label for="f-seminarTypeOther">Describe the activity type</label><input id="f-seminarTypeOther" type="text" value="'+esc(f.seminarTypeOther||"")+'"></div>'+
-      '<div class="field"><label for="f-topic">Topic / Title</label><input id="f-topic" type="text" value="'+esc(f.topic||"")+'" placeholder="e.g. Approach to vertigo in primary care"></div>'+
+      fieldGroup("seminarTypeOther", '<label for="f-seminarTypeOther">Describe the activity type</label><input id="f-seminarTypeOther" type="text" value="'+esc(f.seminarTypeOther||"")+'">', "field", ' id="seminar-other-wrap" style="'+(f.seminarType==="Other"?"":"display:none;")+'"')+
+      fieldGroup("topic", '<label for="f-topic">Topic / Title</label><input id="f-topic" type="text" value="'+esc(f.topic||"")+'" placeholder="e.g. Approach to vertigo in primary care">')+
       '<div class="field"><label for="f-venue">Venue / audience <span class="muted">(optional)</span></label><input id="f-venue" type="text" value="'+esc(f.venue||"")+'" placeholder="e.g. Departmental seminar, Unit 4"></div>'+
-      '<div class="field"><label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea></div>'+
+      fieldGroup("details", '<label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea>')+
       '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
     '</div>';
   }
@@ -2195,42 +2315,195 @@
     render();
   }
 
-  function renderResidentEntries(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
-    var rows = state.myEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
-    return ''+
-    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
-    '<div class="table-wrap cards-sm"><table><thead><tr>'+
-      '<th>#</th><th>Date of entry</th><th>Date of procedure</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th>'+
-      '<th>Procedure name</th><th>Primary diagnosis</th><th>Secondary diagnosis</th><th>Co-morbidities</th>'+
-      '<th>Role</th><th>Consultant &amp; assistants</th><th>Case report</th><th>Write-up</th><th>Unit</th><th></th>'+
-    '</tr></thead><tbody>'+
-      (rows.length===0 ? '<tr><td colspan="16" data-label="" class="muted">Nothing logged yet.</td></tr>' : rows.map(function(r,i){
-        return '<tr>'+
-          '<td class="tabular" data-label="#">'+(i+1)+'</td>'+
-          '<td class="tabular" data-label="Date of entry">'+fmtDate((r.createdAt||"").slice(0,10))+'</td>'+
-          '<td class="tabular" data-label="Date of procedure">'+fmtDate(r.date)+'</td>'+
-          '<td data-label="Type">'+entryTypeChip(r)+'</td>'+
-          '<td data-label="Hospital No.">'+esc(entryHospitalNumber(r)||"—")+'</td>'+
-          '<td class="tabular" data-label="Age/Sex">'+esc(entryAgeSex(r))+'</td>'+
-          '<td data-label="Procedure name">'+esc(summarizeEntry(r))+'</td>'+
-          '<td data-label="Primary diagnosis">'+esc(entryDiagnoses(r).join(", ")||"—")+'</td>'+
-          '<td data-label="Secondary diagnosis">'+esc(entrySecondaryDiagnoses(r).join(", ")||"—")+'</td>'+
-          '<td data-label="Co-morbidities">'+esc(entryComorbidities(r).join(", ")||"—")+'</td>'+
-          '<td data-label="Role">'+esc(entryRoleSummary(r)||"—")+'</td>'+
-          '<td data-label="Consultant &amp; assistants">'+entryConsultantAndAssistants(r)+'</td>'+
-          '<td data-label="Case report">'+caseReportCell(r, rows)+'</td>'+
-          '<td data-label="Write-up">'+paperStatusCell(r)+'</td>'+
-          '<td data-label="Unit">'+unitShortHtml(r.unit)+'</td>'+
-          '<td data-label="" style="white-space:nowrap;"><button class="btn btn-sm" data-view-entry="'+r.id+'">View</button> <button class="btn btn-sm" data-edit-entry="'+r.id+'">Edit</button> <button class="btn btn-sm" data-view-history="'+r.id+'">History</button> <button class="btn btn-sm btn-danger" data-del="'+r.id+'">Delete</button></td>'+
-        '</tr>';
-      }).join(""))+
-    '</tbody></table></div></div>';
+  /* ============================================================
+     ENTRIES LIST: search, sort, expand-in-place accordion.
+     Replaces the old wide, all-columns-always-visible table -- shared by
+     the resident/fellow/senior-resident "My Entries" list and a
+     consultant's per-trainee drill-down, since both are "a list of entries
+     with a concise summary line per row that expands to the full detail on
+     click" underneath, just with a different action menu.
+  ============================================================ */
+  // uiKey namespaces one list's search/sort/open-row state -- "my-entries"
+  // for a trainee's own list, "detail:<username>" for a consultant's
+  // drill-down -- so switching screens (or viewing a different trainee)
+  // never leaks one list's state into another's.
+  function entriesUI(uiKey){
+    state.entriesUI = state.entriesUI || {};
+    if(!state.entriesUI[uiKey]) state.entriesUI[uiKey] = { search:"", sortKey:"date", sortDir:"desc", openIds:[] };
+    return state.entriesUI[uiKey];
+  }
+  // Mirrors syncWizFieldsFromDom()'s job for the wizard: the search box is
+  // filtered live via pure DOM show/hide (see wireShellEvents' [data-entries-
+  // search] handler) and deliberately never calls render() on keystroke, so
+  // whatever's actually typed has to be pulled back into state before any
+  // OTHER action on this list (sort, expand/collapse, a menu action) calls
+  // render() -- otherwise that render would rebuild the list from a stale,
+  // pre-keystroke search value and the typed filter text would appear lost.
+  function syncEntriesSearchFromDom(uiKey){
+    var inp = document.querySelector('[data-entries-search="'+uiKey+'"]');
+    if(inp) entriesUI(uiKey).search = inp.value;
+  }
+  function entrySearchText(e){
+    return [
+      entryHospitalNumber(e), entryAgeSex(e), summarizeEntry(e), roleLabel(e.entryType),
+      entryDiagnoses(e).join(" "), entrySecondaryDiagnoses(e).join(" "), entryComorbidities(e).join(" "),
+      entryRoleSummary(e), e.consultant, e.assistants, e.unit, fmtDate(e.date)
+    ].join(" ").toLowerCase();
+  }
+  var ENTRY_SORT_GETTERS = {
+    date: function(e){ return e.date||""; },
+    createdAt: function(e){ return e.createdAt||""; },
+    type: function(e){ return normType(e); },
+    hospitalNumber: function(e){ return (entryHospitalNumber(e)||"").toLowerCase(); },
+    diagnosis: function(e){ return (entryDiagnoses(e).join(", ")||"").toLowerCase(); },
+    role: function(e){ return (entryRoleSummary(e)||"").toLowerCase(); },
+    consultant: function(e){ return (e.consultant||"").toLowerCase(); },
+    unit: function(e){ return (e.unit||"").toLowerCase(); },
+    status: function(e){ return e.status==="draft" ? 0 : 1; }
+  };
+  var ENTRY_SORT_FIELDS = [
+    { key:"date", label:"Date of procedure" }, { key:"createdAt", label:"Date of entry" },
+    { key:"type", label:"Type" }, { key:"hospitalNumber", label:"Hospital number" },
+    { key:"diagnosis", label:"Diagnosis" }, { key:"role", label:"Role" },
+    { key:"consultant", label:"Consultant" }, { key:"unit", label:"Unit" }
+  ];
+  function sortEntriesFor(uiKey, entries){
+    var ui = entriesUI(uiKey);
+    var getter = ENTRY_SORT_GETTERS[ui.sortKey] || ENTRY_SORT_GETTERS.date;
+    var sorted = entries.slice().sort(function(a,b){
+      var av=getter(a), bv=getter(b);
+      if(av<bv) return -1; if(av>bv) return 1; return 0;
+    });
+    if(ui.sortDir==="desc") sorted.reverse();
+    return sorted;
+  }
+  function setEntriesSortKey(uiKey, key){
+    syncEntriesSearchFromDom(uiKey);
+    var ui = entriesUI(uiKey);
+    if(ui.sortKey===key){ ui.sortDir = ui.sortDir==="asc"?"desc":"asc"; }
+    else { ui.sortKey = key; ui.sortDir = (key==="date"||key==="createdAt") ? "desc" : "asc"; }
+    render();
+  }
+  function isMobileViewport(){
+    try{ return window.matchMedia && window.matchMedia("(max-width:600px)").matches; }
+    catch(err){ return (window.innerWidth||9999)<=600; }
+  }
+  // Expanding a row calls render() (same as every other click-driven state
+  // change in this app), so the search box's live-typed value is captured
+  // first, exactly like the sort click above.
+  function toggleEntryOpen(uiKey, id){
+    syncEntriesSearchFromDom(uiKey);
+    state.openEntryMenu = null;
+    var ui = entriesUI(uiKey);
+    id = String(id);
+    var idx = ui.openIds.indexOf(id);
+    if(idx!==-1){ ui.openIds.splice(idx,1); render(); return; }
+    ui.openIds.push(id);
+    // Desktop: no cap, any number of rows can stay expanded at once. Mobile:
+    // at most 10 -- the earliest-opened one collapses (FIFO) to make room.
+    if(isMobileViewport()){
+      while(ui.openIds.length>10) ui.openIds.shift();
+    }
+    render();
+  }
+  function toggleEntryMenu(menuKey){
+    var opening = state.openEntryMenu !== menuKey;
+    state.openEntryMenu = opening ? menuKey : null;
+    render();
   }
 
-  function renderEntryDetailModal(){
-    var e = findEntryById(state.viewingEntryId);
-    if(!e) return "";
+  // opts: { uiKey, entries, caseReportRows, emptyText, sortFields,
+  //   showStatusBadge, actions(e) -> menu items html or "" to hide the menu,
+  //   detail(e) -> extra html appended after the shared entryDetailRows() }
+  function renderEntriesList(opts){
+    var uiKey = opts.uiKey;
+    var ui = entriesUI(uiKey);
+    var all = opts.entries || [];
+    var q = (ui.search||"").trim().toLowerCase();
+    var filtered = !q ? all : all.filter(function(e){ return entrySearchText(e).indexOf(q)!==-1; });
+    var sorted = sortEntriesFor(uiKey, filtered);
+    var sortFields = opts.sortFields || ENTRY_SORT_FIELDS;
+    var toolbar = ''+
+      '<div class="entries-toolbar">'+
+        '<input type="text" class="entries-search" data-entries-search="'+esc(uiKey)+'" value="'+esc(ui.search||"")+'" placeholder="Search entries…" aria-label="Search entries">'+
+        '<div class="entries-sort">'+
+          '<span class="muted" style="font-size:12px;">Sort:</span>'+
+          '<select data-entries-sort-key="'+esc(uiKey)+'" aria-label="Sort by">'+
+            sortFields.map(function(f){ return '<option value="'+f.key+'"'+(ui.sortKey===f.key?' selected':'')+'>'+esc(f.label)+'</option>'; }).join("")+
+          '</select>'+
+          '<button type="button" class="btn btn-sm" data-entries-sort-dir="'+esc(uiKey)+'" title="Reverse sort order">'+(ui.sortDir==="asc"?"↑ Asc":"↓ Desc")+'</button>'+
+        '</div>'+
+      '</div>';
+    if(all.length===0) return toolbar+'<div class="empty-state">'+(opts.emptyText||"Nothing logged yet.")+'</div>';
+    if(sorted.length===0) return toolbar+'<div class="empty-state">No entries match “'+esc(ui.search)+'”.</div>';
+    var rowsHtml = sorted.map(function(e,i){
+      var idStr = String(e.id);
+      var isOpen = ui.openIds.indexOf(idStr)!==-1;
+      var menuKey = uiKey+":"+idStr;
+      var menuItems = opts.actions ? opts.actions(e) : "";
+      var isDraft = e.status==="draft";
+      return ''+
+      '<div class="entry-card'+(isOpen?' entry-card-open':'')+'" data-entries-search-text="'+esc(entrySearchText(e))+'">'+
+        '<div class="entry-card-summary" data-entry-toggle="'+esc(uiKey)+'" data-entry-id="'+esc(idStr)+'">'+
+          '<span class="entry-card-num tabular muted">'+(i+1)+'</span>'+
+          '<span class="entry-card-date tabular">'+fmtDate(e.date)+'</span>'+
+          entryTypeChip(e)+
+          '<span class="entry-card-main">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</span>'+
+          '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
+          (opts.showStatusBadge && isDraft ? ' <span class="chip chip-amber">Draft</span>' : '')+
+          '<span class="entry-card-chevron" aria-hidden="true">'+(isOpen?"▲":"▼")+'</span>'+
+          (menuItems ? (
+            '<span class="entry-menu-wrap">'+
+              '<button type="button" class="btn btn-sm entry-menu-btn" data-entry-menu-btn="'+esc(menuKey)+'" aria-label="Row actions">⋮</button>'+
+              (state.openEntryMenu===menuKey ? '<div class="entry-menu" data-entry-menu="'+esc(menuKey)+'">'+menuItems+'</div>' : '')+
+            '</span>'
+          ) : '')+
+        '</div>'+
+        (isOpen ? (
+          '<div class="entry-card-detail">'+
+            entryDetailRows(e).map(function(r){ return '<div class="detail-row"><div class="k">'+esc(r[0])+'</div><div>'+r[1]+'</div></div>'; }).join("")+
+            (opts.detail ? opts.detail(e) : "")+
+          '</div>'
+        ) : '')+
+      '</div>';
+    }).join("");
+    return toolbar+'<div class="entry-list">'+rowsHtml+'</div>';
+  }
+
+  function residentEntryMenuItems(e, rows){
+    var items = [];
+    items.push('<button type="button" data-view-history="'+e.id+'">History</button>');
+    items.push('<button type="button" data-edit-entry="'+e.id+'">'+(e.status==="draft"?"Continue editing":"Edit")+'</button>');
+    items.push('<button type="button" class="entry-menu-danger" data-del="'+e.id+'">Delete</button>');
+    return items.join("");
+  }
+
+  function renderResidentEntries(){
+    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    var rows = state.myEntries;
+    return ''+
+    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
+    renderEntriesList({
+      uiKey: "my-entries",
+      entries: rows,
+      showStatusBadge: true,
+      emptyText: "Nothing logged yet.",
+      actions: function(e){ return residentEntryMenuItems(e, rows); },
+      detail: function(e){
+        var extra = '';
+        if(e.paperStatus!=null) extra += '<div class="detail-row"><div class="k">Write-up</div><div>'+paperStatusCell(e)+'</div></div>';
+        extra += '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, rows)+'</div></div>';
+        return extra;
+      }
+    })+
+    '</div>';
+  }
+
+  // Every field worth showing about one entry, as [label, htmlValue] pairs --
+  // shared by the "View" modal (cross-list navigation, e.g. a case-report
+  // link that points at an entry outside the current list) and each entries
+  // list's own inline expand-in-place panel, so the two never drift apart.
+  function entryDetailRows(e){
     var t = normType(e);
     var rows = [];
     rows.push(["Type", entryTypeChip(e)]);
@@ -2275,6 +2548,14 @@
       rows.push(["Details", esc(e.details||"—")]);
     }
     if(e.unit) rows.push(["Unit", unitShortHtml(e.unit)]);
+    return rows;
+  }
+
+  function renderEntryDetailModal(){
+    var e = findEntryById(state.viewingEntryId);
+    if(!e) return "";
+    var t = normType(e);
+    var rows = entryDetailRows(e);
     return '<div class="modal-overlay" id="entry-detail-overlay">'+
       '<div class="modal-card">'+
         '<button class="modal-close" id="entry-detail-close" aria-label="Close">×</button>'+
@@ -2373,7 +2654,7 @@
 
   function renderResidentProgress(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
-    return renderStatsAndCharts(state.myEntries);
+    return renderStatsAndCharts(finalizedOnly(state.myEntries));
   }
 
   function renderResidentPostings(){
@@ -2444,17 +2725,22 @@
     // assignment sees the entries themselves but never gets this button.
     var caps = state.capabilities || {};
     var showHistory = !!(caps.isHod || caps.isCoordinator || caps.isHeadOfUnit);
+    var uiKey = "detail:"+state.detailUser.username;
     return ''+
     renderScopeBanner()+
     '<button class="btn btn-sm" id="back-to-roster" style="margin-bottom:14px;">← Back to roster</button>'+
     '<div class="card"><h2>'+esc(state.detailUser.displayName)+'</h2><p class="muted">'+esc(state.detailUser.pgYear||"")+'</p></div>'+
     renderStatsAndCharts(entries)+
     '<div class="card"><h2>Entries ('+entries.length+')</h2>'+
-    '<div class="table-wrap cards-sm"><table><thead><tr><th>Date</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th><th>Summary</th><th>Unit</th><th>Role</th><th>Case report</th>'+(showHistory?'<th></th>':'')+'</tr></thead><tbody>'+
-      (entries.length===0 ? '<tr><td colspan="'+(showHistory?9:8)+'" data-label="" class="muted">No entries visible to you.</td></tr>' : entries.map(function(r){
-        return '<tr><td class="tabular" data-label="Date">'+fmtDate(r.date)+'</td><td data-label="Type">'+entryTypeChip(r)+'</td><td data-label="Hospital No.">'+esc(entryHospitalNumber(r)||"—")+'</td><td class="tabular" data-label="Age/Sex">'+esc(entryAgeSex(r))+'</td><td data-label="Summary">'+esc(summarizeEntry(r))+'</td><td data-label="Unit">'+unitShortHtml(r.unit)+'</td><td data-label="Role">'+esc(entryRoleSummary(r)||"—")+'</td><td data-label="Case report">'+caseReportCell(r, entries)+'</td>'+(showHistory?'<td data-label=""><button class="btn btn-sm" data-view-history="'+r.id+'">History</button></td>':'')+'</tr>';
-      }).join(""))+
-    '</tbody></table></div></div>';
+    renderEntriesList({
+      uiKey: uiKey,
+      entries: entries,
+      emptyText: "No entries visible to you.",
+      sortFields: ENTRY_SORT_FIELDS.filter(function(f){ return f.key!=="consultant"; }),
+      actions: showHistory ? function(e){ return '<button type="button" data-view-history="'+e.id+'">History</button>'; } : null,
+      detail: function(e){ return '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, entries)+'</div></div>'; }
+    })+
+    '</div>';
   }
 
   /* ============================================================
@@ -2951,6 +3237,57 @@
       b.onclick = function(){ editEntry(b.getAttribute("data-edit-entry")); };
     });
 
+    // Entries list: live text filter -- pure DOM show/hide (same reasoning
+    // as the mp-search/ss-search filters above: this fires on every
+    // keystroke, and a full re-render mid-keystroke would rebuild the input
+    // out from under itself and drop focus). The typed value is written
+    // back into state by syncEntriesSearchFromDom() only when some OTHER
+    // action on this list is about to render (sort, expand, a menu action).
+    document.querySelectorAll("[data-entries-search]").forEach(function(inp){
+      inp.oninput = function(){
+        var q = inp.value.trim().toLowerCase();
+        var list = inp.closest(".card") || document;
+        list.querySelectorAll(".entry-card").forEach(function(card){
+          var match = !q || (card.getAttribute("data-entries-search-text")||"").indexOf(q)!==-1;
+          card.classList.toggle("sp-row-hidden", !match);
+        });
+      };
+    });
+    document.querySelectorAll("[data-entries-sort-key]").forEach(function(sel){
+      sel.onchange = function(){ setEntriesSortKey(sel.getAttribute("data-entries-sort-key"), sel.value); };
+    });
+    document.querySelectorAll("[data-entries-sort-dir]").forEach(function(b){
+      b.onclick = function(){
+        var uiKey = b.getAttribute("data-entries-sort-dir");
+        syncEntriesSearchFromDom(uiKey);
+        var ui = entriesUI(uiKey);
+        ui.sortDir = ui.sortDir==="asc" ? "desc" : "asc";
+        render();
+      };
+    });
+    document.querySelectorAll("[data-entry-toggle]").forEach(function(row){
+      row.onclick = function(ev){
+        if(ev.target && ev.target.closest && ev.target.closest(".entry-menu-wrap")) return; // menu button/items handle their own clicks
+        toggleEntryOpen(row.getAttribute("data-entry-toggle"), row.getAttribute("data-entry-id"));
+      };
+    });
+    document.querySelectorAll("[data-entry-menu-btn]").forEach(function(b){
+      b.onclick = function(ev){ ev.stopPropagation(); toggleEntryMenu(b.getAttribute("data-entry-menu-btn")); };
+    });
+    // Close any open row menu on an outside click -- bound once, ever (not
+    // per-render, since render() rebuilds the DOM every time and a fresh
+    // document-level listener on every wireShellEvents() call would stack
+    // indefinitely).
+    if(!window.__entlogEntryMenuOutsideBound){
+      window.__entlogEntryMenuOutsideBound = true;
+      document.addEventListener("click", function(ev){
+        if(!state.openEntryMenu) return;
+        if(ev.target && ev.target.closest && ev.target.closest(".entry-menu-wrap")) return;
+        state.openEntryMenu = null;
+        render();
+      });
+    }
+
     // edit-history modal
     document.querySelectorAll("[data-view-history]").forEach(function(b){
       b.onclick = function(){ openEntryHistory(b.getAttribute("data-view-history")); };
@@ -2971,6 +3308,7 @@
       else if(t==="academic") submitAcademic();
       else if(t==="seminar") submitSeminar();
     };
+    var wizSaveDraftBtn = el("wiz-save-draft"); if(wizSaveDraftBtn) wizSaveDraftBtn.onclick = wizSaveDraft;
     var addBlockBtn = el("wiz-add-block"); if(addBlockBtn) addBlockBtn.onclick = wizAddBlock;
     document.querySelectorAll("[data-remove-block]").forEach(function(b){
       b.onclick = function(){ wizRemoveBlock(+b.getAttribute("data-remove-block")); };
