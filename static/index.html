@@ -116,6 +116,12 @@
   .radio-card .d{font-size:12.5px; color:var(--ink-soft);}
   .error-banner{background:var(--red-bg); color:var(--red); border:1px solid var(--red); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:14px;}
   .notice-banner{background:var(--amber-bg); color:var(--amber); border:1px solid var(--amber); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; display:flex; gap:8px; align-items:flex-start;}
+  /* Deliberately slimmer and quieter than .notice-banner -- at most ONE of
+     these ever shows at a time (see reminderBanner()), so it reads as a
+     gentle nudge rather than another alert competing for attention. */
+  .reminder-banner{background:var(--surface-2); color:var(--ink-soft); border-radius:8px; padding:7px 10px; font-size:12.5px; margin-bottom:14px; display:flex; gap:10px; align-items:center; justify-content:space-between;}
+  .reminder-dismiss{background:none; border:none; color:var(--ink-soft); font-size:15px; line-height:1; cursor:pointer; padding:0 2px;}
+  .reminder-dismiss:hover{color:var(--ink);}
   .success-banner{background:var(--green-bg); color:var(--green); border:1px solid var(--green); border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:14px;}
 
   .card{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:18px; box-shadow:var(--shadow);}
@@ -162,7 +168,12 @@
   .muted{color:var(--ink-soft);}
   .empty-state{padding:32px 16px; text-align:center; color:var(--ink-soft); font-size:13.5px;}
   .case-link{background:none; border:none; padding:0; color:var(--teal-ink); font-weight:600; font-size:13px; cursor:pointer; text-decoration:underline;}
+  .case-link-origin{color:var(--violet);}
   .case-no{color:var(--ink-soft); font-size:13px;}
+  .ps-select{font-size:12.5px; font-weight:600; border-radius:6px; border:1px solid transparent; padding:3px 6px; cursor:pointer;}
+  .ps-not_done{background:var(--red-bg); color:var(--red);}
+  .ps-in_progress{background:var(--amber-bg); color:var(--amber);}
+  .ps-done{background:var(--green-bg); color:var(--green);}
 
   .cat-pick{display:grid; grid-template-columns:repeat(auto-fill, minmax(210px,1fr)); gap:10px;}
   .cat-card{border:1px solid var(--line); border-radius:10px; padding:14px; cursor:pointer; display:flex; gap:12px; align-items:center;}
@@ -186,6 +197,10 @@
   .detail-row{display:grid; grid-template-columns:150px 1fr; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px;}
   .detail-row:last-child{border-bottom:none;}
   .detail-row .k{color:var(--ink-soft); font-size:12px; text-transform:uppercase; letter-spacing:.03em; font-weight:600;}
+  .history-entry{padding:10px 0; border-bottom:1px solid var(--line);}
+  .history-entry:last-child{border-bottom:none;}
+  .history-entry-head{font-size:13px; margin-bottom:6px; display:flex; justify-content:space-between; gap:10px;}
+  .history-changes .detail-row{padding:5px 0; font-size:12.5px;}
 </style>
 </head>
 <body>
@@ -230,11 +245,18 @@
     showCreateUserForm: false,
     newUserRole: "resident",
     viewingEntryId: null,
+    viewingHistoryEntryId: null,
+    historyEdits: [],
+    historyLoading: false,
+    historyError: "",
     signupPendingMessage: "",
     signupRequests: [],
     signupRequestsLoaded: false,
     manageUsers: [],
     manageUsersLoaded: false,
+    reminders: [],
+    remindersLoaded: false,
+    dismissedReminderKey: null, // session-only -- resets on next login, never persisted
     toast: ""
   };
 
@@ -516,6 +538,8 @@
     return (await api("GET", path)).entries;
   }
   async function dListAllEntries(){ return (await api("GET","/entries/all")).entries; }
+  async function dGetReminders(){ return (await api("GET","/reminders")).reminders; }
+  async function dGetEntryHistory(id){ return (await api("GET","/entries/"+id+"/history")).edits; }
   async function dGetConfig(){ return (await api("GET","/config")).config; }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
@@ -625,6 +649,7 @@
     state.myEntriesLoaded=false; state.rosterLoaded=false; state.devUsersLoaded=false; state.detailUser=null;
     state.passwordResetsLoaded=false; state.consultantsLoaded=false;
     state.signupRequestsLoaded=false; state.signupRequests=[]; state.manageUsersLoaded=false; state.manageUsers=[];
+    state.remindersLoaded=false; state.reminders=[]; state.dismissedReminderKey=null;
     render();
   }
 
@@ -650,6 +675,10 @@
     if(state.consultantsLoaded) return;
     try{ state.consultantsList = (await api("GET","/users/consultants")).users; }catch(e){}
     state.consultantsLoaded = true;
+  }
+  async function loadReminders(){
+    try{ state.reminders = await dGetReminders(); }catch(e){ state.reminders = []; }
+    state.remindersLoaded = true;
   }
   async function loadRoster(){
     state.loading = !state.rosterLoaded; render();
@@ -690,7 +719,7 @@
     var v = state.view, role = state.user.role, caps = state.capabilities || {};
     if(v==="dashboard"){
       state.loading = true; render();
-      if(isTraineeRole(role)){ await loadMyEntries(); }
+      if(isTraineeRole(role)){ await loadMyEntries(); await loadReminders(); }
       else if(role==="consultant"){
         await loadRoster();
         if(caps.canApprove){ await loadSignupRequests(); }
@@ -757,9 +786,9 @@
   function startWizard(type, prefill){
     var fields = { date: todayISO() };
     if(type==="surgical"){
-      Object.assign(fields, { site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], laterality:state.config.laterality[0], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistants:"", comments:"", caseReport:"No" });
+      Object.assign(fields, { site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], laterality:state.config.laterality[0], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"", caseReport:"No" });
     } else if(type==="other"){
-      Object.assign(fields, { otherSettingType:state.config.otherProcedureSettings[0], site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistants:"", comments:"" });
+      Object.assign(fields, { otherSettingType:state.config.otherProcedureSettings[0], site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"" });
     } else if(type==="case"){
       Object.assign(fields, { hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], procedures:[], history:"", examination:"", comments:"" });
     } else if(type==="academic"){
@@ -768,8 +797,45 @@
       Object.assign(fields, { seminarType:state.config.seminarTypes[0], seminarTypeOther:"", topic:"", venue:"", details:"" });
     }
     if(prefill) Object.assign(fields, prefill);
-    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, linkedCaseId:null, origSnapshot:null };
+    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null };
     render();
+    if(type==="surgical" || type==="other") loadWizPeopleList();
+  }
+  // Unit+date-scoped Consultant/Assistants picker: re-fetched whenever the
+  // wizard's resolved unit or date changes, with a graceful fallback to the
+  // existing org-wide consultants list when no unit can be resolved for the
+  // chosen date at all (e.g. no posting covers it yet).
+  async function loadWizPeopleList(){
+    if(!state.wiz) return;
+    var f = state.wiz.fields;
+    var unit = unitForDate(state.user.postings, f.date);
+    state.wiz.peopleUnit = unit;
+    if(unit){
+      try{
+        var res = await api("GET","/units/"+encodeURIComponent(unit)+"/people?date="+encodeURIComponent(f.date));
+        state.wiz.peopleList = res.people || [];
+      }catch(e){ state.wiz.peopleList = []; }
+    } else {
+      state.wiz.peopleList = (state.consultantsList||[]).map(function(c){ return { username:c.username, displayName:c.displayName, role:"consultant" }; });
+    }
+    render();
+  }
+  function wizConsultantOptions(){
+    var f = state.wiz.fields;
+    var scoped = (state.wiz.peopleList||[]).filter(function(p){ return p.role==="consultant"; });
+    // Never let the dropdown silently drift away from an already-chosen
+    // consultant just because they're not in the current unit/date scope
+    // (editing an older entry, or the posting/date changed since) -- keep
+    // them selectable, clearly marked, rather than letting the browser fall
+    // back to whichever option happens to render first.
+    if(f.consultantChoice && f.consultantChoice!=="__other__" && !scoped.some(function(p){ return p.username===f.consultantChoice; })){
+      var known = (state.consultantsList||[]).filter(function(c){ return c.username===f.consultantChoice; })[0];
+      if(known) scoped = scoped.concat([{ username:known.username, displayName:known.displayName+" (not in this unit)", role:"consultant" }]);
+    }
+    return scoped;
+  }
+  function wizPeopleDisplayNames(){
+    return (state.wiz.peopleList||[]).map(function(p){ return p.displayName; });
   }
   function cancelWizard(){ state.wiz=null; render(); }
 
@@ -791,6 +857,15 @@
     var type = normType(e);
     var fields = Object.assign({}, e);
     fields.consultantChoice = e.consultantUsername || "__other__";
+    // The Assistants column stays a plain comma-joined TEXT string in the
+    // database (no schema change) -- back-parse it into the picker's array
+    // shape here. Any name that isn't in the current unit/date-scoped list
+    // (a peripheral assistant, someone who's since left, or just a stale
+    // roster) still shows up as a removable "extra" chip via multiPicker's
+    // existing built-in handling for values outside its options list.
+    if(type==="surgical" || type==="other"){
+      fields.assistantsPicked = (e.assistants||"").split(",").map(function(s){ return s.trim(); }).filter(Boolean);
+    }
     startWizard(type, fields);
     state.wiz.editingId = id;
     if(type==="surgical"){
@@ -869,12 +944,17 @@
   function syncWizFieldsFromDom(){
     if(!state.wiz) return;
     var f = state.wiz.fields;
-    var ids = ["f-hospitalNumber","f-date","f-setting","f-laterality","f-role","f-assistants",
+    // f-assistants is no longer a plain input (it's the unit-scoped
+    // multiPicker "assistantsPicked" array, kept live in state.wiz.fields by
+    // mpToggle/mpAddExtra/mpRemoveExtra directly -- same as diagnoses,
+    // procedures and comorbidities, none of which are in this DOM-sync list
+    // either), so it's deliberately absent here.
+    var ids = ["f-hospitalNumber","f-date","f-setting","f-laterality","f-role",
       "f-comments","f-caseReport","f-otherSettingType","f-history","f-examination","f-details",
       "f-academicType","f-academicTypeOther","f-consultantChoice","f-consultant-other",
       "f-age","f-sex","f-seminarType","f-seminarTypeOther","f-topic","f-venue"];
     var fieldFor = { "f-hospitalNumber":"hospitalNumber","f-date":"date","f-setting":"setting",
-      "f-laterality":"laterality","f-role":"role","f-assistants":"assistants","f-comments":"comments",
+      "f-laterality":"laterality","f-role":"role","f-comments":"comments",
       "f-caseReport":"caseReport","f-otherSettingType":"otherSettingType","f-history":"history",
       "f-examination":"examination","f-details":"details","f-academicType":"academicType",
       "f-academicTypeOther":"academicTypeOther","f-consultantChoice":"consultantChoice",
@@ -937,7 +1017,7 @@
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       laterality: (el("f-laterality")||{}).value, role: (el("f-role")||{}).value,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
-      assistants: (el("f-assistants")||{}).value || "", comments: (el("f-comments")||{}).value || "",
+      assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
       caseReport: caseReport
     };
     var editingId = state.wiz.editingId;
@@ -1001,7 +1081,7 @@
       age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities, role: (el("f-role")||{}).value,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
-      assistants: (el("f-assistants")||{}).value || "", comments: (el("f-comments")||{}).value || ""
+      assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || ""
     };
     var otherEditingId = state.wiz.editingId;
     try{
@@ -1374,6 +1454,13 @@
   function exportUsersCSV(){
     window.location.href = "/api/users/export.csv";
   }
+  // Self-service export for every role -- scoped server-side to whatever the
+  // caller can already see (their own entries for a trainee; scope-filtered
+  // entries for a consultant; everything for Developer, who also has the
+  // separate all-accounts export above).
+  function exportMyEntriesCSV(){
+    window.location.href = "/api/entries/export/mine.csv";
+  }
 
   /* ============================================================
      RENDER: AUTH SCREENS
@@ -1445,7 +1532,12 @@
       '<div class="field"><label for="su-displayName">Display name</label><input id="su-displayName" type="text" placeholder="e.g. Dr. Devashish Chaudhary"></div>'+
       (isTrainee ?
         '<div class="field"><label for="su-pgYear">Batch / Year</label><select id="su-pgYear">'+state.config.pgYears.map(function(o){return '<option>'+o+'</option>';}).join("")+'</select></div>'+
-        '<p class="hint">You’ll add your unit posting (with dates) after signing in, under My Postings.</p>'
+        (role==="fellow" ?
+          '<div class="field"><label for="su-unit">Parent / home unit</label><select id="su-unit">'+unitOptions(null)+'</select></div>'+
+          '<p class="hint">This is your home unit for the fellowship — you can still log peripheral postings in other units under My Postings after signing in.</p>'
+          :
+          '<p class="hint">You’ll add your unit posting (with dates) after signing in, under My Postings.</p>'
+        )
         :
         '<div class="row2">'+
           '<div class="field"><label for="su-designation">Designation</label><select id="su-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
@@ -1528,12 +1620,50 @@
     return '<button class="dash-card" data-nav="'+navTo+'"><div class="icn" style="'+(iconColor?"color:"+iconColor+";":"")+'">'+(iconKey?icon(iconKey):esc(title.slice(0,1)))+'</div><div class="t">'+esc(title)+(badge?badge:"")+'</div><div class="d">'+esc(desc)+'</div></button>';
   }
 
+  // Backend sends structured facts, not copy -- composing the sentence here
+  // (using our own unit-label helpers) keeps unit-name formatting consistent
+  // with the rest of the app, and lets us show only the single
+  // highest-priority reminder (reminders[0], already sorted server-side) so
+  // the dashboard never stacks more than one nudge at a time.
+  function composeReminderText(r){
+    if(r.type==="end_of_posting"){
+      var unitLabel = unitShortHtml(r.unit) + ' <span class="muted">('+esc(unitFull(r.unit))+')</span>';
+      var when = r.daysLeft===0 ? "ends today" : "ends in "+r.daysLeft+" day"+(r.daysLeft===1?"":"s");
+      var msg = "Your posting in "+unitLabel+" "+when+".";
+      if(!r.hasNextPosting) msg += " No new posting is on file yet — add one under My Postings when you know it.";
+      return msg;
+    }
+    if(r.type==="weekly"){
+      var msg = r.weekCount>0
+        ? ("You've logged "+r.weekCount+" entr"+(r.weekCount===1?"y":"ies")+" in the last 7 days.")
+        : "You haven't logged any entries in the last 7 days.";
+      if(r.pendingPapers!=null && r.pendingPapers>0){
+        msg += " "+r.pendingPapers+" case write-up"+(r.pendingPapers===1?"":"s")+" still pending — see the Write-up column in My Entries.";
+      }
+      return msg;
+    }
+    if(r.type==="daily"){
+      if(!r.lastEntryDate) return "You haven't logged your first entry yet — whenever you're ready.";
+      var days = Math.round((new Date(todayISO()+"T00:00:00") - new Date(r.lastEntryDate+"T00:00:00")) / 86400000);
+      return "You haven't logged an entry in "+days+" day"+(days===1?"":"s")+".";
+    }
+    return "";
+  }
+  function reminderBanner(){
+    if(!state.reminders || state.reminders.length===0) return "";
+    var r = state.reminders[0];
+    if(state.dismissedReminderKey===r.type) return "";
+    return '<div class="reminder-banner"><span>'+composeReminderText(r)+'</span>'+
+      '<button type="button" class="reminder-dismiss" data-dismiss-reminder="'+esc(r.type)+'" aria-label="Dismiss reminder">×</button></div>';
+  }
+
   function renderDashboardResident(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
     var s = computeStats(state.myEntries);
     var todayUnit = unitForDate(state.user.postings, todayISO());
     var recent = state.myEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
     return ''+
+    reminderBanner()+
     (todayUnit ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Current posting: '+unitShortHtml(todayUnit)+' — '+esc(unitFull(todayUnit))+'</div>'
       : '<div class="notice-banner">You don’t have a current posting on file — add one under My Postings so your entries can be tagged with a unit.</div>')+
     '<div class="stat-grid">'+
@@ -1621,15 +1751,40 @@
     return null;
   }
 
+  // Groups every entry type (surgical, other, case, academic, seminar) by
+  // calendar month so trainees and their supervisors can see logging pace
+  // over time, not just lifetime totals -- sorted chronologically (oldest
+  // first) so the bars read left-to-right as a timeline.
+  function computeMonthlyTrend(entries){
+    var months = {};
+    entries.forEach(function(e){
+      if(!e.date) return;
+      var m = e.date.slice(0,7); // "YYYY-MM"
+      if(!months[m]) months[m] = { month:m, total:0, surgical:0, other:0, "case":0, academic:0, seminar:0 };
+      months[m].total++;
+      var t = normType(e);
+      if(months[m].hasOwnProperty(t)) months[m][t]++;
+    });
+    return Object.keys(months).sort().map(function(k){ return months[k]; });
+  }
+  function fmtMonthLabel(ym){
+    try{ var d = new Date(ym+"-01T00:00:00"); return d.toLocaleDateString(undefined,{month:"short",year:"numeric"}); }
+    catch(e){ return ym; }
+  }
   function renderStatsAndCharts(entries){
     var s = computeStats(entries);
     var maxProc = s.procRows.length ? s.procRows[0].count : 0;
     var maxSite = s.siteRows.length ? s.siteRows[0].count : 0;
     var maxUnit = s.unitRows.length ? s.unitRows[0].count : 0;
+    var trend = computeMonthlyTrend(entries);
+    var maxTrend = trend.length ? Math.max.apply(null, trend.map(function(r){ return r.total; })) : 0;
     return ''+
     '<div class="stats-block"><h3>Total</h3><div class="stat-grid">'+
       statTile(s.total,"Total")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar")+
     '</div></div>'+
+    (trend.length ? '<div class="card stats-block"><h3>Time-based (entries per month, all types)</h3>'+
+      trend.map(function(r){ return barRow(fmtMonthLabel(r.month), r.total, maxTrend, "var(--violet)"); }).join("")+
+    '</div>' : '')+
     (s.siteRows.length ? '<div class="card stats-block"><h3>Area-wise (surgical + other procedures, by site)</h3>'+
       s.siteRows.map(function(r){ return barRow(catInfo(r.key).name, r.count, maxSite, catInfo(r.key).color, r.key); }).join("")+
     '</div>' : '')+
@@ -1701,7 +1856,7 @@
 
   function consultantField(){
     var f = state.wiz.fields;
-    var list = state.consultantsList;
+    var list = wizConsultantOptions();
     return ''+
     '<div class="field"><label for="f-consultantChoice">Consultant</label><select id="f-consultantChoice" onchange="window.__entlog_toggleConsultant(this.value)">'+
       list.map(function(c){ return '<option value="'+esc(c.username)+'" '+(f.consultantChoice===c.username?"selected":"")+'>'+esc(c.displayName)+'</option>'; }).join("")+
@@ -1719,7 +1874,7 @@
         '<div class="field"><label for="f-site">Site</label><select id="f-site" onchange="window.__entlog_setSite(this.value)">'+
           state.config.categories.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===f.site?"selected":"")+'>'+esc(c.name)+'</option>'; }).join("")+
         '</select></div>'+
-        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
+        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
       '</div>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
@@ -1738,7 +1893,7 @@
         '<div class="field"><label for="f-role">Your role (entrustment level)</label><select id="f-role">'+opts_(state.config.roleLevels,f.role)+'</select></div>'+
       '</div>'+
       consultantField()+
-      '<div class="field"><label for="f-assistants">Assistants <span class="muted">(optional)</span></label><input id="f-assistants" type="text" value="'+esc(f.assistants||"")+'"></div>'+
+      '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
       '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
@@ -1757,7 +1912,7 @@
         '</select></div>'+
       '</div>'+
       '<div class="row2">'+
-        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
+        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
         '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
       '</div>'+
       '<div class="row2">'+
@@ -1771,7 +1926,7 @@
       '<div class="field"><label>Procedure(s) performed <span class="muted">(from '+esc(catInfo(f.site).name)+')</span></label>'+multiPicker("procedures", procOptions, f.procedures)+'</div>'+
       '<div class="field"><label for="f-role">Your role (entrustment level)</label><select id="f-role">'+opts_(state.config.roleLevels,f.role)+'</select></div>'+
       consultantField()+
-      '<div class="field"><label for="f-assistants">Assistants <span class="muted">(optional)</span></label><input id="f-assistants" type="text" value="'+esc(f.assistants||"")+'"></div>'+
+      '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
     '</div>';
@@ -1848,24 +2003,69 @@
   // case report; it's a clickable link straight to the Interesting Case entry
   // that was auto-created from it (see submitSurgical's case-report chain).
   function caseReportCell(r, rows){
-    if(normType(r)!=="surgical") return '<span class="case-no">—</span>';
-    if(r.caseReport!=="Yes") return '<span class="case-no">No</span>';
-    var linked = findLinkedCase(r.id, rows);
-    if(linked) return '<button type="button" class="case-link" data-view-entry="'+esc(linked.id)+'">Yes</button>';
-    return '<span class="case-no">Yes</span>';
+    var t = normType(r);
+    if(t==="surgical"){
+      if(r.caseReport!=="Yes") return '<span class="case-no">No</span>';
+      var linked = findLinkedCase(r.id, rows);
+      if(linked) return '<button type="button" class="case-link" data-view-entry="'+esc(linked.id)+'">Yes</button>';
+      return '<span class="case-no">Yes</span>';
+    }
+    // The reverse direction: a Case row that was itself created from (and
+    // stays linked to) a surgical entry -- shown as a distinct "Linked"
+    // indicator in the same column, clickable straight to that surgical
+    // entry, so the connection is visible from either module without
+    // needing a whole new column.
+    if(t==="case" && r.linkedFromId){
+      var origin = (rows||[]).filter(function(x){ return x.id===r.linkedFromId; })[0];
+      if(origin) return '<button type="button" class="case-link case-link-origin" data-view-entry="'+esc(origin.id)+'">↩ Linked</button>';
+      return '<span class="case-no">Linked</span>';
+    }
+    return '<span class="case-no">—</span>';
+  }
+
+  // The PG's own private write-up to-do for an Interesting Case linked to a
+  // surgical entry -- backend only ever populates paperStatus for exactly
+  // that combination (case + linkedFromId + resident author), so a plain
+  // null/undefined check is enough to decide whether to show the control at
+  // all; no need to re-derive the role/link rules client-side. Immediate
+  // commit on change (like the multi-picker checkboxes elsewhere), sent as a
+  // lightweight {paperStatus} PATCH -- safe now that update_entry() treats
+  // an omitted field as "leave alone" rather than "clear it".
+  var PAPER_STATUS_LABEL = { not_done: "Not started", in_progress: "In progress", done: "Done" };
+  function paperStatusCell(r){
+    if(r.paperStatus==null) return '<span class="case-no">—</span>';
+    var opts = ["not_done","in_progress","done"].map(function(v){
+      return '<option value="'+v+'"'+(r.paperStatus===v?' selected':'')+'>'+PAPER_STATUS_LABEL[v]+'</option>';
+    }).join("");
+    return '<select class="ps-select ps-'+esc(r.paperStatus)+'" data-paper-status="'+esc(r.id)+'" aria-label="Paper write-up status">'+opts+'</select>';
+  }
+  async function setPaperStatus(id, value){
+    var entry = state.myEntries.filter(function(e){ return e.id==id; })[0];
+    var prev = entry ? entry.paperStatus : null;
+    if(entry) entry.paperStatus = value; // optimistic, so the select reflects the click immediately
+    render();
+    try{
+      var updated = await dUpdateEntry(id, { paperStatus: value });
+      if(entry) entry.paperStatus = updated.paperStatus;
+      toast("Write-up status updated.");
+    }catch(e){
+      if(entry) entry.paperStatus = prev;
+      toast("Could not update write-up status.");
+    }
+    render();
   }
 
   function renderResidentEntries(){
     if(state.loading) return '<div class="empty-state">Loading…</div>';
     var rows = state.myEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
     return ''+
-    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2></div>'+
+    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
     '<div class="table-wrap"><table><thead><tr>'+
       '<th>#</th><th>Date of entry</th><th>Date of procedure</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th>'+
       '<th>Procedure name</th><th>Primary diagnosis</th><th>Secondary diagnosis</th><th>Co-morbidities</th>'+
-      '<th>Role</th><th>Consultant &amp; assistants</th><th>Case report</th><th>Unit</th><th></th>'+
+      '<th>Role</th><th>Consultant &amp; assistants</th><th>Case report</th><th>Write-up</th><th>Unit</th><th></th>'+
     '</tr></thead><tbody>'+
-      (rows.length===0 ? '<tr><td colspan="15" class="muted">Nothing logged yet.</td></tr>' : rows.map(function(r,i){
+      (rows.length===0 ? '<tr><td colspan="16" class="muted">Nothing logged yet.</td></tr>' : rows.map(function(r,i){
         return '<tr>'+
           '<td class="tabular">'+(i+1)+'</td>'+
           '<td class="tabular">'+fmtDate((r.createdAt||"").slice(0,10))+'</td>'+
@@ -1880,8 +2080,9 @@
           '<td>'+esc(r.role||"—")+'</td>'+
           '<td>'+entryConsultantAndAssistants(r)+'</td>'+
           '<td>'+caseReportCell(r, rows)+'</td>'+
+          '<td>'+paperStatusCell(r)+'</td>'+
           '<td>'+unitShortHtml(r.unit)+'</td>'+
-          '<td style="white-space:nowrap;"><button class="btn btn-sm" data-view-entry="'+r.id+'">View</button> <button class="btn btn-sm" data-edit-entry="'+r.id+'">Edit</button> <button class="btn btn-sm btn-danger" data-del="'+r.id+'">Delete</button></td>'+
+          '<td style="white-space:nowrap;"><button class="btn btn-sm" data-view-entry="'+r.id+'">View</button> <button class="btn btn-sm" data-edit-entry="'+r.id+'">Edit</button> <button class="btn btn-sm" data-view-history="'+r.id+'">History</button> <button class="btn btn-sm btn-danger" data-del="'+r.id+'">Delete</button></td>'+
         '</tr>';
       }).join(""))+
     '</tbody></table></div></div>';
@@ -1929,6 +2130,74 @@
         '<div style="margin-top:14px;">'+
           rows.map(function(r){ return '<div class="detail-row"><div class="k">'+esc(r[0])+'</div><div>'+r[1]+'</div></div>'; }).join("")+
         '</div>'+
+      '</div>'+
+    '</div>';
+  }
+
+  // Edit history: who changed what, when. GET /entries/<id>/history already
+  // enforces who's allowed to see it (author, Developer, HOD, Coordinator, or
+  // a Head of Unit within their unit scope) -- the frontend just renders
+  // whatever comes back, or a plain access message on a 403.
+  var HISTORY_FIELD_LABELS = {
+    entryType:"Type", unit:"Unit", date:"Date of procedure", site:"Site", procedures:"Procedure(s)",
+    setting:"Setting", otherSettingType:"Setting detail", hospitalNumber:"Hospital Number",
+    age:"Age", sex:"Sex", diagnoses:"Primary diagnosis", diagnosesSecondary:"Secondary diagnosis",
+    comorbidities:"Co-morbidities", laterality:"Laterality", role:"Role", consultant:"Consultant",
+    consultantUsername:"Consultant (linked account)", assistants:"Assistants", comments:"Comments/Complications",
+    caseReport:"Case report?", linkedFromId:"Linked entry ID", history:"Brief History", examination:"Examination Findings",
+    academicType:"Activity type", academicTypeOther:"Activity type (other)", seminarType:"Seminar type",
+    seminarTypeOther:"Seminar type (other)", topic:"Topic", venue:"Venue", details:"Details", paperStatus:"Write-up status"
+  };
+  function historyFieldLabel(k){ return HISTORY_FIELD_LABELS[k] || k; }
+  function historyFieldValue(v){
+    if(v==null || v==="") return '<span class="muted">—</span>';
+    if(Array.isArray(v)) return v.length ? esc(v.join(", ")) : '<span class="muted">—</span>';
+    if(typeof v==="object") return esc(JSON.stringify(v));
+    return esc(String(v));
+  }
+  async function openEntryHistory(id){
+    state.viewingHistoryEntryId = id;
+    state.historyLoading = true;
+    state.historyEdits = [];
+    state.historyError = "";
+    render();
+    try{
+      state.historyEdits = await dGetEntryHistory(id);
+    }catch(e){
+      state.historyError = "You don't have access to this entry's history.";
+    }
+    state.historyLoading = false;
+    render();
+  }
+  function renderEntryHistoryModal(){
+    if(state.viewingHistoryEntryId==null) return "";
+    var body;
+    if(state.historyLoading){
+      body = '<div class="empty-state">Loading…</div>';
+    } else if(state.historyError){
+      body = '<div class="empty-state">'+esc(state.historyError)+'</div>';
+    } else if(state.historyEdits.length===0){
+      body = '<div class="empty-state">No edits recorded yet — this entry hasn’t changed since it was created.</div>';
+    } else {
+      body = state.historyEdits.slice().reverse().map(function(ed){
+        var fields = Object.keys(ed.changes||{});
+        return '<div class="history-entry">'+
+          '<div class="history-entry-head"><b>'+esc(ed.editedBy)+'</b> <span class="muted tabular">'+fmtDateTime(ed.editedAt)+'</span></div>'+
+          '<div class="history-changes">'+
+            fields.map(function(f){
+              var c = ed.changes[f];
+              return '<div class="detail-row"><div class="k">'+esc(historyFieldLabel(f))+'</div><div>'+historyFieldValue(c.old)+' → '+historyFieldValue(c.new)+'</div></div>';
+            }).join("")+
+          '</div>'+
+        '</div>';
+      }).join("");
+    }
+    return '<div class="modal-overlay" id="entry-history-overlay">'+
+      '<div class="modal-card">'+
+        '<button class="modal-close" id="entry-history-close" aria-label="Close">×</button>'+
+        '<span class="eyebrow">Edit history</span>'+
+        '<h2>Entry #'+esc(state.viewingHistoryEntryId)+'</h2>'+
+        '<div style="margin-top:14px;">'+body+'</div>'+
       '</div>'+
     '</div>';
   }
@@ -1985,7 +2254,7 @@
     var banner = renderScopeBanner();
     if(state.roster.length===0) return banner+'<div class="card"><div class="empty-state">No trainees’ entries are visible to you right now.</div></div>';
     return banner+''+
-    '<div class="card"><h2>Trainee roster</h2>'+
+    '<div class="card"><div class="section-head"><h2>Trainee roster</h2><button class="btn btn-sm" id="export-my-entries">Export visible entries (CSV)</button></div>'+
     '<div class="table-wrap"><table><thead><tr><th>Trainee</th><th>Role</th><th>Batch</th><th>Current unit</th><th>Total</th><th>Surgical</th><th>Other</th><th>Cases</th><th>Academic</th><th>Seminars</th><th>Last entry</th><th></th></tr></thead><tbody>'+
       state.roster.map(function(r){
         var s = computeStats(r.entries);
@@ -1999,15 +2268,22 @@
   function renderConsultantDetail(){
     if(!state.detailUser){ return '<div class="empty-state">Loading…</div>'; }
     var entries = state.detailEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
+    // Edit-history affordance for supervisors: only Head of Unit/HOD/Coordinator
+    // (the same set the backend's GET /entries/<id>/history actually allows,
+    // per the "visible to ... Head of unit, HOD and developer" + Coordinator
+    // clarification) -- a plain Professor with roster access but no role
+    // assignment sees the entries themselves but never gets this button.
+    var caps = state.capabilities || {};
+    var showHistory = !!(caps.isHod || caps.isCoordinator || caps.isHeadOfUnit);
     return ''+
     renderScopeBanner()+
     '<button class="btn btn-sm" id="back-to-roster" style="margin-bottom:14px;">← Back to roster</button>'+
     '<div class="card"><h2>'+esc(state.detailUser.displayName)+'</h2><p class="muted">'+esc(state.detailUser.pgYear||"")+'</p></div>'+
     renderStatsAndCharts(entries)+
     '<div class="card"><h2>Entries ('+entries.length+')</h2>'+
-    '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th><th>Summary</th><th>Unit</th><th>Role</th><th>Case report</th></tr></thead><tbody>'+
-      (entries.length===0 ? '<tr><td colspan="8" class="muted">No entries visible to you.</td></tr>' : entries.map(function(r){
-        return '<tr><td class="tabular">'+fmtDate(r.date)+'</td><td>'+entryTypeChip(r)+'</td><td>'+esc(entryHospitalNumber(r)||"—")+'</td><td class="tabular">'+esc(entryAgeSex(r))+'</td><td>'+esc(summarizeEntry(r))+'</td><td>'+unitShortHtml(r.unit)+'</td><td>'+esc(r.role||"—")+'</td><td>'+caseReportCell(r, entries)+'</td></tr>';
+    '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th><th>Summary</th><th>Unit</th><th>Role</th><th>Case report</th>'+(showHistory?'<th></th>':'')+'</tr></thead><tbody>'+
+      (entries.length===0 ? '<tr><td colspan="'+(showHistory?9:8)+'" class="muted">No entries visible to you.</td></tr>' : entries.map(function(r){
+        return '<tr><td class="tabular">'+fmtDate(r.date)+'</td><td>'+entryTypeChip(r)+'</td><td>'+esc(entryHospitalNumber(r)||"—")+'</td><td class="tabular">'+esc(entryAgeSex(r))+'</td><td>'+esc(summarizeEntry(r))+'</td><td>'+unitShortHtml(r.unit)+'</td><td>'+esc(r.role||"—")+'</td><td>'+caseReportCell(r, entries)+'</td>'+(showHistory?'<td><button class="btn btn-sm" data-view-history="'+r.id+'">History</button></td>':'')+'</tr>';
       }).join(""))+
     '</tbody></table></div></div>';
   }
@@ -2044,6 +2320,7 @@
             '<div class="field"><label for="nu-unit">Home unit</label><select id="nu-unit">'+unitOptions(null)+'</select></div>'+
           '</div>'
         ) : '')+
+        (role==="fellow" ? '<div class="field"><label for="nu-unit">Parent / home unit</label><select id="nu-unit">'+unitOptions(null)+'</select></div>' : '')+
         '<button class="btn btn-primary" id="submit-create-user">Create account</button>'
       ) : '')+
     '</div>';
@@ -2061,15 +2338,30 @@
         ["resident","senior_resident","fellow","consultant","developer"].map(function(r){ return '<option value="'+r+'" '+(r===u.role?"selected":"")+'>'+esc(roleLabel(r))+'</option>'; }).join("")+
       '</select> <button class="btn btn-sm" data-apply-role="'+esc(u.username)+'">Apply</button>')
       : '<span class="chip chip-grey">'+esc(roleLabel(u.role))+'</span>';
-    var profileField = isTraineeRole(u.role) ? "pgYear" : (u.role==="consultant" ? "designation" : null);
-    var profileCell = "—";
-    if(profileField==="pgYear"){
-      profileCell = '<select data-profile-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.pgYears, u.pgYear)+'</select> '+
-        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="pgYear">Save</button>';
-    } else if(profileField==="designation"){
-      profileCell = '<select data-profile-select="'+esc(u.username)+'" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.consultantDesignations, u.designation)+'</select> '+
-        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="designation">Save</button>';
+    // A Fellow gets TWO inline-editable fields (batch AND parent unit) where
+    // every other role gets at most one, so each control's select is scoped
+    // by username+field ("user|field") rather than username alone -- picking
+    // the right one when a row has more than one Save button.
+    var profileParts = [];
+    if(isTraineeRole(u.role)){
+      profileParts.push(
+        '<div'+(u.role==="fellow"?' style="margin-bottom:4px;"':'')+'><select data-profile-select="'+esc(u.username)+'|pgYear" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.pgYears, u.pgYear)+'</select> '+
+        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="pgYear">Save</button></div>'
+      );
     }
+    if(u.role==="fellow"){
+      profileParts.push(
+        '<div><select data-profile-select="'+esc(u.username)+'|unit" style="padding:5px 7px; font-size:12.5px;">'+unitOptions(u.unit)+'</select> '+
+        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="unit">Save</button></div>'
+      );
+    }
+    if(u.role==="consultant"){
+      profileParts.push(
+        '<select data-profile-select="'+esc(u.username)+'|designation" style="padding:5px 7px; font-size:12.5px;">'+opts_(state.config.consultantDesignations, u.designation)+'</select> '+
+        '<button class="btn btn-sm" data-apply-profile="'+esc(u.username)+'" data-profile-field="designation">Save</button>'
+      );
+    }
+    var profileCell = profileParts.length ? profileParts.join("") : "—";
     return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td>'+roleCell+'</td><td>'+profileCell+'</td><td>'+statusChip+'</td>'+
       '<td style="white-space:nowrap;">'+
         '<button class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-toggle-active="'+esc(u.username)+'" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> '+
@@ -2077,7 +2369,7 @@
       '</td></tr>';
   }
   function renderUserAccountsTable(rows, canChangeRole){
-    return '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Status</th><th></th></tr></thead><tbody>'+
+    return '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation / Unit</th><th>Status</th><th></th></tr></thead><tbody>'+
       rows.map(function(u){ return userAccountRow(u, canChangeRole); }).join("")+
     '</tbody></table></div>';
   }
@@ -2361,7 +2653,7 @@
     else if(state.view==="manage-users") inner = renderManageUsers();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="about") inner = renderAbout();
-    app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "");
+    app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "") + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "");
     wireShellEvents();
   }
 
@@ -2369,6 +2661,12 @@
      EVENT WIRING
   ============================================================ */
   window.__entlog_setSite = function(val){ wizSetSite(val); };
+  window.__entlog_wizDateChanged = function(val){
+    syncWizFieldsFromDom();
+    state.wiz.fields.date = val;
+    render();
+    loadWizPeopleList();
+  };
   window.__entlog_toggleConsultant = function(val){
     if(state.wiz) state.wiz.fields.consultantChoice = val;
     var wrap = el("consultant-other-wrap");
@@ -2455,6 +2753,13 @@
       b.onclick = function(){ editEntry(b.getAttribute("data-edit-entry")); };
     });
 
+    // edit-history modal
+    document.querySelectorAll("[data-view-history]").forEach(function(b){
+      b.onclick = function(){ openEntryHistory(b.getAttribute("data-view-history")); };
+    });
+    var entryHistoryClose = el("entry-history-close"); if(entryHistoryClose) entryHistoryClose.onclick = function(){ state.viewingHistoryEntryId = null; render(); };
+    var entryHistoryOverlay = el("entry-history-overlay"); if(entryHistoryOverlay) entryHistoryOverlay.onclick = function(ev){ if(ev.target===entryHistoryOverlay){ state.viewingHistoryEntryId = null; render(); } };
+
     // entry wizard
     document.querySelectorAll("[data-start]").forEach(function(b){
       b.onclick = function(){ startWizard(b.getAttribute("data-start")); };
@@ -2486,6 +2791,16 @@
     // my entries delete
     document.querySelectorAll("[data-del]").forEach(function(b){
       b.onclick = function(){ removeEntry(b.getAttribute("data-del")); };
+    });
+
+    // paper write-up status to-do (immediate commit, PG's own linked cases only)
+    document.querySelectorAll("[data-paper-status]").forEach(function(sel){
+      sel.onchange = function(){ setPaperStatus(sel.getAttribute("data-paper-status"), sel.value); };
+    });
+
+    // dashboard reminder banner dismiss (session-only, resets on next login)
+    document.querySelectorAll("[data-dismiss-reminder]").forEach(function(b){
+      b.onclick = function(){ state.dismissedReminderKey = b.getAttribute("data-dismiss-reminder"); render(); };
     });
 
     // resident postings
@@ -2526,7 +2841,7 @@
       b.onclick = function(){
         var u = b.getAttribute("data-apply-profile");
         var field = b.getAttribute("data-profile-field");
-        var sel = document.querySelector('[data-profile-select="'+u+'"]');
+        var sel = document.querySelector('[data-profile-select="'+u+'|'+field+'"]');
         if(sel){
           var patch = {}; patch[field] = sel.value;
           updateUserProfile(u, patch);
@@ -2547,6 +2862,7 @@
 
     var expE = el("export-entries"); if(expE) expE.onclick = exportEntriesCSV;
     var expU = el("export-users"); if(expU) expU.onclick = exportUsersCSV;
+    var expMine = el("export-my-entries"); if(expMine) expMine.onclick = exportMyEntriesCSV;
 
     // developer - create user
     var toggleCreateBtn = el("toggle-create-user"); if(toggleCreateBtn) toggleCreateBtn.onclick = function(){
