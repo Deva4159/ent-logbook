@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS entries (
   created_at            TEXT NOT NULL,
   site                  TEXT,
   procedures            TEXT NOT NULL DEFAULT '[]',
+  -- Surgical/Other Procedure entries: one block per site touched in the
+  -- same sitting, each {site, procedures, laterality, role} -- JSON array.
+  -- Supports a genuine multi-organ combined case (e.g. Ear+Nose) with its
+  -- own entrustment level per site, rather than one shared per entry. The
+  -- flat site/procedures/laterality/role_level columns above are kept for
+  -- every other entry type and for reading pre-migration rows, but a
+  -- surgical/other entry's real data lives here from this schema version
+  -- on -- see migrate_entries_table in db.py for the one-time backfill.
+  procedure_blocks      TEXT NOT NULL DEFAULT '[]',
   setting               TEXT,
   other_setting_type    TEXT,
   hospital_number       TEXT,

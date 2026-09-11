@@ -68,6 +68,59 @@ def unit_for_date(postings, date_str):
     return covering[0]["unit"]
 
 
+PROCEDURE_BLOCK_TYPES = {"surgical", "other"}
+
+
+def _valid_procedure_block(b):
+    return (
+        isinstance(b, dict)
+        and isinstance(b.get("site"), str) and b.get("site")
+        and isinstance(b.get("procedures"), list) and len(b["procedures"]) > 0
+        and all(isinstance(p, str) for p in b["procedures"])
+        and (b.get("laterality") is None or isinstance(b.get("laterality"), str))
+        and isinstance(b.get("role"), str) and b.get("role")
+    )
+
+
+def _clean_procedure_block(b):
+    return {
+        "site": b["site"],
+        "procedures": list(b["procedures"]),
+        "laterality": b.get("laterality") or "",
+        "role": b["role"],
+    }
+
+
+def _blocks_derived(blocks):
+    """Flat site/procedures/laterality/role, derived (never stored) from a
+    surgical/other entry's procedure_blocks, purely so simple read-side
+    consumers (the admin CSV export, any legacy caller) still get something
+    sensible without having to understand the block structure. Computed
+    fresh from procedure_blocks on every read -- never written back to the
+    flat columns -- so there is exactly one source of truth for these
+    fields and no way for the two to drift apart the way the old
+    partial-PATCH bug let scalar fields drift.
+    """
+    sites, procs, laterals, roles = [], [], [], []
+    for b in blocks:
+        if b.get("site") and b["site"] not in sites:
+            sites.append(b["site"])
+        for p in b.get("procedures") or []:
+            procs.append(p)
+        lat = b.get("laterality") or ""
+        if lat and lat not in laterals:
+            laterals.append(lat)
+        role = b.get("role") or ""
+        if role and role not in roles:
+            roles.append(role)
+    return {
+        "site": ", ".join(sites),
+        "procedures": procs,
+        "laterality": "; ".join(laterals),
+        "role": "; ".join(roles),
+    }
+
+
 def entry_row_to_dict(row):
     d = dict(row)
     for k in ("procedures", "diagnoses", "diagnoses_secondary", "comorbidities"):
@@ -75,6 +128,11 @@ def entry_row_to_dict(row):
             d[k] = json.loads(d[k]) if d[k] else []
         except (TypeError, ValueError):
             d[k] = []
+    try:
+        procedure_blocks = json.loads(d["procedure_blocks"]) if d.get("procedure_blocks") else []
+    except (TypeError, ValueError):
+        procedure_blocks = []
+    derived = _blocks_derived(procedure_blocks) if (d["entry_type"] in PROCEDURE_BLOCK_TYPES and procedure_blocks) else None
     return {
         "id": d["id"],
         "authorUsername": d["author_username"],
@@ -82,8 +140,9 @@ def entry_row_to_dict(row):
         "unit": d["unit"],
         "date": d["entry_date"],
         "createdAt": d["created_at"],
-        "site": d["site"],
-        "procedures": d["procedures"],
+        "procedureBlocks": procedure_blocks,
+        "site": derived["site"] if derived else d["site"],
+        "procedures": derived["procedures"] if derived else d["procedures"],
         "setting": d["setting"],
         "otherSettingType": d["other_setting_type"],
         "hospitalNumber": d["hospital_number"],
@@ -92,8 +151,8 @@ def entry_row_to_dict(row):
         "diagnoses": d["diagnoses"],
         "diagnosesSecondary": d["diagnoses_secondary"],
         "comorbidities": d["comorbidities"],
-        "laterality": d["laterality"],
-        "role": d["role_level"],
+        "laterality": derived["laterality"] if derived else d["laterality"],
+        "role": derived["role"] if derived else d["role_level"],
         "consultant": d["consultant"],
         "consultantUsername": d["consultant_username"],
         "assistants": d["assistants"],
@@ -409,6 +468,13 @@ def create_entry():
     # or a case logged by a Senior Resident/Fellow) gets no tracker at all.
     paper_status = "not_done" if (entry_type == "case" and linked_from_id and g.user["role"] == "resident") else None
 
+    procedure_blocks_json = "[]"
+    if entry_type in PROCEDURE_BLOCK_TYPES:
+        blocks = body.get("procedureBlocks")
+        if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
+            return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+        procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
+
     db = get_db()
     cur = db.execute(
         """INSERT INTO entries (
@@ -417,20 +483,28 @@ def create_entry():
             diagnoses_secondary, comorbidities, laterality, role_level, consultant,
             consultant_username, assistants, comments, case_report, linked_from_id,
             history, examination, academic_type, academic_type_other, seminar_type,
-            seminar_type_other, topic, venue, details, paper_status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            seminar_type_other, topic, venue, details, paper_status, procedure_blocks
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             g.user["username"], entry_type, unit, entry_date, now,
-            body.get("site"), json.dumps(body.get("procedures") or []),
+            # site/procedures/laterality/role_level stay unset for a
+            # surgical/other entry -- procedure_blocks is authoritative for
+            # those two types from here on (see entry_row_to_dict, which
+            # derives these same flat fields back out for any reader that
+            # still wants them, e.g. the CSV export).
+            None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("site"),
+            "[]" if entry_type in PROCEDURE_BLOCK_TYPES else json.dumps(body.get("procedures") or []),
             body.get("setting"), body.get("otherSettingType"), body.get("hospitalNumber"),
             body.get("age"), body.get("sex"), json.dumps(body.get("diagnoses") or []),
             json.dumps(body.get("diagnosesSecondary") or []), json.dumps(body.get("comorbidities") or []),
-            body.get("laterality"), body.get("role"), body.get("consultant"),
+            None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("laterality"),
+            None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("role"),
+            body.get("consultant"),
             body.get("consultantUsername"), body.get("assistants"), body.get("comments"),
             body.get("caseReport"), linked_from_id,
             body.get("history"), body.get("examination"), body.get("academicType"),
             body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
-            body.get("topic"), body.get("venue"), body.get("details"), paper_status,
+            body.get("topic"), body.get("venue"), body.get("details"), paper_status, procedure_blocks_json,
         ),
     )
     db.commit()
@@ -577,6 +651,29 @@ def update_entry(entry_id):
 
     before = entry_row_to_dict(existing)
 
+    # procedure_blocks is the source of truth for a surgical/other entry;
+    # site/procedures/laterality/role in `before`/`after` are DERIVED from it
+    # (see entry_row_to_dict) and are never valid values to write back into
+    # the flat site/procedures/laterality/role_level columns -- a joined
+    # "ear, nose" string is not a category key. So those four columns are
+    # simply unset for these two entry types (exactly like create_entry),
+    # and any fallback for them reads the RAW existing row, never `before`.
+    is_block_type = entry_type in PROCEDURE_BLOCK_TYPES
+    if is_block_type:
+        if "procedureBlocks" in body:
+            blocks = body.get("procedureBlocks")
+            if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
+                return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+            procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
+        elif existing["procedure_blocks"] and existing["procedure_blocks"] != "[]":
+            procedure_blocks_json = existing["procedure_blocks"]  # untouched by this PATCH -- leave alone
+        else:
+            # entryType just changed TO surgical/other in this same PATCH,
+            # with no blocks supplied to go with it -- nothing valid to save.
+            return jsonify({"error": "At least one site/procedure block is required."}), 400
+    else:
+        procedure_blocks_json = "[]"
+
     db.execute(
         """UPDATE entries SET
             entry_type=?, unit=?, entry_date=?, site=?, procedures=?,
@@ -584,18 +681,20 @@ def update_entry(entry_id):
             diagnoses_secondary=?, comorbidities=?, laterality=?, role_level=?, consultant=?,
             consultant_username=?, assistants=?, comments=?, case_report=?, linked_from_id=?,
             history=?, examination=?, academic_type=?, academic_type_other=?, seminar_type=?,
-            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?
+            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?, procedure_blocks=?
         WHERE id = ?""",
         (
             entry_type, unit, entry_date,
-            body.get("site", before["site"]), json.dumps(body.get("procedures", before["procedures"]) or []),
+            None if is_block_type else body.get("site", existing["site"]),
+            "[]" if is_block_type else json.dumps(body.get("procedures", before["procedures"]) or []),
             body.get("setting", before["setting"]), body.get("otherSettingType", before["otherSettingType"]),
             body.get("hospitalNumber", before["hospitalNumber"]),
             body.get("age", before["age"]), body.get("sex", before["sex"]),
             json.dumps(body.get("diagnoses", before["diagnoses"]) or []),
             json.dumps(body.get("diagnosesSecondary", before["diagnosesSecondary"]) or []),
             json.dumps(body.get("comorbidities", before["comorbidities"]) or []),
-            body.get("laterality", before["laterality"]), body.get("role", before["role"]),
+            None if is_block_type else body.get("laterality", existing["laterality"]),
+            None if is_block_type else body.get("role", existing["role_level"]),
             body.get("consultant", before["consultant"]),
             body.get("consultantUsername", before["consultantUsername"]),
             body.get("assistants", before["assistants"]), body.get("comments", before["comments"]),
@@ -606,17 +705,22 @@ def update_entry(entry_id):
             body.get("seminarType", before["seminarType"]),
             body.get("seminarTypeOther", before["seminarTypeOther"]),
             body.get("topic", before["topic"]), body.get("venue", before["venue"]),
-            body.get("details", before["details"]), new_paper_status,
+            body.get("details", before["details"]), new_paper_status, procedure_blocks_json,
             entry_id,
         ),
     )
 
     row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     after = entry_row_to_dict(row)
+    # site/procedures/laterality/role are derived read-side from
+    # procedureBlocks for a surgical/other entry (see entry_row_to_dict), so
+    # diffing them here too would just repeat whatever procedureBlocks
+    # already shows, as four extra noisy lines every time it changes.
+    ignore = ENTRY_HISTORY_IGNORE | ({"site", "procedures", "laterality", "role"} if is_block_type else set())
     changes = {
         k: {"old": before[k], "new": after[k]}
         for k in after
-        if k not in ENTRY_HISTORY_IGNORE and before.get(k) != after[k]
+        if k not in ignore and before.get(k) != after[k]
     }
     if changes:
         db.execute(

@@ -123,21 +123,60 @@ def migrate_users_table(conn):
 
 
 def migrate_entries_table(conn):
-    """Adds the nullable `paper_status` column to an existing `entries` table
-    (PG write-up tracking for interesting cases linked to a surgical entry).
-    Unlike the users-table role CHECK, this is a plain nullable column with
-    no CHECK constraint, so SQLite's ADD COLUMN handles it directly -- no
-    rebuild needed. A brand new database has no `entries` table yet at this
-    point, so this is a no-op and the CREATE TABLE below makes it fresh with
-    the column already in place.
+    """Adds nullable columns to an existing `entries` table as the app grows
+    new per-entry fields. Each column is a plain ADD COLUMN with no CHECK
+    constraint, so SQLite handles it directly -- no table rebuild needed
+    (unlike migrate_users_table's role CHECK). A brand new database has no
+    `entries` table yet at this point, so this whole function is a no-op and
+    the CREATE TABLE below makes it fresh with every column already in place.
+
+    Each column below is gated on its OWN presence check, not a single
+    early return after the first migration -- an early return here would
+    silently skip every migration added after the first one for any
+    database that already has that first column (which, after this change
+    ships, is every database, including the one currently ahead of you).
     """
     if "entries" not in _existing_tables(conn):
         return
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
-    if "paper_status" in cols:
-        return  # already migrated
-    conn.execute("ALTER TABLE entries ADD COLUMN paper_status TEXT")
-    conn.commit()
+
+    if "paper_status" not in cols:
+        # PG write-up tracking for an Interesting Case linked to a surgical entry.
+        conn.execute("ALTER TABLE entries ADD COLUMN paper_status TEXT")
+        conn.commit()
+        cols.add("paper_status")
+
+    if "procedure_blocks" not in cols:
+        # Each Surgical/Other Procedure entry can now cover more than one
+        # site in the same sitting (e.g. a combined Ear+Nose case), each
+        # with its own site, procedures, laterality and entrustment level --
+        # so those four fields move from flat columns into a JSON array of
+        # blocks. create_entry/update_entry stop writing the old flat
+        # site/procedures/laterality/role_level columns for these two entry
+        # types from here on (case/academic/seminar entries never used them
+        # and are untouched); this backfill turns every existing surgical/
+        # other row's current flat values into an equivalent single-block
+        # array so nothing already logged silently loses its site,
+        # procedure, laterality or role the moment this migration runs.
+        conn.execute("ALTER TABLE entries ADD COLUMN procedure_blocks TEXT NOT NULL DEFAULT '[]'")
+        conn.commit()
+        cols.add("procedure_blocks")
+        rows = conn.execute(
+            "SELECT id, site, procedures, laterality, role_level FROM entries WHERE entry_type IN ('surgical','other')"
+        ).fetchall()
+        for r in rows:
+            try:
+                procs = json.loads(r["procedures"]) if r["procedures"] else []
+            except (TypeError, ValueError):
+                procs = []
+            block = {
+                "site": r["site"] or "",
+                "procedures": procs,
+                "laterality": r["laterality"] or "",
+                "role": r["role_level"] or "",
+            }
+            conn.execute("UPDATE entries SET procedure_blocks = ? WHERE id = ?", (json.dumps([block]), r["id"]))
+        conn.commit()
 
 
 def init_db():
