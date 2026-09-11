@@ -62,6 +62,22 @@ def index():
     return send_from_directory(STATIC_DIR, "index.html")
 
 
+# The frontend used to be a single self-contained index.html (inline
+# <style>/<script>); it's now split into index.html + styles.css + app.js
+# for reviewability. static_folder is deliberately left disabled above (see
+# Flask(...) call) so every served path stays an explicit, named route
+# rather than a wildcard directory listing -- add new static assets here by
+# name, not by re-enabling Flask's generic static handler.
+@app.get("/styles.css")
+def styles_css():
+    return send_from_directory(STATIC_DIR, "styles.css", mimetype="text/css")
+
+
+@app.get("/app.js")
+def app_js():
+    return send_from_directory(STATIC_DIR, "app.js", mimetype="application/javascript")
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})

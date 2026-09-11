@@ -20,6 +20,15 @@ def get_db():
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # WAL mode (persists in the db file itself once set, so this is a
+        # no-op after the first connection ever made) lets readers proceed
+        # without blocking on a writer -- worth having under gunicorn's
+        # multi-worker model, where each worker is a separate OS process
+        # opening its own connection to the same file, not just separate
+        # threads sharing one. Without it, the plain rollback-journal
+        # default can surface as "database is locked" under concurrent
+        # requests far sooner than WAL does.
+        conn.execute("PRAGMA journal_mode = WAL")
         _local.conn = conn
     return _local.conn
 
