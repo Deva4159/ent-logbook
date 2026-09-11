@@ -189,6 +189,23 @@
   .roadmap li{margin-bottom:10px; font-size:13.5px;}
   .toggle-row{display:flex; align-items:center; gap:8px;}
   .mp-box-wrap{max-height:220px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:10px;}
+  .sp-search{width:100%; margin-bottom:8px;}
+  .sp-row-hidden{display:none !important;}
+  .sp-empty-filter{padding:8px 2px; font-size:13px; color:var(--ink-soft);}
+
+  /* Searchable single-select ("ss-*"): a text input that filters an
+     always-in-the-DOM list of choices, shown while the input has focus
+     (CSS-only open/close, so it survives the app's full-innerHTML
+     re-renders without any JS state tracking whether it's "open"). */
+  .ss-wrap{position:relative;}
+  .ss-search{width:100%;}
+  .ss-list{position:absolute; z-index:20; left:0; right:0; top:calc(100% + 4px); max-height:240px; overflow-y:auto; background:var(--surface); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); display:none; padding:4px;}
+  .ss-wrap:focus-within .ss-list{display:block;}
+  .ss-row{padding:7px 9px; border-radius:6px; cursor:pointer; font-size:13.5px;}
+  .ss-row:hover, .ss-row.ss-row-active{background:var(--surface-2);}
+  .ss-row-selected{font-weight:600;}
+  .ss-row-selected .ss-check{color:var(--teal-ink);}
+  .ss-group-label{padding:6px 9px 2px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-soft);}
 
   .modal-overlay{position:fixed; inset:0; background:rgba(20,22,18,.55); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50;}
   .modal-card{background:var(--surface); border-radius:14px; box-shadow:var(--shadow); max-width:560px; width:100%; max-height:85vh; overflow-y:auto; padding:26px;}
@@ -373,6 +390,25 @@
       }).join("")+'</optgroup>';
     }).join("");
   }
+  // Grouped, alphabetized-within-group unit list for the searchable
+  // single-select (unitOptions above stays a plain grouped <select> for the
+  // couple of admin-only spots that never got converted -- see the "Units"
+  // task's scope note). Groups keep the admin's own group order (only two
+  // groups exist -- "Oto-laryngology Units" then "Peripheral Postings" --
+  // and that split is itself meaningful, unlike the ~19 units inside it).
+  function unitSearchOptions(){
+    var groups = {}, order = [];
+    (state.config.units||[]).forEach(function(u){
+      if(!groups[u.group]){ groups[u.group]=[]; order.push(u.group); }
+      groups[u.group].push(u);
+    });
+    var out = [];
+    order.forEach(function(g){
+      groups[g].slice().sort(function(a,b){ return String(a.fullName).localeCompare(String(b.fullName), undefined, {sensitivity:"base"}); })
+        .forEach(function(u){ out.push({ value:u.key, label:u.fullName+" ("+u.shortForm+")", group:g||"Units" }); });
+    });
+    return out;
+  }
 
   // Which unit a resident belonged to on a given date, from their self-logged
   // posting history [{unit, startDate, endDate|null}]. A posting with no end
@@ -427,10 +463,53 @@
      earlier 2-type (procedure/case) schema, so old data keeps
      displaying correctly instead of silently disappearing. ---------- */
   function normType(e){ return e.entryType==="procedure" ? "surgical" : e.entryType; }
-  function entrySite(e){ return e.site || e.category || ""; }
-  function entryProcedures(e){
+
+  // A Surgical/Other Procedure entry can now cover more than one site in the
+  // same sitting (e.g. a combined Ear+Nose case), each with its own
+  // procedures, laterality and entrustment level -- see procedureBlocks.
+  // entrySite/entryProcedures below stay as the single-value/flat readers
+  // every other entry type (and older display code) already expects; for a
+  // surgical/other entry they now return the FIRST block's site and the
+  // UNION of every block's procedures respectively -- fine for a plain list
+  // or search, but never sufficient on its own to describe a multi-block
+  // entry, which is why summarizeEntry/entryRoleSummary/the detail modal
+  // read entryProcedureBlocks directly instead of these two.
+  function entryProcedureBlocks(e){
+    if(e.procedureBlocks && e.procedureBlocks.length) return e.procedureBlocks;
+    // Backward compat: an entry from before this feature (or the backend's
+    // one-time migration hasn't run yet against it for some reason) still
+    // carries its site/procedures/laterality/role as flat fields -- treat
+    // that as an equivalent single block rather than showing nothing.
+    if(e.site || (e.procedures && e.procedures.length) || e.procedure){
+      return [{ site: e.site||e.category||"", procedures: entryProceduresFlat(e), laterality: e.laterality||"", role: e.role||"" }];
+    }
+    return [];
+  }
+  function entryProceduresFlat(e){
     if(e.procedures && e.procedures.length) return e.procedures;
     return e.procedure ? [e.procedure] : [];
+  }
+  function entrySite(e){
+    var blocks = entryProcedureBlocks(e);
+    return blocks.length ? (blocks[0].site||"") : "";
+  }
+  function entryProcedures(e){
+    var blocks = entryProcedureBlocks(e);
+    if(!blocks.length) return entryProceduresFlat(e);
+    var out = [];
+    blocks.forEach(function(b){ (b.procedures||[]).forEach(function(p){ out.push(p); }); });
+    return out;
+  }
+  // One row per site touched, "Site — Procedures (Laterality, Role)" -- used
+  // wherever a full per-block breakdown belongs (detail modal, edit-history
+  // formatting), as opposed to entrySite/entryProcedures' flattened view.
+  function entryRoleSummary(e){
+    var blocks = entryProcedureBlocks(e);
+    if(!blocks.length) return e.role||"";
+    var roles = blocks.map(function(b){ return b.role||""; }).filter(Boolean);
+    var uniq = roles.filter(function(v,i,a){ return a.indexOf(v)===i; });
+    if(uniq.length<=1) return uniq[0]||"";
+    return blocks.map(function(b){ return catInfo(b.site).name+": "+(b.role||"—"); }).join("; ");
   }
   // "Diagnosis" was renamed "Primary Diagnosis" in the UI; the stored field
   // key stays `diagnoses` for backward compatibility with entries logged
@@ -459,7 +538,15 @@
   function summarizeEntry(e){
     var t = normType(e);
     if(t==="surgical" || t==="other"){
-      return catInfo(entrySite(e)).name + " — " + (entryProcedures(e).join(", ") || "—");
+      var blocks = entryProcedureBlocks(e);
+      if(blocks.length<=1){
+        var b = blocks[0]||{};
+        return catInfo(b.site||"").name + " — " + ((b.procedures||[]).join(", ") || "—");
+      }
+      // A combined multi-site case: "Ear (Septoplasty); Nose (FESS)" rather
+      // than the single "Site — Procedures" format, which has nowhere to
+      // put a second site.
+      return blocks.map(function(b){ return catInfo(b.site).name+" ("+((b.procedures||[]).join(", ")||"—")+")"; }).join("; ");
     }
     if(t==="case"){ return entryDiagnoses(e).join(", ") || "Interesting case"; }
     if(t==="academic"){ return (e.academicType==="Other" ? e.academicTypeOther : e.academicType) || "Academic activity"; }
@@ -786,9 +873,9 @@
   function startWizard(type, prefill){
     var fields = { date: todayISO() };
     if(type==="surgical"){
-      Object.assign(fields, { site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], laterality:state.config.laterality[0], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"", caseReport:"No" });
+      Object.assign(fields, { procedureBlocks:[newProcedureBlock([])], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"", caseReport:"No" });
     } else if(type==="other"){
-      Object.assign(fields, { otherSettingType:state.config.otherProcedureSettings[0], site:(state.config.categories[0]||{}).key, procedures:[], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], role:state.config.roleLevels[0], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"" });
+      Object.assign(fields, { otherSettingType:state.config.otherProcedureSettings[0], procedureBlocks:[newProcedureBlock([])], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"" });
     } else if(type==="case"){
       Object.assign(fields, { hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], procedures:[], history:"", examination:"", comments:"" });
     } else if(type==="academic"){
@@ -865,6 +952,14 @@
     // existing built-in handling for values outside its options list.
     if(type==="surgical" || type==="other"){
       fields.assistantsPicked = (e.assistants||"").split(",").map(function(s){ return s.trim(); }).filter(Boolean);
+      // Fresh copies of every block (and its procedures array) -- the
+      // wizard mutates blocks in place (wizSetBlockSite, __entlog_setBlockField,
+      // the procedures multiPicker), which must never reach back into the
+      // cached entry sitting in state.myEntries/state.roster before submit.
+      fields.procedureBlocks = entryProcedureBlocks(e).map(function(b){
+        return { site:b.site||"", procedures:(b.procedures||[]).slice(), laterality:b.laterality||"", role:b.role||"" };
+      });
+      if(!fields.procedureBlocks.length) fields.procedureBlocks = [newProcedureBlock([])];
     }
     startWizard(type, fields);
     state.wiz.editingId = id;
@@ -874,7 +969,7 @@
       state.wiz.origSnapshot = {
         hospitalNumber: e.hospitalNumber||"", age: e.age||"", sex: e.sex||"",
         diagnoses: (e.diagnoses||[]).slice(), diagnosesSecondary: (e.diagnosesSecondary||[]).slice(),
-        comorbidities: (e.comorbidities||[]).slice(), procedures: (e.procedures||[]).slice()
+        comorbidities: (e.comorbidities||[]).slice(), procedures: entryProcedures(e).slice()
       };
     }
     state.view = "resident-log";
@@ -949,12 +1044,16 @@
     // mpToggle/mpAddExtra/mpRemoveExtra directly -- same as diagnoses,
     // procedures and comorbidities, none of which are in this DOM-sync list
     // either), so it's deliberately absent here.
-    var ids = ["f-hospitalNumber","f-date","f-setting","f-laterality","f-role",
+    // f-laterality/f-role no longer exist as top-level ids -- a Surgical/
+    // Other Procedure block's own laterality/role selects commit
+    // immediately via their onchange (__entlog_setBlockField), the same
+    // "immediate commit, no DOM-scrape needed" treatment site already got.
+    var ids = ["f-hospitalNumber","f-date","f-setting",
       "f-comments","f-caseReport","f-otherSettingType","f-history","f-examination","f-details",
       "f-academicType","f-academicTypeOther","f-consultantChoice","f-consultant-other",
       "f-age","f-sex","f-seminarType","f-seminarTypeOther","f-topic","f-venue"];
     var fieldFor = { "f-hospitalNumber":"hospitalNumber","f-date":"date","f-setting":"setting",
-      "f-laterality":"laterality","f-role":"role","f-comments":"comments",
+      "f-comments":"comments",
       "f-caseReport":"caseReport","f-otherSettingType":"otherSettingType","f-history":"history",
       "f-examination":"examination","f-details":"details","f-academicType":"academicType",
       "f-academicTypeOther":"academicTypeOther","f-consultantChoice":"consultantChoice",
@@ -965,31 +1064,89 @@
       if(node) f[fieldFor[id]] = node.value;
     });
   }
+  // A multiPicker fieldKey is either a plain state.wiz.fields[key] array
+  // (diagnoses, comorbidities, assistantsPicked) or, for a Surgical/Other
+  // Procedure block's own procedures list, the path "pb:<index>:procedures"
+  // -- these two getters/setters are the only place that distinction
+  // matters, so mpToggle/mpAddExtra/mpRemoveExtra stay exactly as they were
+  // for every existing caller.
+  function mpFieldGet(key){
+    if(key.indexOf("pb:")===0){
+      var parts = key.split(":"); var block = (state.wiz.fields.procedureBlocks||[])[+parts[1]];
+      return (block && block[parts[2]]) || [];
+    }
+    return state.wiz.fields[key]||[];
+  }
+  function mpFieldSet(key, arr){
+    if(key.indexOf("pb:")===0){
+      var parts = key.split(":"); var block = (state.wiz.fields.procedureBlocks||[])[+parts[1]];
+      if(block) block[parts[2]] = arr;
+      return;
+    }
+    state.wiz.fields[key] = arr;
+  }
   function mpToggle(key, value, checked){
     syncWizFieldsFromDom();
-    var arr = (state.wiz.fields[key]||[]).slice();
+    var arr = mpFieldGet(key).slice();
     var i = arr.indexOf(value);
     if(checked && i===-1) arr.push(value);
     if(!checked && i!==-1) arr.splice(i,1);
-    state.wiz.fields[key] = arr;
+    mpFieldSet(key, arr);
     render();
   }
   function mpAddExtra(key, value){
     syncWizFieldsFromDom();
     value = (value||"").trim();
     if(!value) return;
-    var arr = (state.wiz.fields[key]||[]).slice();
+    var arr = mpFieldGet(key).slice();
     if(arr.indexOf(value)===-1) arr.push(value);
-    state.wiz.fields[key] = arr;
+    mpFieldSet(key, arr);
     render();
   }
   function mpRemoveExtra(key, value){
     syncWizFieldsFromDom();
-    var arr = (state.wiz.fields[key]||[]).filter(function(v){ return v!==value; });
-    state.wiz.fields[key] = arr;
+    var arr = mpFieldGet(key).filter(function(v){ return v!==value; });
+    mpFieldSet(key, arr);
     render();
   }
   function wizSetSite(site){ syncWizFieldsFromDom(); state.wiz.fields.site = site; state.wiz.fields.procedures = []; render(); }
+
+  // ---- Surgical/Other Procedure: repeatable site/procedure blocks ----
+  // Each block is { site, procedures, laterality, role }. "Other Procedure"
+  // entries don't have a laterality field at all (renderOtherBlock omits
+  // it), so that key just stays "" and is ignored on submit for that type.
+  function newProcedureBlock(usedSites){
+    var nextCat = state.config.categories.filter(function(c){ return usedSites.indexOf(c.key)===-1; })[0] || state.config.categories[0] || {};
+    return { site: nextCat.key||"", procedures: [], laterality: state.config.laterality[0]||"", role: state.config.roleLevels[0]||"" };
+  }
+  function wizAddBlock(){
+    syncWizFieldsFromDom();
+    var f = state.wiz.fields;
+    var usedSites = f.procedureBlocks.map(function(b){ return b.site; });
+    f.procedureBlocks.push(newProcedureBlock(usedSites));
+    render();
+  }
+  function wizRemoveBlock(idx){
+    syncWizFieldsFromDom();
+    var f = state.wiz.fields;
+    if(f.procedureBlocks.length<=1) return; // at least one site/procedure block is required
+    f.procedureBlocks.splice(idx,1);
+    render();
+  }
+  function wizSetBlockSite(idx, site){
+    syncWizFieldsFromDom();
+    var block = state.wiz.fields.procedureBlocks[idx];
+    if(!block) return;
+    block.site = site;
+    block.procedures = []; // changing site invalidates whatever was picked from the old one, same as the old single-site wizSetSite
+    render();
+  }
+  window.__entlog_setBlockField = function(idx, field, value){
+    syncWizFieldsFromDom();
+    var block = state.wiz.fields.procedureBlocks[idx];
+    if(block) block[field] = value;
+    render();
+  };
 
   function resolvedConsultant(){
     var f = state.wiz.fields;
@@ -1004,18 +1161,23 @@
     var f = state.wiz.fields;
     var hospitalNumber = (el("f-hospitalNumber")||{}).value || "";
     if(!hospitalNumber.trim()){ toast("Hospital number is required."); return; }
-    if(!f.procedures.length){ toast("Pick at least one procedure performed."); return; }
+    var blocks = f.procedureBlocks||[];
+    if(!blocks.length || blocks.some(function(b){ return !b.procedures || !b.procedures.length; })){
+      toast(blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
+    }
     if(!f.diagnoses.length){ toast("Pick at least one diagnosis."); return; }
     var cons = resolvedConsultant();
     if(!cons.consultant.trim()){ toast("Supervising consultant is required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
     var caseReport = (el("f-caseReport")||{}).value || "No";
+    var flatProcedures = [];
+    blocks.forEach(function(b){ (b.procedures||[]).forEach(function(p){ flatProcedures.push(p); }); });
     var data = {
       authorUsername: state.user.username, entryType:"surgical", unit: unitForDate(state.user.postings, entryDate),
-      site: f.site, procedures: f.procedures, setting: (el("f-setting")||{}).value, date: entryDate,
+      procedureBlocks: blocks.map(function(b){ return { site:b.site, procedures:b.procedures, laterality:b.laterality||"", role:b.role }; }),
+      procedures: flatProcedures, setting: (el("f-setting")||{}).value, date: entryDate,
       hospitalNumber: hospitalNumber.trim(), age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
-      laterality: (el("f-laterality")||{}).value, role: (el("f-role")||{}).value,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
       caseReport: caseReport
@@ -1069,17 +1231,24 @@
     var f = state.wiz.fields;
     var hospitalNumber = (el("f-hospitalNumber")||{}).value || "";
     if(!hospitalNumber.trim()){ toast("Hospital number is required."); return; }
-    if(!f.procedures.length){ toast("Pick at least one procedure performed."); return; }
+    var blocks = f.procedureBlocks||[];
+    if(!blocks.length || blocks.some(function(b){ return !b.procedures || !b.procedures.length; })){
+      toast(blocks.length>1 ? "Pick at least one procedure for each site." : "Pick at least one procedure performed."); return;
+    }
     if(!f.diagnoses.length){ toast("Pick at least one diagnosis."); return; }
     var cons = resolvedConsultant();
     if(!cons.consultant.trim()){ toast("Supervising consultant is required."); return; }
     var entryDate = (el("f-date")||{}).value || todayISO();
+    var flatProcedures = [];
+    blocks.forEach(function(b){ (b.procedures||[]).forEach(function(p){ flatProcedures.push(p); }); });
     var data = {
       authorUsername: state.user.username, entryType:"other", unit: unitForDate(state.user.postings, entryDate),
-      otherSettingType: (el("f-otherSettingType")||{}).value, site: f.site, procedures: f.procedures,
+      otherSettingType: (el("f-otherSettingType")||{}).value,
+      procedureBlocks: blocks.map(function(b){ return { site:b.site, procedures:b.procedures, laterality:"", role:b.role }; }),
+      procedures: flatProcedures,
       setting: (el("f-setting")||{}).value, date: entryDate, hospitalNumber: hospitalNumber.trim(),
       age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
-      diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities, role: (el("f-role")||{}).value,
+      diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || ""
     };
@@ -1311,7 +1480,25 @@
     fullName=(fullName||"").trim(); shortForm=(shortForm||"").trim();
     if(!fullName || !shortForm){ toast("Enter both a full name and a short form."); return; }
     var key = uniqueUnitKey(slugify(shortForm));
-    var list = (state.config.units||[]).concat([{key:key, fullName:fullName, shortForm:shortForm, group:group||"Peripheral Postings"}]);
+    group = group||"Peripheral Postings";
+    // Insert alphabetically by full name within its own group, rather than
+    // appending -- so a newly added unit lands where a resident scanning
+    // the (now alphabetized) list would expect to find it, without
+    // disturbing the other group.
+    var list = (state.config.units||[]).slice();
+    var groupIndices = [];
+    list.forEach(function(u,i){ if(u.group===group) groupIndices.push(i); });
+    var insertAt = list.length; // default: new group, or sorts after every existing member -> end of its block
+    if(groupIndices.length){
+      insertAt = groupIndices[groupIndices.length-1]+1;
+      for(var k=0;k<groupIndices.length;k++){
+        if(String(list[groupIndices[k]].fullName).localeCompare(fullName, undefined, {sensitivity:"base"})>=0){
+          insertAt = groupIndices[k];
+          break;
+        }
+      }
+    }
+    list.splice(insertAt, 0, {key:key, fullName:fullName, shortForm:shortForm, group:group});
     try{
       await dUpdateConfig({units:list});
       state.config.units = list;
@@ -1378,7 +1565,8 @@
   async function addProcedure(catKey, text){
     text = (text||"").trim();
     if(!text){ return; }
-    var list = (state.config.procedures[catKey] || []).concat([text]);
+    var list = (state.config.procedures[catKey] || []).slice();
+    list.splice(sortedInsertIndex(list, text), 0, text);
     var patch = { procedures: {} }; patch.procedures[catKey] = list;
     try{
       await dUpdateConfig(patch);
@@ -1387,9 +1575,13 @@
       render();
     }catch(e){ toast("Could not add procedure."); }
   }
-  async function removeProcedure(catKey, idx){
-    var list = (state.config.procedures[catKey] || []).slice();
-    list.splice(idx,1);
+  // Removes by value rather than array index -- the admin screen renders
+  // this list alphabetized (see renderDeveloperLists), so a "Remove" button
+  // built from the sorted render's position would delete the wrong item the
+  // moment display order and storage order diverge (exactly the class of
+  // stale-index bug fixed elsewhere in this app's PATCH handling).
+  async function removeProcedure(catKey, value){
+    var list = (state.config.procedures[catKey] || []).filter(function(p){ return p!==value; });
     var patch = { procedures: {} }; patch.procedures[catKey] = list;
     try{
       await dUpdateConfig(patch);
@@ -1398,22 +1590,35 @@
     }catch(e){ toast("Could not remove procedure."); }
   }
 
+  // `sortable:true` marks a list as an unordered pool of choices, shown and
+  // added-to alphabetically. Left off (roleLevels, pgYears) for the two
+  // lists whose existing order IS the information -- an escalating
+  // entrustment scale and JR-1/2/3 -- where alphabetizing would scramble
+  // exactly the ordering the list exists to preserve. The remaining short
+  // lists (settings, laterality, academicTypes, otherProcedureSettings,
+  // sexOptions, seminarTypes) are left in admin-defined order too: at 2-4
+  // items each, alphabetizing buys nothing and isn't part of what the
+  // resident is actually trying to find faster.
   var SIMPLE_LISTS = [
     { key:"roleLevels", title:"Entrustment / role levels", hint:"Shown on every procedure entry, in this order." },
     { key:"pgYears", title:"PG year options", hint:"Shown at resident sign-up." },
     { key:"settings", title:"Emergency / Elective options", hint:"Shown on Surgical and Other procedure entries." },
     { key:"laterality", title:"Side of procedure options", hint:"Shown on Surgical procedure entries." },
-    { key:"diagnoses", title:"Diagnosis options", hint:"Multi-select on every entry type; residents can also add one not on the list." },
-    { key:"comorbidities", title:"Comorbidity options", hint:"Multi-select on every entry type; residents can also add one not on the list." },
+    { key:"diagnoses", title:"Diagnosis options", hint:"Multi-select on every entry type; residents can also add one not on the list.", sortable:true },
+    { key:"comorbidities", title:"Comorbidity options", hint:"Multi-select on every entry type; residents can also add one not on the list.", sortable:true },
     { key:"academicTypes", title:"Academic activity types", hint:"Shown on Academic Participation entries (plus a free-text “Other”)." },
     { key:"otherProcedureSettings", title:"“Other procedure” setting types", hint:"OPD / bedside / emergency department / treatment room, or your own equivalents." },
     { key:"sexOptions", title:"Sex options", hint:"Shown on Surgical, Other procedure and Interesting Case entries." },
     { key:"seminarTypes", title:"Seminar / presentation types", hint:"Shown on Seminar / Presentation entries (plus a free-text “Other”)." }
   ];
+  function simpleListSpec(listKey){ return SIMPLE_LISTS.filter(function(s){ return s.key===listKey; })[0]; }
   async function addListItem(listKey, text){
     text = (text||"").trim();
     if(!text) return;
-    var list = (state.config[listKey] || []).concat([text]);
+    var sortable = !!(simpleListSpec(listKey)||{}).sortable;
+    var list = (state.config[listKey] || []).slice();
+    if(sortable) list.splice(sortedInsertIndex(list, text), 0, text);
+    else list.push(text);
     var patch = {}; patch[listKey] = list;
     try{
       await dUpdateConfig(patch);
@@ -1421,9 +1626,15 @@
       render();
     }catch(e){ toast("Could not add option."); }
   }
-  async function removeListItem(listKey, idx){
+  // Value-based removal for a sortable (alphabetized-on-render) list, same
+  // reasoning as removeProcedure; index-based removal is still correct and
+  // unchanged for the non-sortable lists, whose render order always matches
+  // storage order.
+  async function removeListItem(listKey, idxOrValue){
+    var sortable = !!(simpleListSpec(listKey)||{}).sortable;
     var list = (state.config[listKey] || []).slice();
-    list.splice(idx,1);
+    if(sortable) list = list.filter(function(v){ return v!==idxOrValue; });
+    else list.splice(idxOrValue,1);
     var patch = {}; patch[listKey] = list;
     try{
       await dUpdateConfig(patch);
@@ -1533,7 +1744,7 @@
       (isTrainee ?
         '<div class="field"><label for="su-pgYear">Batch / Year</label><select id="su-pgYear">'+state.config.pgYears.map(function(o){return '<option>'+o+'</option>';}).join("")+'</select></div>'+
         (role==="fellow" ?
-          '<div class="field"><label for="su-unit">Parent / home unit</label><select id="su-unit">'+unitOptions(null)+'</select></div>'+
+          '<div class="field"><label for="su-unit-search">Parent / home unit</label>'+searchSingleField("su-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
           '<p class="hint">This is your home unit for the fellowship — you can still log peripheral postings in other units under My Postings after signing in.</p>'
           :
           '<p class="hint">You’ll add your unit posting (with dates) after signing in, under My Postings.</p>'
@@ -1541,7 +1752,7 @@
         :
         '<div class="row2">'+
           '<div class="field"><label for="su-designation">Designation</label><select id="su-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
-          '<div class="field"><label for="su-unit">Department / unit</label><select id="su-unit">'+unitOptions(null)+'</select></div>'+
+          '<div class="field"><label for="su-unit-search">Department / unit</label>'+searchSingleField("su-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
         '</div>'
       )+
       '<p class="hint">Your account needs approval before you can sign in — a Head of Department, Course Coordinator'+(role==="fellow"?", Head of Unit,":"")+' or Developer will review it.</p>'+
@@ -1730,8 +1941,14 @@
       if(counts.hasOwnProperty(t)) counts[t]++;
       entryProcedures(e).forEach(function(p){ procCounts[p] = (procCounts[p]||0)+1; });
       if(t==="surgical" || t==="other"){
-        var site = entrySite(e);
-        if(site) siteCounts[site] = (siteCounts[site]||0)+1;
+        // A combined multi-site case (e.g. Ear+Nose in one sitting) counts
+        // toward EVERY site it actually touched, not just the first --
+        // entrySite() alone would silently drop every site but the first
+        // from this breakdown.
+        var seenSites = {};
+        entryProcedureBlocks(e).forEach(function(b){
+          if(b.site && !seenSites[b.site]){ seenSites[b.site]=1; siteCounts[b.site] = (siteCounts[b.site]||0)+1; }
+        });
       }
       if(e.unit) unitCounts[e.unit] = (unitCounts[e.unit]||0)+1;
     });
@@ -1835,45 +2052,189 @@
     return renderAcademicForm();
   }
 
+  // Alphabetical helpers used both when rendering pickers and when an admin
+  // adds a new item to a config list, so a new addition lands in sorted
+  // position instead of at the end (see addProcedure/addListItem/addUnit).
+  // Deliberately NOT used for every list: roleLevels (an escalating
+  // entrustment scale) and pgYears (JR-1/2/3) carry meaningful order that
+  // alphabetizing would scramble, so those two stay in admin-defined/append
+  // order everywhere they're read.
+  function sortedStrings(arr){
+    return (arr||[]).slice().sort(function(a,b){ return String(a).localeCompare(String(b), undefined, {sensitivity:"base"}); });
+  }
+  function sortedInsertIndex(arr, value){
+    var i=0;
+    while(i<arr.length && String(arr[i]).localeCompare(String(value), undefined, {sensitivity:"base"})<0) i++;
+    return i;
+  }
+  function sortedByDisplayName(list){
+    return (list||[]).slice().sort(function(a,b){ return String(a.displayName||"").localeCompare(String(b.displayName||""), undefined, {sensitivity:"base"}); });
+  }
+
+  // Searchable multi-select: same selection model and DOM contract as the
+  // original checkbox-list multiPicker (.mp-box[data-mp-field], the
+  // data-mp-add-input/-btn free-text escape hatch, chip-teal "extra" chips
+  // for a selected value outside `options`) so every existing call site and
+  // test keeps working — a live text filter (data-mp-search) is layered on
+  // top, implemented as plain DOM show/hide in wireShellEvents rather than a
+  // state change, so typing a search term never triggers a full re-render
+  // and never costs the input its cursor position/focus.
   function multiPicker(fieldKey, options, selected){
     selected = selected || [];
+    // Every current caller (diagnoses, comorbidities, per-site procedures,
+    // assistants) is an unordered pool of choices where alphabetical is
+    // strictly easier to scan than admin-add/API-fetch order -- sorted once,
+    // here, rather than at each of the dozen call sites (and their tests'
+    // hand-picked entries) so nothing can add a 13th call site that forgets
+    // to sort.
+    options = sortedStrings(options);
     var boxes = options.map(function(o){
       var checked = selected.indexOf(o)!==-1;
-      return '<label style="display:flex; gap:8px; align-items:center; font-size:13.5px; padding:4px 0;">'+
-        '<input type="checkbox" class="mp-box" data-mp-field="'+fieldKey+'" value="'+esc(o)+'" '+(checked?"checked":"")+'> '+esc(o)+'</label>';
+      return '<label class="mp-row" data-mp-row-text="'+esc(o.toLowerCase())+'" style="display:flex; gap:8px; align-items:center; font-size:13.5px; padding:4px 0;">'+
+        '<input type="checkbox" class="mp-box" data-mp-field="'+esc(fieldKey)+'" value="'+esc(o)+'" '+(checked?"checked":"")+'> '+esc(o)+'</label>';
     }).join("");
     var extras = selected.filter(function(s){ return options.indexOf(s)===-1; });
     var extraChips = extras.map(function(s){
-      return '<span class="chip chip-teal" style="margin:2px 4px 2px 0; display:inline-flex; align-items:center; gap:5px;">'+esc(s)+' <button type="button" data-mp-remove-extra="'+fieldKey+'" data-mp-extra-value="'+esc(s)+'" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:700;padding:0;">×</button></span>';
+      return '<span class="chip chip-teal" style="margin:2px 4px 2px 0; display:inline-flex; align-items:center; gap:5px;">'+esc(s)+' <button type="button" data-mp-remove-extra="'+esc(fieldKey)+'" data-mp-extra-value="'+esc(s)+'" style="background:none;border:none;color:inherit;cursor:pointer;font-weight:700;padding:0;">×</button></span>';
     }).join("");
-    return '<div class="mp-box-wrap">'+(boxes||'<span class="muted" style="font-size:13px;">No options yet — add one below.</span>')+'</div>'+
+    // A short list (site, role levels, etc.) never reaches this function any
+    // more -- those stayed plain selects -- but guard anyway rather than
+    // assume every caller has already been updated.
+    var showSearch = options.length > 6;
+    return (showSearch ? '<input type="text" class="sp-search" data-mp-search="'+esc(fieldKey)+'" placeholder="Search…" autocomplete="off">' : '')+
+      '<div class="mp-box-wrap" data-mp-list="'+esc(fieldKey)+'">'+(boxes||'<span class="muted" style="font-size:13px;">No options yet — add one below.</span>')+
+      (showSearch ? '<div class="sp-empty-filter sp-row-hidden" data-mp-empty="'+esc(fieldKey)+'">No matches — add it below instead.</div>' : '')+
+      '</div>'+
       (extraChips ? '<div style="margin-top:8px;">'+extraChips+'</div>' : '')+
       '<div style="display:flex; gap:8px; margin-top:8px;">'+
-        '<input type="text" data-mp-add-input="'+fieldKey+'" placeholder="Add one not on the list…" style="flex:1;">'+
-        '<button type="button" class="btn btn-sm" data-mp-add-btn="'+fieldKey+'">Add</button>'+
+        '<input type="text" data-mp-add-input="'+esc(fieldKey)+'" placeholder="Add one not on the list…" style="flex:1;">'+
+        '<button type="button" class="btn btn-sm" data-mp-add-btn="'+esc(fieldKey)+'">Add</button>'+
       '</div>';
+  }
+
+  // Searchable single-select: a text input that filters an always-rendered
+  // list of choices (opened/closed purely by :focus-within in CSS, so it
+  // needs no JS state). Selection writes into a real <input type="hidden">
+  // carrying the given id, so every existing "read el(id).value at submit
+  // time" call site (signup, admin create-user, postings) keeps working
+  // completely unchanged -- this is a visual layer on top of that hidden
+  // field, not a replacement for how its value gets read. `onSelectId`,
+  // when given, additionally fires window.__entlog_ssPick's small dispatch
+  // table for the few pickers (Consultant, a procedure block's Site) whose
+  // value also needs to drive other reactive UI on selection.
+  function searchSingleField(id, options, selectedValue, placeholder){
+    // options: [{value, label, group?}], pre-sorted/pre-grouped by the
+    // caller (see unitSearchOptions) -- a group header renders whenever an
+    // option's group differs from the previous one.
+    var selectedOpt = options.filter(function(o){ return o.value===selectedValue; })[0];
+    var lastGroup, sawGroup=false;
+    var rows = options.map(function(o){
+      var groupHtml = "";
+      if(o.group !== undefined){
+        sawGroup = true;
+        if(o.group !== lastGroup){ groupHtml = '<div class="ss-group-label">'+esc(o.group||"")+'</div>'; lastGroup = o.group; }
+      }
+      // mousedown (not click), with preventDefault, so selecting a row
+      // never races the search input's own blur -- a plain onclick fires
+      // only after the browser has already blurred the input (moving focus
+      // is a mousedown-time default action), which closes the :focus-within
+      // list before the click can land on it.
+      return groupHtml+'<div class="ss-row'+(o.value===selectedValue?' ss-row-selected':'')+'" data-ss-row="'+esc(id)+'" data-ss-value="'+esc(o.value)+'" data-ss-label="'+esc(o.label)+'" data-ss-text="'+esc((o.label||"").toLowerCase())+'" onmousedown="event.preventDefault(); window.__entlog_ssPick(\''+esc(id)+'\', this.getAttribute(\'data-ss-value\'))">'+esc(o.label)+(o.value===selectedValue?' <span class="ss-check">✓</span>':'')+'</div>';
+    }).join("");
+    return '<div class="ss-wrap" data-ss-wrap="'+esc(id)+'">'+
+      '<input type="hidden" id="'+esc(id)+'" value="'+esc(selectedValue||"")+'">'+
+      '<input type="text" id="'+esc(id)+'-search" class="ss-search" data-ss-search="'+esc(id)+'" placeholder="'+esc(placeholder||"Search…")+'" value="'+esc(selectedOpt?selectedOpt.label:"")+'" autocomplete="off">'+
+      '<div class="ss-list" data-ss-list="'+esc(id)+'">'+(rows||'<div class="sp-empty-filter">No options.</div>')+'</div>'+
+    '</div>';
+  }
+  function ssRefreshVisual(id, value, label){
+    var wrap = document.querySelector('[data-ss-wrap="'+id+'"]');
+    if(!wrap) return;
+    var hidden = document.getElementById(id);
+    if(hidden) hidden.value = value||"";
+    var search = wrap.querySelector('[data-ss-search]');
+    if(search){ search.value = label||""; search.blur(); }
+    wrap.querySelectorAll('[data-ss-row]').forEach(function(r){
+      var isSel = r.getAttribute("data-ss-value")===value;
+      r.classList.toggle("ss-row-selected", isSel);
+      var check = r.querySelector(".ss-check");
+      if(isSel && !check){ r.insertAdjacentHTML("beforeend", ' <span class="ss-check">✓</span>'); }
+      if(!isSel && check){ check.remove(); }
+    });
   }
 
   function consultantField(){
     var f = state.wiz.fields;
-    var list = wizConsultantOptions();
+    var list = sortedByDisplayName(wizConsultantOptions());
+    var options = list.map(function(c){ return { value:c.username, label:c.displayName }; });
+    options.push({ value:"__other__", label:"Other / not listed" });
     return ''+
-    '<div class="field"><label for="f-consultantChoice">Consultant</label><select id="f-consultantChoice" onchange="window.__entlog_toggleConsultant(this.value)">'+
-      list.map(function(c){ return '<option value="'+esc(c.username)+'" '+(f.consultantChoice===c.username?"selected":"")+'>'+esc(c.displayName)+'</option>'; }).join("")+
-      '<option value="__other__" '+(f.consultantChoice==="__other__"?"selected":"")+'>Other / not listed</option>'+
-    '</select></div>'+
+    '<div class="field"><label for="f-consultantChoice-search">Consultant</label>'+searchSingleField("f-consultantChoice", options, f.consultantChoice, "Search consultants…")+'</div>'+
     '<div class="field" id="consultant-other-wrap" style="'+(f.consultantChoice==="__other__"?"":"display:none;")+'"><label for="f-consultant-other">Consultant name</label><input id="f-consultant-other" type="text" value="'+esc(f.consultant||"")+'" placeholder="e.g. Dr. Rekha Menon"></div>';
+  }
+
+  // Shared by the Surgical and Other Procedure forms: one repeatable block
+  // per site touched in this sitting -- a plain single site would have no
+  // way to represent a genuine combined case (e.g. Ear+Nose in the same
+  // sitting), each half of which can carry its own entrustment level (and,
+  // for Surgical, its own laterality). `withLaterality` is false for Other
+  // Procedure, which never had a laterality field.
+  function renderProcedureBlocks(withLaterality){
+    var f = state.wiz.fields;
+    var blocks = f.procedureBlocks || [];
+    var canRemove = blocks.length > 1;
+    return blocks.map(function(block, idx){
+      var procOptions = state.config.procedures[block.site] || [];
+      return '<div class="card" style="background:var(--surface-2); margin-bottom:12px;">'+
+        (blocks.length>1 ? '<div class="section-head" style="margin-bottom:8px;"><span class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.04em;">Site '+(idx+1)+'</span>'+(canRemove?'<button type="button" class="btn btn-sm btn-danger" data-remove-block="'+idx+'">Remove this site</button>':'')+'</div>' : '')+
+        '<div class="row2">'+
+          '<div class="field"><label for="f-block-site-'+idx+'">Site</label><select id="f-block-site-'+idx+'" onchange="window.__entlog_setBlockSite('+idx+',this.value)">'+
+            state.config.categories.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===block.site?"selected":"")+'>'+esc(c.name)+'</option>'; }).join("")+
+          '</select></div>'+
+          (withLaterality ?
+            '<div class="field"><label for="f-block-laterality-'+idx+'">Side of procedure</label><select id="f-block-laterality-'+idx+'" onchange="window.__entlog_setBlockField('+idx+',\'laterality\',this.value)">'+opts_(state.config.laterality,block.laterality)+'</select></div>'
+            :
+            '<div class="field"><label for="f-block-role-'+idx+'">Your role (entrustment level)</label><select id="f-block-role-'+idx+'" onchange="window.__entlog_setBlockField('+idx+',\'role\',this.value)">'+opts_(state.config.roleLevels,block.role)+'</select></div>'
+          )+
+        '</div>'+
+        '<div class="field"><label>Procedure(s) performed <span class="muted">(from '+esc(catInfo(block.site).name)+')</span></label>'+multiPicker("pb:"+idx+":procedures", procOptions, block.procedures)+'</div>'+
+        (withLaterality ? '<div class="field"><label for="f-block-role-'+idx+'">Your role (entrustment level)</label><select id="f-block-role-'+idx+'" onchange="window.__entlog_setBlockField('+idx+',\'role\',this.value)">'+opts_(state.config.roleLevels,block.role)+'</select></div>' : '')+
+      '</div>';
+    }).join("")+
+    '<button type="button" class="btn btn-sm" id="wiz-add-block" style="margin-bottom:14px;">+ Add another site / procedure (combined case)</button>';
   }
 
   function renderSurgicalForm(){
     var f = state.wiz.fields;
-    var procOptions = state.config.procedures[f.site] || [];
     return ''+
     '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Surgical Procedure</h2>'+
       '<div class="row2">'+
-        '<div class="field"><label for="f-site">Site</label><select id="f-site" onchange="window.__entlog_setSite(this.value)">'+
-          state.config.categories.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===f.site?"selected":"")+'>'+esc(c.name)+'</option>'; }).join("")+
-        '</select></div>'+
+        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
+        '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
+      '</div>'+
+      '<div class="row2">'+
+        '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
+        '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
+      '</div>'+
+      '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
+      '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
+      '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
+      '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
+      renderProcedureBlocks(true)+
+      consultantField()+
+      '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
+      '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
+      '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
+      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
+    '</div>';
+  }
+
+  function renderOtherForm(){
+    var f = state.wiz.fields;
+    return ''+
+    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure</h2>'+
+      '<div class="row2">'+
+        '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
         '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
       '</div>'+
       '<div class="row2">'+
@@ -1887,44 +2248,7 @@
       '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
       '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
       '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
-      '<div class="field"><label>Procedure(s) performed <span class="muted">(from '+esc(catInfo(f.site).name)+')</span></label>'+multiPicker("procedures", procOptions, f.procedures)+'</div>'+
-      '<div class="row2">'+
-        '<div class="field"><label for="f-laterality">Side of procedure</label><select id="f-laterality">'+opts_(state.config.laterality,f.laterality)+'</select></div>'+
-        '<div class="field"><label for="f-role">Your role (entrustment level)</label><select id="f-role">'+opts_(state.config.roleLevels,f.role)+'</select></div>'+
-      '</div>'+
-      consultantField()+
-      '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
-      '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
-      '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save entry")+'</button></div>'+
-    '</div>';
-  }
-
-  function renderOtherForm(){
-    var f = state.wiz.fields;
-    var procOptions = state.config.procedures[f.site] || [];
-    return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure</h2>'+
-      '<div class="row2">'+
-        '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
-        '<div class="field"><label for="f-site">Site</label><select id="f-site" onchange="window.__entlog_setSite(this.value)">'+
-          state.config.categories.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===f.site?"selected":"")+'>'+esc(c.name)+'</option>'; }).join("")+
-        '</select></div>'+
-      '</div>'+
-      '<div class="row2">'+
-        '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
-        '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
-      '</div>'+
-      '<div class="row2">'+
-        '<div class="field"><label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419"></div>'+
-        '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
-      '</div>'+
-      '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
-      '<div class="field"><label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses)+'</div>'+
-      '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
-      '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
-      '<div class="field"><label>Procedure(s) performed <span class="muted">(from '+esc(catInfo(f.site).name)+')</span></label>'+multiPicker("procedures", procOptions, f.procedures)+'</div>'+
-      '<div class="field"><label for="f-role">Your role (entrustment level)</label><select id="f-role">'+opts_(state.config.roleLevels,f.role)+'</select></div>'+
+      renderProcedureBlocks(false)+
       consultantField()+
       '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
@@ -2077,7 +2401,7 @@
           '<td>'+esc(entryDiagnoses(r).join(", ")||"—")+'</td>'+
           '<td>'+esc(entrySecondaryDiagnoses(r).join(", ")||"—")+'</td>'+
           '<td>'+esc(entryComorbidities(r).join(", ")||"—")+'</td>'+
-          '<td>'+esc(r.role||"—")+'</td>'+
+          '<td>'+esc(entryRoleSummary(r)||"—")+'</td>'+
           '<td>'+entryConsultantAndAssistants(r)+'</td>'+
           '<td>'+caseReportCell(r, rows)+'</td>'+
           '<td>'+paperStatusCell(r)+'</td>'+
@@ -2102,12 +2426,25 @@
       if(entrySecondaryDiagnoses(e).length) rows.push(["Secondary diagnosis", esc(entrySecondaryDiagnoses(e).join(", "))]);
       if(entryComorbidities(e).length) rows.push(["Co-morbidities", esc(entryComorbidities(e).join(", "))]);
     }
-    if(entryProcedures(e).length) rows.push(["Procedure(s)", esc(entryProcedures(e).join(", "))]);
+    if(t==="surgical" || t==="other"){
+      // One row per site/procedure block rather than a single flattened
+      // "Procedure(s)"/"Role" pair -- a combined multi-site case has a
+      // different role/laterality per site, which a flattened view can't
+      // represent.
+      entryProcedureBlocks(e).forEach(function(b){
+        var bits = [(b.procedures||[]).join(", ")||"—"];
+        if(b.laterality) bits.push(b.laterality);
+        if(b.role) bits.push(b.role);
+        rows.push([catInfo(b.site).name, esc(bits.join(" · "))]);
+      });
+    } else if(entryProcedures(e).length){
+      rows.push(["Procedure(s)", esc(entryProcedures(e).join(", "))]);
+    }
     if(t==="case"){
       rows.push(["Brief History", esc(e.history||"—")]);
       rows.push(["Examination Findings", esc(e.examination||"—")]);
     }
-    if(e.role) rows.push(["Role", esc(e.role)]);
+    if(t!=="surgical" && t!=="other" && e.role) rows.push(["Role", esc(e.role)]);
     if(e.consultant) rows.push(["Consultant", esc(e.consultant)]);
     if(e.assistants) rows.push(["Assistants", esc(e.assistants)]);
     if(e.comments) rows.push(["Comments/Complications", esc(e.comments)]);
@@ -2146,12 +2483,28 @@
     consultantUsername:"Consultant (linked account)", assistants:"Assistants", comments:"Comments/Complications",
     caseReport:"Case report?", linkedFromId:"Linked entry ID", history:"Brief History", examination:"Examination Findings",
     academicType:"Activity type", academicTypeOther:"Activity type (other)", seminarType:"Seminar type",
-    seminarTypeOther:"Seminar type (other)", topic:"Topic", venue:"Venue", details:"Details", paperStatus:"Write-up status"
+    seminarTypeOther:"Seminar type (other)", topic:"Topic", venue:"Venue", details:"Details", paperStatus:"Write-up status",
+    procedureBlocks:"Sites & procedures"
   };
   function historyFieldLabel(k){ return HISTORY_FIELD_LABELS[k] || k; }
+  function historyBlockValue(b){
+    var bits = [(b.procedures||[]).join(", ")||"—"];
+    if(b.laterality) bits.push(b.laterality);
+    if(b.role) bits.push(b.role);
+    return esc(catInfo(b.site).name) + ": " + esc(bits.join(" · "));
+  }
   function historyFieldValue(v){
     if(v==null || v==="") return '<span class="muted">—</span>';
-    if(Array.isArray(v)) return v.length ? esc(v.join(", ")) : '<span class="muted">—</span>';
+    if(Array.isArray(v)){
+      if(!v.length) return '<span class="muted">—</span>';
+      // A procedureBlocks array is objects, not plain strings -- format each
+      // block on its own line rather than falling through to the plain
+      // join() below (which would print "[object Object]").
+      if(typeof v[0]==="object" && v[0]!==null && "site" in v[0]){
+        return v.map(historyBlockValue).join("<br>");
+      }
+      return esc(v.join(", "));
+    }
     if(typeof v==="object") return esc(JSON.stringify(v));
     return esc(String(v));
   }
@@ -2223,7 +2576,7 @@
       '<p class="muted" style="margin-bottom:16px;">Log each posting with its start (and, once you know it, end) date — every entry you log automatically picks up whichever posting was active on that entry’s date, so your history stays accurate as you rotate through units.</p>'+
       (rows ? '<div class="table-wrap"><table><thead><tr><th>Start date</th><th>End date</th><th>Unit</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '<p class="muted" style="font-size:13px;">No postings logged yet — add your current one below.</p>')+
       '<div class="row3" style="margin-top:16px;">'+
-        '<div class="field"><label for="posting-unit">Unit</label><select id="posting-unit">'+unitOptions(null)+'</select></div>'+
+        '<div class="field"><label for="posting-unit-search">Unit</label>'+searchSingleField("posting-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
         '<div class="field"><label for="posting-date">Start date</label><input id="posting-date" type="date" value="'+todayStr+'"></div>'+
         '<div class="field"><label for="posting-end">End date <span class="muted">(optional — leave blank if ongoing)</span></label><input id="posting-end" type="date"></div>'+
       '</div>'+
@@ -2283,7 +2636,7 @@
     '<div class="card"><h2>Entries ('+entries.length+')</h2>'+
     '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Hospital No.</th><th>Age/Sex</th><th>Summary</th><th>Unit</th><th>Role</th><th>Case report</th>'+(showHistory?'<th></th>':'')+'</tr></thead><tbody>'+
       (entries.length===0 ? '<tr><td colspan="'+(showHistory?9:8)+'" class="muted">No entries visible to you.</td></tr>' : entries.map(function(r){
-        return '<tr><td class="tabular">'+fmtDate(r.date)+'</td><td>'+entryTypeChip(r)+'</td><td>'+esc(entryHospitalNumber(r)||"—")+'</td><td class="tabular">'+esc(entryAgeSex(r))+'</td><td>'+esc(summarizeEntry(r))+'</td><td>'+unitShortHtml(r.unit)+'</td><td>'+esc(r.role||"—")+'</td><td>'+caseReportCell(r, entries)+'</td>'+(showHistory?'<td><button class="btn btn-sm" data-view-history="'+r.id+'">History</button></td>':'')+'</tr>';
+        return '<tr><td class="tabular">'+fmtDate(r.date)+'</td><td>'+entryTypeChip(r)+'</td><td>'+esc(entryHospitalNumber(r)||"—")+'</td><td class="tabular">'+esc(entryAgeSex(r))+'</td><td>'+esc(summarizeEntry(r))+'</td><td>'+unitShortHtml(r.unit)+'</td><td>'+esc(entryRoleSummary(r)||"—")+'</td><td>'+caseReportCell(r, entries)+'</td>'+(showHistory?'<td><button class="btn btn-sm" data-view-history="'+r.id+'">History</button></td>':'')+'</tr>';
       }).join(""))+
     '</tbody></table></div></div>';
   }
@@ -2317,10 +2670,10 @@
         (role==="consultant" ? (
           '<div class="row2">'+
             '<div class="field"><label for="nu-designation">Designation</label><select id="nu-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
-            '<div class="field"><label for="nu-unit">Home unit</label><select id="nu-unit">'+unitOptions(null)+'</select></div>'+
+            '<div class="field"><label for="nu-unit-search">Home unit</label>'+searchSingleField("nu-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
           '</div>'
         ) : '')+
-        (role==="fellow" ? '<div class="field"><label for="nu-unit">Parent / home unit</label><select id="nu-unit">'+unitOptions(null)+'</select></div>' : '')+
+        (role==="fellow" ? '<div class="field"><label for="nu-unit-search">Parent / home unit</label>'+searchSingleField("nu-unit", unitSearchOptions(), null, "Search units…")+'</div>' : '')+
         '<button class="btn btn-primary" id="submit-create-user">Create account</button>'
       ) : '')+
     '</div>';
@@ -2477,14 +2830,21 @@
       '</div>';
     }).join("");
 
-    var procRows = procList.map(function(p,i){
-      return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span>'+esc(p)+'</span><button class="btn btn-sm btn-danger" data-proc-remove="'+i+'">Remove</button></div>';
+    // Alphabetized for display regardless of storage order, so a list that
+    // predates this change (or was seeded from DEFAULT_PROCEDURES) shows
+    // sorted immediately rather than only once every item has been
+    // individually re-added -- remove is by value (see removeProcedure) so
+    // display order never has to match storage order for this to be safe.
+    var procRows = sortedStrings(procList).map(function(p){
+      return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span>'+esc(p)+'</span><button class="btn btn-sm btn-danger" data-proc-remove="'+esc(p)+'">Remove</button></div>';
     }).join("") || '<p class="muted" style="font-size:13px;">No procedures in this site yet — add the first one below.</p>';
 
     var simpleSections = SIMPLE_LISTS.map(function(spec){
       var items = state.config[spec.key] || [];
-      var rows = items.map(function(v,i){
-        return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span>'+esc(v)+'</span><button class="btn btn-sm btn-danger" data-simple-remove="'+spec.key+'" data-idx="'+i+'">Remove</button></div>';
+      var displayItems = spec.sortable ? sortedStrings(items) : items;
+      var rows = displayItems.map(function(v,i){
+        var removeKey = spec.sortable ? esc(v) : i;
+        return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span>'+esc(v)+'</span><button class="btn btn-sm btn-danger" data-simple-remove="'+spec.key+'" data-idx="'+removeKey+'">Remove</button></div>';
       }).join("");
       return '<div class="card">'+
         '<h2 style="font-size:15px;">'+esc(spec.title)+'</h2>'+
@@ -2541,7 +2901,7 @@
     units.forEach(function(u){ if(!groups[u.group]){ groups[u.group]=[]; order.push(u.group); } groups[u.group].push(u); });
     var unitSections = order.map(function(g){
       return '<div style="margin-bottom:14px;"><div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px;">'+esc(g||"Units")+'</div>'+
-        groups[g].map(function(u){
+        groups[g].slice().sort(function(a,b){ return String(a.fullName).localeCompare(String(b.fullName), undefined, {sensitivity:"base"}); }).map(function(u){
           return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span><b class="short-form">'+esc(u.shortForm)+'</b> — '+esc(u.fullName)+'</span><button class="btn btn-sm btn-danger" data-remove-unit="'+esc(u.key)+'">Remove</button></div>';
         }).join("")+
       '</div>';
@@ -2661,6 +3021,25 @@
      EVENT WIRING
   ============================================================ */
   window.__entlog_setSite = function(val){ wizSetSite(val); };
+  // Dispatch table for searchSingleField's row clicks. Most ids (su-unit,
+  // nu-unit, posting-unit, and any other plain hidden-field target) have no
+  // reactive behaviour beyond "remember the value" -- the hidden input
+  // already got that from the inline onclick before this runs, so those
+  // just refresh the widget's own visible label/checkmark. The two ids that
+  // DO drive other UI (which consultant is picked; which site a procedure
+  // block uses, which resets that block's procedure choices) route to the
+  // same functions the rest of the wizard already uses for that.
+  window.__entlog_ssPick = function(id, value){
+    var wrap = document.querySelector('[data-ss-wrap="'+id+'"]');
+    var row = wrap ? wrap.querySelector('[data-ss-value="'+value.replace(/"/g,'\\"')+'"]') : null;
+    var label = row ? row.getAttribute("data-ss-label") : value;
+    if(id==="f-consultantChoice"){ window.__entlog_toggleConsultant(value); ssRefreshVisual(id, value, label); return; }
+    ssRefreshVisual(id, value, label);
+  };
+  // A procedure block's Site select stayed a plain native <select> (only 6
+  // sites -- too short to need search), same as before this feature, just
+  // routed at a block index now instead of the single flat field.
+  window.__entlog_setBlockSite = function(idx, val){ wizSetBlockSite(+idx, val); };
   window.__entlog_wizDateChanged = function(val){
     syncWizFieldsFromDom();
     state.wiz.fields.date = val;
@@ -2773,6 +3152,10 @@
       else if(t==="academic") submitAcademic();
       else if(t==="seminar") submitSeminar();
     };
+    var addBlockBtn = el("wiz-add-block"); if(addBlockBtn) addBlockBtn.onclick = wizAddBlock;
+    document.querySelectorAll("[data-remove-block]").forEach(function(b){
+      b.onclick = function(){ wizRemoveBlock(+b.getAttribute("data-remove-block")); };
+    });
     document.querySelectorAll(".mp-box").forEach(function(b){
       b.onchange = function(){ mpToggle(b.getAttribute("data-mp-field"), b.value, b.checked); };
     });
@@ -2786,6 +3169,55 @@
     });
     document.querySelectorAll("[data-mp-remove-extra]").forEach(function(b){
       b.onclick = function(){ mpRemoveExtra(b.getAttribute("data-mp-remove-extra"), b.getAttribute("data-mp-extra-value")); };
+    });
+    // Live text filter for a searchable multi-select's option list -- pure
+    // DOM show/hide, deliberately never calls render(): this fires on every
+    // keystroke, and a full re-render mid-keystroke would rebuild the input
+    // out from under itself and drop focus/cursor position.
+    document.querySelectorAll("[data-mp-search]").forEach(function(inp){
+      inp.oninput = function(){
+        var key = inp.getAttribute("data-mp-search");
+        var q = inp.value.trim().toLowerCase();
+        var list = document.querySelector('[data-mp-list="'+key+'"]');
+        if(!list) return;
+        var anyVisible = false;
+        list.querySelectorAll(".mp-row").forEach(function(row){
+          var match = !q || row.getAttribute("data-mp-row-text").indexOf(q)!==-1;
+          row.classList.toggle("sp-row-hidden", !match);
+          if(match) anyVisible = true;
+        });
+        var empty = document.querySelector('[data-mp-empty="'+key+'"]');
+        if(empty) empty.classList.toggle("sp-row-hidden", anyVisible || !q);
+      };
+    });
+    // Same idea for a searchable single-select's row list.
+    document.querySelectorAll("[data-ss-search]").forEach(function(inp){
+      inp.oninput = function(){
+        var id = inp.getAttribute("data-ss-search");
+        var q = inp.value.trim().toLowerCase();
+        var list = document.querySelector('[data-ss-list="'+id+'"]');
+        if(!list) return;
+        list.querySelectorAll("[data-ss-row]").forEach(function(row){
+          var match = !q || row.getAttribute("data-ss-text").indexOf(q)!==-1;
+          row.classList.toggle("sp-row-hidden", !match);
+        });
+      };
+      // Selecting-all-then-retyping should re-open the full list, and
+      // clicking into an already-chosen field shouldn't force retyping the
+      // whole label just to see the other options.
+      inp.onfocus = function(){ inp.select(); };
+      // Safety net for leaving the field without picking a row (Escape, tab
+      // away, click elsewhere on the page): restore the visible text to
+      // whatever is actually selected, so a typed-but-abandoned search term
+      // never gets left showing as if it were the real value.
+      inp.onblur = function(){
+        var id = inp.getAttribute("data-ss-search");
+        var hidden = document.getElementById(id);
+        var list = document.querySelector('[data-ss-list="'+id+'"]');
+        var row = (hidden && list) ? list.querySelector('[data-ss-value="'+(hidden.value||"").replace(/"/g,'\\"')+'"]') : null;
+        inp.value = row ? row.getAttribute("data-ss-label") : "";
+        if(list) list.querySelectorAll("[data-ss-row]").forEach(function(r){ r.classList.remove("sp-row-hidden"); });
+      };
     });
 
     // my entries delete
@@ -2938,7 +3370,7 @@
       };
     });
     document.querySelectorAll("[data-proc-remove]").forEach(function(b){
-      b.onclick = function(){ removeProcedure(state.devListDraft.selectedCat, Number(b.getAttribute("data-proc-remove"))); };
+      b.onclick = function(){ removeProcedure(state.devListDraft.selectedCat, b.getAttribute("data-proc-remove")); };
     });
     document.querySelectorAll("[data-simple-add]").forEach(function(b){
       b.onclick = function(){
@@ -2949,7 +3381,12 @@
       };
     });
     document.querySelectorAll("[data-simple-remove]").forEach(function(b){
-      b.onclick = function(){ removeListItem(b.getAttribute("data-simple-remove"), Number(b.getAttribute("data-idx"))); };
+      b.onclick = function(){
+        var listKey = b.getAttribute("data-simple-remove");
+        var raw = b.getAttribute("data-idx");
+        var sortable = !!(simpleListSpec(listKey)||{}).sortable;
+        removeListItem(listKey, sortable ? raw : Number(raw));
+      };
     });
   }
 
