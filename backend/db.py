@@ -187,6 +187,18 @@ def migrate_entries_table(conn):
             conn.execute("UPDATE entries SET procedure_blocks = ? WHERE id = ?", (json.dumps([block]), r["id"]))
         conn.commit()
 
+    if "status" not in cols:
+        # 'draft' | 'final'. Only Surgical/Other Procedure entries can ever
+        # be 'draft' (see create_entry/_valid_procedure_block relaxation) --
+        # every existing row predates this feature and was, by definition,
+        # already a complete entry, so backfill to 'final' rather than NULL
+        # so every pre-existing query that doesn't yet know about drafts
+        # (roster, stats, CSV export) keeps seeing exactly what it saw
+        # before this column existed.
+        conn.execute("ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'final'")
+        conn.commit()
+        cols.add("status")
+
 
 def init_db():
     conn = get_db()

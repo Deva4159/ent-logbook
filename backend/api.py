@@ -91,6 +91,26 @@ def _clean_procedure_block(b):
     }
 
 
+def _clean_procedure_block_draft(b):
+    """Same shape as _clean_procedure_block, but for a 'draft' Surgical/Other
+    Procedure entry -- a resident is deliberately mid-fill, so nothing here
+    is required yet. Missing/malformed pieces default to empty rather than
+    rejecting the save; _valid_procedure_block (the full-strictness check)
+    is what finally gates a draft on its way to 'final'."""
+    if not isinstance(b, dict):
+        b = {}
+    procedures = b.get("procedures")
+    site = b.get("site")
+    role = b.get("role")
+    laterality = b.get("laterality")
+    return {
+        "site": site if isinstance(site, str) else "",
+        "procedures": [p for p in procedures if isinstance(p, str)] if isinstance(procedures, list) else [],
+        "laterality": laterality if isinstance(laterality, str) else "",
+        "role": role if isinstance(role, str) else "",
+    }
+
+
 def _blocks_derived(blocks):
     """Flat site/procedures/laterality/role, derived (never stored) from a
     surgical/other entry's procedure_blocks, purely so simple read-side
@@ -169,6 +189,7 @@ def entry_row_to_dict(row):
         "venue": d["venue"],
         "details": d["details"],
         "paperStatus": d.get("paper_status"),
+        "status": d.get("status") or "final",
     }
 
 
@@ -223,7 +244,18 @@ def consultant_scope(username):
     prof_units = set()
     if user and user["unit"] and (user["designation"] or "").strip().lower() == "professor":
         prof_units.add(user["unit"])
-    return {"full": full, "units": list(hou_units | prof_units)}
+    # The frontend's scope banner names which role(s) actually granted full
+    # ("as Head of Department & Course Coordinator") -- it was already
+    # written to read this (renderScopeBanner in app.js), but this endpoint
+    # never actually sent it, so that banner has been throwing (undefined
+    # .filter) and stuck the whole consultant dashboard on "Loading..." for
+    # any HOD/Coordinator ever since. `role` here (not the raw column name
+    # assignment_role) is what that existing frontend code reads.
+    return {
+        "full": full,
+        "units": list(hou_units | prof_units),
+        "activeAssignments": [{"role": a["assignment_role"], "unit": a["unit"]} for a in mine],
+    }
 
 
 def user_capabilities(username):
@@ -468,12 +500,27 @@ def create_entry():
     # or a case logged by a Senior Resident/Fellow) gets no tracker at all.
     paper_status = "not_done" if (entry_type == "case" and linked_from_id and g.user["role"] == "resident") else None
 
+    # A draft is a deliberate mid-fill save -- only meaningful for the two
+    # entry types with enough required fields to make "save now, finish
+    # later" worthwhile. Anything else that asks for status=draft is simply
+    # saved final, same as if the field had been omitted.
+    status = body.get("status") if body.get("status") in ("draft", "final") else "final"
+    if status == "draft" and entry_type not in PROCEDURE_BLOCK_TYPES:
+        status = "final"
+
     procedure_blocks_json = "[]"
     if entry_type in PROCEDURE_BLOCK_TYPES:
         blocks = body.get("procedureBlocks")
-        if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
-            return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
-        procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
+        if status == "draft":
+            # Draft: keep whatever partial blocks were given, defaulting
+            # anything missing rather than rejecting the save outright.
+            if not isinstance(blocks, list):
+                blocks = []
+            procedure_blocks_json = json.dumps([_clean_procedure_block_draft(b) for b in blocks])
+        else:
+            if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
+                return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+            procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
 
     db = get_db()
     cur = db.execute(
@@ -483,8 +530,8 @@ def create_entry():
             diagnoses_secondary, comorbidities, laterality, role_level, consultant,
             consultant_username, assistants, comments, case_report, linked_from_id,
             history, examination, academic_type, academic_type_other, seminar_type,
-            seminar_type_other, topic, venue, details, paper_status, procedure_blocks
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            seminar_type_other, topic, venue, details, paper_status, procedure_blocks, status
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             g.user["username"], entry_type, unit, entry_date, now,
             # site/procedures/laterality/role_level stay unset for a
@@ -504,7 +551,7 @@ def create_entry():
             body.get("caseReport"), linked_from_id,
             body.get("history"), body.get("examination"), body.get("academicType"),
             body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
-            body.get("topic"), body.get("venue"), body.get("details"), paper_status, procedure_blocks_json,
+            body.get("topic"), body.get("venue"), body.get("details"), paper_status, procedure_blocks_json, status,
         ),
     )
     db.commit()
@@ -651,6 +698,25 @@ def update_entry(entry_id):
 
     before = entry_row_to_dict(existing)
 
+    # status: draft only ever applies to Surgical/Other Procedure, and only
+    # while explicitly requested (finalizing, or a plain re-save of a draft
+    # that doesn't mention status, keeps it as-is). A finalized entry never
+    # reverts to draft -- the frontend never offers that once an entry is
+    # final, and this is the actual guarantee: without it, an entry could be
+    # un-finalized on request to pull it back out of the roster/stats/export
+    # a consultant has already reviewed it in.
+    existing_status = existing["status"] if existing["status"] in ("draft", "final") else "final"
+    if "status" in body:
+        new_status = body.get("status")
+        if new_status not in ("draft", "final"):
+            return jsonify({"error": "Invalid status."}), 400
+        if new_status == "draft" and entry_type not in PROCEDURE_BLOCK_TYPES:
+            return jsonify({"error": "Only Surgical/Other Procedure entries can be saved as drafts."}), 400
+        if new_status == "draft" and existing_status == "final":
+            return jsonify({"error": "A finalized entry can't be moved back to draft."}), 400
+    else:
+        new_status = existing_status
+
     # procedure_blocks is the source of truth for a surgical/other entry;
     # site/procedures/laterality/role in `before`/`after` are DERIVED from it
     # (see entry_row_to_dict) and are never valid values to write back into
@@ -661,16 +727,26 @@ def update_entry(entry_id):
     is_block_type = entry_type in PROCEDURE_BLOCK_TYPES
     if is_block_type:
         if "procedureBlocks" in body:
-            blocks = body.get("procedureBlocks")
-            if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
-                return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
-            procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
-        elif existing["procedure_blocks"] and existing["procedure_blocks"] != "[]":
-            procedure_blocks_json = existing["procedure_blocks"]  # untouched by this PATCH -- leave alone
+            blocks_raw = body.get("procedureBlocks")
         else:
-            # entryType just changed TO surgical/other in this same PATCH,
-            # with no blocks supplied to go with it -- nothing valid to save.
-            return jsonify({"error": "At least one site/procedure block is required."}), 400
+            try:
+                blocks_raw = json.loads(existing["procedure_blocks"]) if existing["procedure_blocks"] else []
+            except (TypeError, ValueError):
+                blocks_raw = []
+        if new_status == "draft":
+            # Draft: partial blocks are fine, default what's missing rather
+            # than rejecting the save.
+            if not isinstance(blocks_raw, list):
+                blocks_raw = []
+            procedure_blocks_json = json.dumps([_clean_procedure_block_draft(b) for b in blocks_raw])
+        else:
+            # Finalizing (or a plain edit to an already-final entry): full
+            # strictness applies, whether or not this PATCH itself resent
+            # procedureBlocks -- so a draft can't slip to 'final' with
+            # incomplete blocks just by omitting the field.
+            if not isinstance(blocks_raw, list) or not blocks_raw or not all(_valid_procedure_block(b) for b in blocks_raw):
+                return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+            procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks_raw])
     else:
         procedure_blocks_json = "[]"
 
@@ -681,7 +757,7 @@ def update_entry(entry_id):
             diagnoses_secondary=?, comorbidities=?, laterality=?, role_level=?, consultant=?,
             consultant_username=?, assistants=?, comments=?, case_report=?, linked_from_id=?,
             history=?, examination=?, academic_type=?, academic_type_other=?, seminar_type=?,
-            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?, procedure_blocks=?
+            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?, procedure_blocks=?, status=?
         WHERE id = ?""",
         (
             entry_type, unit, entry_date,
@@ -705,7 +781,7 @@ def update_entry(entry_id):
             body.get("seminarType", before["seminarType"]),
             body.get("seminarTypeOther", before["seminarTypeOther"]),
             body.get("topic", before["topic"]), body.get("venue", before["venue"]),
-            body.get("details", before["details"]), new_paper_status, procedure_blocks_json,
+            body.get("details", before["details"]), new_paper_status, procedure_blocks_json, new_status,
             entry_id,
         ),
     )
@@ -768,7 +844,9 @@ def roster_entries():
     db = get_db()
     placeholders = ",".join("?" * len(TRAINEE_ROLES))
     users = [dict(r) for r in db.execute(f"SELECT * FROM users WHERE role IN ({placeholders})", tuple(TRAINEE_ROLES)).fetchall()]
-    all_entries = [entry_row_to_dict(r) for r in db.execute("SELECT * FROM entries").fetchall()]
+    # Drafts are a resident's private scratch space -- hidden from the
+    # roster (and everywhere else consultant/HOD-facing) until finalized.
+    all_entries = [e for e in (entry_row_to_dict(r) for r in db.execute("SELECT * FROM entries").fetchall()) if e["status"] != "draft"]
     if not scope["full"]:
         allowed = set(scope["units"])
         all_entries = [e for e in all_entries if e["unit"] in allowed]
@@ -784,7 +862,12 @@ def roster_entries():
 @login_required(role="developer")
 def all_entries():
     rows = get_db().execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
-    return jsonify({"entries": [entry_row_to_dict(r) for r in rows]})
+    # Same "hidden until finalized" rule as the roster: a draft is the
+    # resident's own scratch space, not yet an entry to review, even for the
+    # developer's admin view. list_my_entries() (their own drafts) and
+    # reminders() (their own counts) are the only endpoints that still show
+    # a user their own drafts.
+    return jsonify({"entries": [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]})
 
 
 @api.get("/entries/by-author/<username>")
@@ -827,7 +910,12 @@ def entries_by_author(username):
     rows = db.execute(
         "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (username,)
     ).fetchall()
-    return jsonify({"entries": [entry_row_to_dict(r) for r in rows]})
+    entries = [entry_row_to_dict(r) for r in rows]
+    if g.user["username"] != username:
+        # Looking at someone else's entries (consultant/developer drill-down)
+        # -- their drafts are private to them, same rule as the roster.
+        entries = [e for e in entries if e["status"] != "draft"]
+    return jsonify({"entries": entries})
 
 
 def _export_csv(rows, columns):
@@ -860,7 +948,10 @@ ENTRY_EXPORT_COLUMNS = [
 @api.get("/entries/export.csv")
 @login_required(role="developer")
 def export_entries_csv():
-    rows = [entry_row_to_dict(r) for r in get_db().execute("SELECT * FROM entries").fetchall()]
+    # A CSV export is an official record, not a private workspace -- a draft
+    # (even the exporting user's own, from export_my_entries_csv below)
+    # never appears in one, same "hidden until finalized" rule as the roster.
+    rows = [e for e in (entry_row_to_dict(r) for r in get_db().execute("SELECT * FROM entries").fetchall()) if e["status"] != "draft"]
     csv_text = _export_csv(rows, ENTRY_EXPORT_COLUMNS)
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=ent-logbook-entries.csv"})
 
@@ -893,7 +984,10 @@ def export_my_entries_csv():
         rows = db.execute(
             "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (user["username"],)
         ).fetchall()
-    csv_text = _export_csv([entry_row_to_dict(r) for r in rows], ENTRY_EXPORT_COLUMNS)
+    # Export is an official record -- exclude drafts even from a resident's
+    # own export of their own entries (see export_entries_csv above).
+    exportable = [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]
+    csv_text = _export_csv(exportable, ENTRY_EXPORT_COLUMNS)
     filename = f"ent-logbook-my-entries-{user['username']}.csv"
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 

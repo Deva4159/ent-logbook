@@ -77,7 +77,13 @@ CREATE TABLE IF NOT EXISTS entries (
   -- 'not_done' | 'in_progress' | 'done'. NULL for every other entry --
   -- validated in the app layer, not a CHECK, so it stays a plain ADD COLUMN
   -- on an existing database (see migrate_entries_table in db.py).
-  paper_status          TEXT
+  paper_status          TEXT,
+  -- 'draft' | 'final'. Only ever 'draft' for a Surgical/Other Procedure
+  -- entry mid-fill; every other entry type is written 'final' straight
+  -- away. A draft is visible only to its own author -- excluded from the
+  -- roster, stats and CSV export queries every consultant/HOD-facing
+  -- endpoint runs (see list_entries/roster/stats/export in api.py).
+  status                TEXT NOT NULL DEFAULT 'final' CHECK (status IN ('draft','final'))
 );
 CREATE INDEX IF NOT EXISTS idx_entries_author ON entries(author_username);
 CREATE INDEX IF NOT EXISTS idx_entries_unit ON entries(unit);
