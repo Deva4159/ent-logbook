@@ -224,36 +224,73 @@
     return {key:key,name:key||"—",color:"var(--ink-soft)"};
   }
 
-  // Hand-drawn vintage-plate-style icons (cross-hatched, single-ink line art
-  // evoking classic anatomical engravings), one per site category plus one
-  // per entry type. All share a 40x40 viewBox and pick up color from
-  // whatever wraps them via currentColor, so they work in both themes.
+  // Single-ink anatomical line icons. Drawn on a 24x24 grid because that is
+  // the scale they are actually rendered at (16px in .bar-label, 18px in
+  // .nav-toggle, 21px in .cat-card, 22px in .dash-card, 26px in .stat-tile) --
+  // the previous 40x40 set carried detail that fell below one device pixel
+  // once scaled down, so fine strokes greyed out and the cross-hatching
+  // disappeared entirely. Everything picks up colour from currentColor, so a
+  // category icon can be tinted with its own --cat-* token and both themes
+  // work with no second set.
   var ICONS = {
-    ear: '<path d="M15 30c-5-2-8-7-8-12 0-7 6-12 13-12 6 0 11 4 11 10 0 5-4 8-8 8-3 0-5-2-5-5 0-2 2-4 4-4"/><path class="hatch" d="M12 14l3 2M11 19l3 1M12 24l3-1"/>',
-    nose: '<path d="M15 9c2 6 1 11-2 15-2 3-1 6 2 7 2 1 5 0 7-2"/><circle cx="15" cy="27" r="1.4"/><path class="hatch" d="M13 23l2 1M12 27l2 1"/>',
-    throat: '<path d="M13 8v6c0 2 2 4 4 4h6c2 0 4-2 4-4V8"/><path d="M14 22c2 4 4 6 6 6s4-2 6-6"/><path d="M17 17l3 3 3-3"/><path class="hatch" d="M11 30h18M13 33h14"/>',
-    hn: '<path d="M22 8c4 0 7 3 7 7 0 3-1 5-3 6l1 4c3 1 5 3 5 6v3H10v-3c0-3 2-5 5-6l1-4c-2-1-3-3-3-6 0-4 3-7 7-7z"/><path class="hatch" d="M14 30h14M13 33h16"/>',
-    skull: '<path d="M20 8c-6 0-10 4-10 9 0 3 1 5 3 7v4h4v-3h6v3h4v-4c2-2 3-4 3-7 0-5-4-9-10-9z"/><circle cx="16" cy="17" r="1.5"/><circle cx="24" cy="17" r="1.5"/><path d="M18 23h4"/><path class="hatch" d="M13 15l2 1M27 15l-2 1"/>',
-    trauma: '<path d="M20 6l11 4v9c0 8-5 13-11 15-6-2-11-7-11-15v-9z"/><path d="M20 15v10M15 20h10"/>',
-    surgical: '<path d="M8 32l14-14"/><path d="M22 18l6-6c1-1 3-1 4 0 1 1 1 3 0 4l-6 6-4-4z"/>',
-    other: '<path d="M12 8v8c0 4 3 7 7 7s7-3 7-7V8"/><path d="M19 23v4c0 3 2 5 5 5s5-2 5-5v-2"/><circle cx="29" cy="30" r="2.2"/><path class="hatch" d="M8 8h4M16 8h4"/>',
-    "case": '<path d="M9 8h14v20H9z"/><path class="hatch" d="M12 13h8M12 17h8M12 21h5"/><circle cx="26" cy="26" r="5"/><path d="M30 30l4 4"/>',
-    academic: '<path d="M20 8l16 7-16 7-16-7z"/><path d="M12 18v7c0 2 4 4 8 4s8-2 8-4v-7"/><path class="hatch" d="M36 15v9"/>',
-    seminar: '<path d="M8 34V16h10l6-6v24"/><path class="hatch" d="M24 14h10M24 20h10M24 26h6"/>',
-    menu: '<path d="M8 12h24M8 20h24M8 28h24"/>',
-    close: '<path d="M11 11l18 18M29 11L11 29"/>',
-    users: '<circle cx="15" cy="14" r="5"/><path d="M6 33c0-6 4-10 9-10s9 4 9 10"/><circle cx="28" cy="16" r="4"/><path d="M22 33c0-5 3-8 6-8s6 3 6 8" class="hatch"/>',
-    approvals: '<path d="M9 20l7 7 15-15"/><circle cx="20" cy="20" r="15"/>',
-    password: '<rect x="10" y="18" width="20" height="14" rx="2"/><path d="M14 18v-4c0-3 3-6 6-6s6 3 6 6v4"/><circle cx="20" cy="24" r="2" class="hatch"/>',
-    units: '<path d="M8 32V14l12-6 12 6v18"/><path class="hatch" d="M14 32v-8h5v8M21 32v-8h5v8M13 18h14"/>',
-    lists: '<path d="M11 9h18M11 9v22h18V9" />' + '<path class="hatch" d="M15 15h10M15 20h10M15 25h6"/>',
-    "export": '<path d="M20 6v18M14 18l6 6 6-6"/><path d="M8 28v6h24v-6" class="hatch"/>'
+    // ---- site categories -------------------------------------------------
+    // Pinna: helix sweeping down to the lobule, with the antihelix inside.
+    ear: '<path d="M9 21c-2 0-3.2-1.4-3.2-3.1 0-1.8 1-2.4 1-4.1 0-1.9-1.3-2.6-1.3-5C5.5 5.5 8 3 11.5 3S17.5 5.5 17.5 9c0 2.9-2.1 4-3.5 5-1.1.8-1.6 1.5-1.6 2.6"/><path class="hatch" d="M13.4 8.6c-1.5-.7-3.2.3-3.2 2 0 1.3.9 2 .9 3.1"/>',
+    // Nose in profile: bridge, tip, columella, alar crease.
+    nose: '<path d="M14.2 3c.5 3.6.2 6-1.3 8.7-.8 1.5-.4 2.8 1.2 3.1l1.5.3"/><path d="M9 15.9c1.1 1.4 2.7 2.1 4.5 2.1 2 0 3.7-.9 4.6-2.4"/><path class="hatch" d="M11.2 18.7c.9.4 1.8.6 2.8.6"/>',
+    // Larynx and trachea: the laryngeal box above, tracheal rings below.
+    // Tried and rejected on legibility: the glottis on laryngoscopy (read
+    // as a letter), palate-arch-plus-tonsils (headphones at 16px, a gas
+    // mask once the tongue was added) and rails-and-rungs (a ladder).
+    throat: '<rect x="7.4" y="3.3" width="9.2" height="6.8" rx="2.6"/><rect x="8.6" y="12" width="6.8" height="2.6" rx="1.3"/><rect x="8.6" y="15.6" width="6.8" height="2.6" rx="1.3"/><rect x="8.6" y="19.2" width="6.8" height="2.6" rx="1.3"/>',
+    // Head & neck: the thyroid, two lobes either side of the trachea. The
+    // previous icon was a frontal head-and-shoulders bust, near-identical
+    // to the "users" icon it sits beside in the sidebar.
+    hn: '<path d="M15.4 20.8v-2.7c2.5-1.4 4.2-4.1 4.2-7.2 0-4.5-3.7-8.1-8.2-8.1-3.6 0-6.7 2.3-7.8 5.6L2.5 12c-.2.6.2 1.3.8 1.4l1.7.4v2.2c0 1.1.9 2 2 2h1.5v2.8"/><circle class="hatch" cx="8.6" cy="10.4" r="1.1"/>',
+    // Frontal cranium, orbits only -- the old icon carried orbits, nasal
+    // aperture, a jaw notch and hatching on a 40-unit grid, all of which
+    // collapsed into a smudge once scaled to 16px.
+    skull: '<path d="M12 3.6c-4.4 0-7.8 3.4-7.8 7.9 0 2.4 1 4.4 2.6 5.7v2.1c0 .8.6 1.4 1.4 1.4h7.6c.8 0 1.4-.6 1.4-1.4v-2.1c1.6-1.3 2.6-3.3 2.6-5.7 0-4.5-3.4-7.9-7.8-7.9z"/><circle cx="9.1" cy="11.2" r="1.9"/><circle cx="14.9" cy="11.2" r="1.9"/><path class="hatch" d="M12 14.4l-1 2h2z"/>',
+    // Fracture: a broken ring with a fault line through it. The old icon was
+    // a shield-and-cross, which everywhere else on the web means "security".
+    trauma: '<path d="M8.6 4.3a8.4 8.4 0 0 0-1 14.9M15.4 4.3a8.4 8.4 0 0 1 1 14.9"/><path d="M11.4 3.4 13.7 8.7 10.3 11l3.5 3-1.8 6.6"/>',
+
+    // ---- entry types -----------------------------------------------------
+    surgical: '<path d="M3.6 20.4 11 13"/><path d="M11 13l4.9-4.9c1.3-1.3 3.1-2 4.7-1.7.3 1.6-.4 3.4-1.7 4.7L14 16z"/>',
+    // Ring-handled instrument -- a minor/bedside procedure, distinct from
+    // the scalpel that marks a theatre case. Drawn with its handles because
+    // the shafts alone read as a tick and collided with "approvals".
+    other: '<circle cx="8.9" cy="5.4" r="2.3"/><circle cx="15.1" cy="5.4" r="2.3"/><path d="M10.1 7.4 12 13.2l1.9-5.8"/><path d="M12 13.2v7.4"/><path class="hatch" d="M9.7 10.3h4.6"/>',
+    "case": '<path d="M5.6 3.4h6.8l3.6 3.6v3.4"/><path d="M5.6 3.4v17.2h5"/><path class="hatch" d="M8.4 8.6h3M8.4 11.8h5.2"/><circle cx="16" cy="15.4" r="4.1"/><path d="m19 18.4 2.3 2.3"/>',
+    academic: '<path d="M12 3.3 21.6 7.5 12 11.7 2.4 7.5z"/><path d="M6.6 9.6v4.6c0 1.9 2.4 3.4 5.4 3.4s5.4-1.5 5.4-3.4V9.6"/><path class="hatch" d="M21.6 7.5v4.6"/>',
+    seminar: '<path d="M3.6 4.2h16.8v9.9H3.6z"/><path d="M12 14.1v2.9M8.3 20.6 12 17l3.7 3.6"/><path class="hatch" d="M7.4 8h9.2"/>',
+
+    // ---- interface -------------------------------------------------------
+    menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+    close: '<path d="M6.2 6.2 17.8 17.8M17.8 6.2 6.2 17.8"/>',
+    users: '<circle cx="9.4" cy="8" r="3.4"/><path d="M3.2 19.8c0-3.4 2.8-6.2 6.2-6.2s6.2 2.8 6.2 6.2"/><circle class="hatch" cx="17.2" cy="9.4" r="2.5"/><path class="hatch" d="M16.4 14c2.5.4 4.4 2.8 4.4 5.8"/>',
+    approvals: '<circle cx="12" cy="12" r="8.5"/><path d="m7.9 12.2 3 3 5.3-5.8"/>',
+    password: '<rect x="4.6" y="10.4" width="14.8" height="9.8" rx="2"/><path d="M8.1 10.4V7.6a3.9 3.9 0 0 1 7.8 0v2.8"/><circle class="hatch" cx="12" cy="15" r="1.5"/>',
+    units: '<path d="M4.2 20.4V8.1L12 3.8l7.8 4.3v12.3"/><path d="M9.3 20.4v-4.9h5.4v4.9"/><path class="hatch" d="M8.2 11.2h2.6M13.2 11.2h2.6"/>',
+    lists: '<path d="M8.6 4.6H6.3c-.9 0-1.7.7-1.7 1.7v12.5c0 .9.7 1.7 1.7 1.7h11.4c.9 0 1.7-.7 1.7-1.7V6.3c0-.9-.7-1.7-1.7-1.7h-2.3"/><rect x="8.6" y="2.8" width="6.8" height="3.6" rx="1.3"/><path class="hatch" d="M8.2 11h7.6M8.2 14.4h7.6M8.2 17.8h4.4"/>',
+    "export": '<path d="M12 3.6v11.6M7.8 11l4.2 4.2 4.2-4.2"/><path class="hatch" d="M4.6 17.4v1.6c0 .8.6 1.4 1.4 1.4h12c.8 0 1.4-.6 1.4-1.4v-1.6"/>'
   };
+  // Watercolour plates. Unlike icon(), these are photographs of paint, so
+  // they are NOT tinted -- see .plate / .art in styles.css for why each one
+  // sits on its own paper.
+  var ART_KEYS = ["ear","nose","throat","hn","skull","trauma","ossicles",
+                  "hearingaid","hands","frame","neuron","facial","theatre"];
+  function artPlate(key, extraClass){
+    if(ART_KEYS.indexOf(key) === -1) return "";
+    return '<span class="plate art a-'+key+(extraClass?" "+extraClass:"")+'" aria-hidden="true"></span>';
+  }
+
   function icon(key, extraClass){
     var body = ICONS[key];
     if(!body) return "";
-    return '<svg class="icon icon-hatch'+(extraClass?" "+extraClass:"")+'" viewBox="0 0 40 40" aria-hidden="true">'+body+'</svg>';
+    return '<svg class="icon icon-hatch'+(extraClass?" "+extraClass:"")+'" viewBox="0 0 24 24" aria-hidden="true">'+body+'</svg>';
   }
+
 
   /* ---------- backward-compat readers for entries logged under the
      earlier 2-type (procedure/case) schema, so old data keeps
@@ -1554,9 +1591,30 @@
   /* ============================================================
      RENDER: AUTH SCREENS
   ============================================================ */
+  // Every auth screen is the same card on the same shell, so the shell is
+  // built once here rather than repeated six times. The card sits in the
+  // left column, over the dark side of the theatre photograph; below 901px
+  // the photograph is not declared at all and this collapses to the single
+  // centred card the app had before -- see .auth-split in styles.css.
+  function authShell(inner, opts){
+    opts = opts || {};
+    var style = (opts.maxWidth ? "max-width:"+opts.maxWidth+"px;" : "") +
+                (opts.center ? "text-align:center;" : "");
+    return '<div class="auth-split">'+
+      '<div class="auth-lockup">'+
+        '<div class="brand-mark">E</div>'+
+        '<div><div class="t">ENT Surgical Logbook</div>'+
+        '<div class="s">Department of Otorhinolaryngology</div></div>'+
+      '</div>'+
+      '<div class="auth-panel"><div class="auth-card"'+(style?' style="'+style+'"':'')+'>'+
+        inner+
+      '</div></div>'+
+      '<div class="auth-foot">De-identified \u00b7 Hospital Number only</div>'+
+    '</div>';
+  }
+
   function renderLogin(){
-    return ''+
-    '<div class="center-shell"><div class="auth-card">'+
+    return authShell(''+
       '<div class="auth-eyebrow">ENT Postgraduate Programme</div>'+
       '<h1>ENT Surgical Logbook</h1>'+
       '<div class="auth-sub">Sign in to log de-identified cases and track competency progress.</div>'+
@@ -1571,13 +1629,12 @@
       // trainee or consultant, so it doesn't get the same visual weight as
       // "Create one" / "Request a reset" above -- separated by its own
       // divider, smaller, and low-contrast rather than a third equal link.
-      '<div style="text-align:center; margin-top:18px; padding-top:12px; border-top:1px solid var(--line); font-size:11px;" class="muted"><button class="link-btn" id="go-devlogin" style="font-size:11px; color:var(--ink-soft);">Developer sign-in</button></div>'+
-    '</div></div>';
+      '<div style="text-align:center; margin-top:18px; padding-top:12px; border-top:1px solid var(--line); font-size:11px;" class="muted"><button class="link-btn" id="go-devlogin" style="font-size:11px; color:var(--ink-soft);">Developer sign-in</button></div>'
+    );
   }
 
   function renderForgot(){
-    return ''+
-    '<div class="center-shell"><div class="auth-card">'+
+    return authShell(''+
       '<div class="auth-eyebrow">Password reset</div>'+
       '<h1>Request a new password</h1>'+
       '<div class="auth-sub">Your Developer admin sets the new password by hand — this just puts your request in their queue.</div>'+
@@ -1585,13 +1642,12 @@
       '<div class="field"><label for="forgot-username">Username</label><input id="forgot-username" type="text" autocomplete="username"></div>'+
       '<div class="field"><label for="forgot-note">Note for your admin (optional)</label><textarea id="forgot-note" placeholder="Anything that helps them confirm it&#39;s you"></textarea></div>'+
       '<button class="btn btn-primary" style="width:100%" id="btn-forgot" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Sending…":"Send request")+'</button>'+
-      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Remembered it? <button class="link-btn" id="go-login-from-forgot">Back to sign in</button></div>'+
-    '</div></div>';
+      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Remembered it? <button class="link-btn" id="go-login-from-forgot">Back to sign in</button></div>'
+    );
   }
 
   function renderDevLogin(){
-    return ''+
-    '<div class="center-shell"><div class="auth-card">'+
+    return authShell(''+
       '<div class="auth-eyebrow">Developer sign-in</div>'+
       '<h1>Manage the logbook</h1>'+
       '<div class="auth-sub">Separate from resident/consultant sign-in. Only accounts already granted the Developer role can enter here.</div>'+
@@ -1599,15 +1655,14 @@
       '<div class="field"><label for="dev-username">Developer username</label><input id="dev-username" type="text" autocomplete="username"></div>'+
       '<div class="field"><label for="dev-password">Password</label><input id="dev-password" type="password" autocomplete="current-password"></div>'+
       '<button class="btn btn-primary" style="width:100%" id="btn-devlogin" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Signing in…":"Sign in as Developer")+'</button>'+
-      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Not a developer? <button class="link-btn" id="go-login-from-dev">Back to regular sign-in</button></div>'+
-    '</div></div>';
+      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Not a developer? <button class="link-btn" id="go-login-from-dev">Back to regular sign-in</button></div>'
+    );
   }
 
   function renderSignup(){
     var role = state.signupRole;
     var isTrainee = isTraineeRole(role);
-    return ''+
-    '<div class="center-shell"><div class="auth-card" style="max-width:460px;">'+
+    return authShell(''+
       '<div class="auth-eyebrow">ENT Postgraduate Programme</div>'+
       '<h1>Create your account</h1>'+
       '<div class="auth-sub">De-identified logging only — log by Hospital Number, never a patient’s name.</div>'+
@@ -1640,18 +1695,32 @@
       )+
       '<p class="hint">Your account needs approval before you can sign in — a Head of Department, Course Coordinator'+(role==="fellow"?", Head of Unit,":"")+' or Developer will review it.</p>'+
       '<button class="btn btn-primary" style="width:100%; margin-top:6px;" id="btn-signup" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Creating account…":"Create account")+'</button>'+
-      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Already have an account? <button class="link-btn" id="go-login">Sign in</button></div>'+
-    '</div></div>';
+      '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Already have an account? <button class="link-btn" id="go-login">Sign in</button></div>',
+      { maxWidth: 460 }
+    );
   }
 
   function renderSignupPending(){
-    return ''+
-    '<div class="center-shell"><div class="auth-card" style="text-align:center;">'+
+    // Its own shell rather than authShell(): this is the one screen a new
+    // registrar sits and looks at, and the border plate wants the whole
+    // viewport rather than the sign-in split.
+    return '<div class="auth-framed"><span class="frame-art a-frame"></span>'+
+      '<div class="auth-card" style="max-width:380px; text-align:center;">'+
       '<div class="auth-eyebrow">Account created</div>'+
       '<h1>Awaiting approval</h1>'+
       '<div class="auth-sub">'+esc(state.signupPendingMessage)+'</div>'+
       '<button class="btn btn-primary" style="width:100%; margin-top:16px;" id="go-login-from-pending">Back to sign in</button>'+
-    '</div></div>';
+      '</div></div>';
+  }
+
+  function renderSignupPendingUnused(){
+    return authShell(''+
+      '<div class="auth-eyebrow">Account created</div>'+
+      '<h1>Awaiting approval</h1>'+
+      '<div class="auth-sub">'+esc(state.signupPendingMessage)+'</div>'+
+      '<button class="btn btn-primary" style="width:100%; margin-top:16px;" id="go-login-from-pending">Back to sign in</button>',
+      { center: true }
+    );
   }
 
   function radioCard(name, value, checked, title, desc){
@@ -1663,9 +1732,10 @@
   function statTile(num, label, iconKey){
     return '<div class="stat-tile">'+(iconKey?icon(iconKey):'')+'<div><div class="num">'+num+'</div><div class="lbl">'+esc(label)+'</div></div></div>';
   }
-  function barRow(label, count, max, color, iconKey){
+  function barRow(label, count, max, color, iconKey, useArt){
     var pct = max>0 ? Math.round((count/max)*100) : 0;
-    return '<div class="bar-row"><div class="bar-label">'+(iconKey?icon(iconKey):'')+'<span>'+esc(label)+'</span></div><div class="bar-track"><span class="bar-fill" style="width:'+pct+'%; background:'+(color||"var(--teal)")+';"></span></div><div class="bar-count">'+count+'</div></div>';
+    var lead = useArt ? artPlate(iconKey, "bar-plate") : (iconKey?icon(iconKey):'');
+    return '<div class="bar-row"><div class="bar-label">'+lead+'<span>'+esc(label)+'</span></div><div class="bar-track"><span class="bar-fill" style="width:'+pct+'%; background:'+(color||"var(--teal)")+';"></span></div><div class="bar-count">'+count+'</div></div>';
   }
 
   /* ============================================================
@@ -1782,7 +1852,7 @@
       dashCard("__new-seminar","Seminar / Presentation","Seminars, lectures or case presentations you conducted.",null,"seminar","var(--violet)")+
     '</div></div>'+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
-      (recent.length===0 ? '<div class="empty-state">Nothing logged yet.</div>' :
+      (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Summary</th><th>Unit</th></tr></thead><tbody>'+
         recent.map(function(e){ return '<tr><td class="tabular">'+fmtDate(e.date)+'</td><td>'+entryTypeChip(e)+'</td><td>'+esc(summarizeEntry(e))+'</td><td>'+unitShortHtml(e.unit)+'</td></tr>'; }).join("")+
       '</tbody></table></div>')+
@@ -1897,7 +1967,7 @@
       trend.map(function(r){ return barRow(fmtMonthLabel(r.month), r.total, maxTrend, "var(--violet)"); }).join("")+
     '</div>' : '')+
     (s.siteRows.length ? '<div class="card stats-block"><h3>Area-wise (surgical + other procedures, by site)</h3>'+
-      s.siteRows.map(function(r){ return barRow(catInfo(r.key).name, r.count, maxSite, catInfo(r.key).color, r.key); }).join("")+
+      s.siteRows.map(function(r){ return barRow(catInfo(r.key).name, r.count, maxSite, catInfo(r.key).color, r.key, true); }).join("")+
     '</div>' : '')+
     (s.unitRows.length ? '<div class="card stats-block"><h3>Posting-wise (every entry type, by unit)</h3>'+
       s.unitRows.map(function(r){ return barRow(unitShort(r.key), r.count, maxUnit); }).join("")+
@@ -2434,7 +2504,7 @@
           '<button type="button" class="btn btn-sm" data-entries-sort-dir="'+esc(uiKey)+'" title="Reverse sort order">'+(ui.sortDir==="asc"?"↑ Asc":"↓ Desc")+'</button>'+
         '</div>'+
       '</div>';
-    if(all.length===0) return toolbar+'<div class="empty-state">'+(opts.emptyText||"Nothing logged yet.")+'</div>';
+    if(all.length===0) return toolbar+'<div class="empty-state">'+artPlate("hands","es-plate")+esc(opts.emptyText||"Nothing logged yet.")+'</div>';
     if(sorted.length===0) return toolbar+'<div class="empty-state">No entries match “'+esc(ui.search)+'”.</div>';
     var rowsHtml = sorted.map(function(e,i){
       var idStr = String(e.id);
@@ -2881,7 +2951,7 @@
     }
     return ''+
     '<div class="card"><h2>Pending requests ('+pending.length+')</h2>'+
-      (pending.length===0 ? '<p class="muted" style="font-size:13px;">Nothing waiting.</p>' :
+      (pending.length===0 ? '<div class="empty-state">'+artPlate("ossicles","es-plate")+'Nothing waiting.</div>' :
       '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Note</th><th>Requested</th><th></th></tr></thead><tbody>'+pending.map(function(r){return reqRow(r,true);}).join("")+'</tbody></table></div>')+
     '</div>'+
     (resolved.length ? '<div class="card"><h2 style="font-size:15px;">Resolved</h2>'+
@@ -3056,6 +3126,10 @@
   ============================================================ */
   function renderAbout(){
     return ''+
+    '<div class="about-hero"><span class="hero-art a-theatre"></span>'+
+      '<h2>About this logbook</h2>'+
+      '<p>Built for the Department of Otorhinolaryngology. De-identified by design — every entry is logged against a Hospital Number, never a name.</p>'+
+    '</div>'+
     '<div class="card"><h2>What this is</h2>'+
       '<p class="muted">A shared ENT logbook — a Dashboard homepage, five entry types (Surgical Procedure, Other Procedure, Interesting Case, Academic Participation, Seminar / Presentation), date-based unit postings, and role-based views (Resident / Consultant / Developer) — running on its own server and database, independent of any third-party platform.</p>'+
     '</div>'+
@@ -3087,7 +3161,8 @@
     var app = el("app");
     if(!app) return;
     if(!state.capReady){
-      app.innerHTML = '<div class="center-shell"><div class="auth-card" style="text-align:center;"><div class="auth-eyebrow">Loading</div><h1 style="font-size:20px;">Opening the logbook…</h1></div></div>';
+      app.innerHTML = authShell('<div class="auth-eyebrow">Loading</div>'+
+        '<h1 style="font-size:20px;">Opening the logbook…</h1>', { center: true });
       return;
     }
     if(!state.user){

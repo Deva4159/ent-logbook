@@ -9,35 +9,44 @@
      names stable means this redesign is a values-only change here.
   --------------------------------------------------------------------- */
   :root{
-    --ink:#1B222C; --ink-soft:#5B6472; --paper:#F5F6F8; --surface:#FFFFFF; --surface-2:#EEF0F3;
-    --line:#DCE1E6; --teal:#1E6E82; --teal-ink:#14505F; --teal-bg:#E3EEF1;
+    --ink:#262320; --ink-soft:#6C645B; --paper:#F4F1EB; --surface:#FFFDF9; --surface-2:#EBE6DD;
+    --line:#DCD5C9; --teal:#1A6F8C; --teal-ink:#125469; --teal-bg:#DFEBEF;
+    /* label colour for anything sitting ON the accent. White fails in dark
+       mode, where --teal is a pale blue -- see the note in the README. */
+    --on-teal:#FFFFFF;
+    /* paper under the watercolour: invisible here, a mounted tile in dark */
+    --plate:#FFFFFF; --plate-edge:rgba(0,0,0,.05); --plate-sh:0 1px 2px rgba(38,35,32,.07);
     --amber:#8A5D00; --amber-bg:#F6EFDD; --red:#9A3B39; --red-bg:#F5E4E3; --green:#2F7D5B; --green-bg:#E1F0E7;
     --violet:#5C4FA0; --violet-bg:#EAE7F5;
     --ink-line:#1B222C;
     --shadow:0 1px 2px rgba(20,26,32,.06), 0 6px 18px rgba(20,26,32,.07);
-    --cat-ear:#8F7248; --cat-nose:#4C7C93; --cat-throat:#9C5252; --cat-hn:#6B8A5A; --cat-skull:#7A6BA8; --cat-trauma:#B06A3A;
+    --cat-ear:#976C3E; --cat-nose:#3D7D94; --cat-throat:#5C7F34; --cat-hn:#B95465; --cat-skull:#35815B; --cat-trauma:#7667C1;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
-      --ink:#E7EAEE; --ink-soft:#9AA3AF; --paper:#14181D; --surface:#1B2027; --surface-2:#232933;
-      --line:#313A45; --teal:#6FB3C4; --teal-ink:#9CD2DF; --teal-bg:#1E333A;
+      --ink:#EDE7DD; --ink-soft:#A69C90; --paper:#16150F; --surface:#211F19; --surface-2:#2B2820;
+      --line:#3A3630; --teal:#74B4C6; --teal-ink:#A0D4E0; --teal-bg:#1D3138;
+      --on-teal:#16150F;
+      --plate:#F2EEE6; --plate-edge:rgba(0,0,0,.35); --plate-sh:0 1px 3px rgba(0,0,0,.5);
       --amber:#E0B663; --amber-bg:#3A2F14; --red:#E08F8C; --red-bg:#3A2422; --green:#7FBF9E; --green-bg:#1E332A;
       --violet:#B3A6DE; --violet-bg:#2A2640;
       --ink-line:#E7EAEE;
       --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.4);
-      --cat-ear:#C9A876; --cat-nose:#85B7CC; --cat-throat:#CB8B8B; --cat-hn:#A3C48F; --cat-skull:#ABA0D9; --cat-trauma:#D69A6E;
+      --cat-ear:#AD7C47; --cat-nose:#4690AB; --cat-throat:#76A343; --cat-hn:#C46D7C; --cat-skull:#43A373; --cat-trauma:#897CC9;
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"]{
-    --ink:#E7EAEE; --ink-soft:#9AA3AF; --paper:#14181D; --surface:#1B2027; --surface-2:#232933;
-    --line:#313A45; --teal:#6FB3C4; --teal-ink:#9CD2DF; --teal-bg:#1E333A;
+    --ink:#EDE7DD; --ink-soft:#A69C90; --paper:#16150F; --surface:#211F19; --surface-2:#2B2820;
+    --line:#3A3630; --teal:#74B4C6; --teal-ink:#A0D4E0; --teal-bg:#1D3138;
+    --on-teal:#16150F;
+    --plate:#F2EEE6; --plate-edge:rgba(0,0,0,.35); --plate-sh:0 1px 3px rgba(0,0,0,.5);
     --amber:#E0B663; --amber-bg:#3A2F14; --red:#E08F8C; --red-bg:#3A2422; --green:#7FBF9E; --green-bg:#1E332A;
     --violet:#B3A6DE; --violet-bg:#2A2640;
     --ink-line:#E7EAEE;
     --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.4);
-    --cat-ear:#C9A876; --cat-nose:#85B7CC; --cat-throat:#CB8B8B; --cat-hn:#A3C48F; --cat-skull:#ABA0D9; --cat-trauma:#D69A6E;
+    --cat-ear:#AD7C47; --cat-nose:#4690AB; --cat-throat:#76A343; --cat-hn:#C46D7C; --cat-skull:#43A373; --cat-trauma:#897CC9;
     color-scheme: dark;
   }
 
@@ -58,8 +67,12 @@
   button{font-family:inherit;}
   ::selection{background:var(--teal-bg); color:var(--ink);}
   .icon{display:inline-block; vertical-align:middle; flex:none;}
-  .icon-hatch{stroke:currentColor; fill:none; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round;}
-  .icon-hatch .hatch{stroke-width:1.1; opacity:.55;}
+  /* stroke widths are set for the 24x24 icon grid (see ICONS in app.js);
+     on the previous 40x40 grid a 1.6 stroke resolved to 0.64 of a CSS
+     pixel at the 16px the app renders icons at, and the 1.1 hatch to
+     0.44 -- which is why the small icons read as grey fur. */
+  .icon-hatch{stroke:currentColor; fill:none; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round;}
+  .icon-hatch .hatch{stroke-width:1.3; opacity:.6;}
 
   #app{min-height:100vh; display:flex; flex-direction:column;}
   /* The old ruled-notebook-paper background (a repeating-linear-gradient of
@@ -71,6 +84,64 @@
   .auth-card h1{font-size:28px; margin-bottom:4px;}
   .auth-sub{color:var(--ink-soft); font-size:13.5px; margin-bottom:22px;}
 
+  /* Auth screens: the theatre photograph full-bleed, card over the dark
+     side of it. The picture is composed as a hero -- dark gradient on the
+     left, subject on the right -- so it is used at its own 16:9 across the
+     whole viewport rather than cropped into a side panel, which would
+     discard the negative space it was built around. One shell serves
+     sign-in, sign-up, password reset, developer sign-in and the
+     pending-approval screen, so they cannot drift apart.
+
+     Deliberately mobile-first, unlike the rest of this file: the photograph
+     is declared ONLY inside the min-width query below, so a phone never
+     downloads 93KB it will never display. display:none on an <img> does
+     not achieve that reliably -- the fetch still happens in some browsers.
+
+     Served from /signin.webp by a named route in app.py; the CSP is
+     img-src 'self' data:, so it has to be same-origin. */
+
+  /* Narrow: exactly the centred card the app had before any of this. */
+  .auth-split{min-height:100vh; display:grid; place-items:center; padding:32px 16px; background:var(--paper);}
+  .auth-lockup, .auth-foot{display:none;}
+  .auth-panel{width:100%; display:flex; justify-content:center;}
+
+  @media (min-width:901px){
+    .auth-split{
+      position:relative; overflow:hidden; background:#07121F;
+      display:grid; grid-template-columns:minmax(0,470px) 1fr; grid-template-rows:auto 1fr auto;
+      place-items:stretch; padding:34px 40px;
+    }
+    .auth-split::before, .auth-split::after{content:""; position:absolute; inset:0; pointer-events:none;}
+    .auth-split::before{background:url("/signin.webp") 72% 50% / cover no-repeat;}
+    /* The scrim stops are in PIXELS, not percentages. The card is a fixed
+       width, so a percentage fade is thinnest exactly where the card is
+       widest relative to the viewport -- on a 960px laptop a 26% stop lands
+       at 250px, well inside the card. Pixel stops keep the dark band past
+       the card's right edge at every width. */
+    .auth-split::after{
+      background:linear-gradient(90deg,
+        rgba(4,12,22,.93) 0,
+        rgba(4,12,22,.90) 520px,
+        rgba(4,12,22,.62) 700px,
+        rgba(4,12,22,.18) 900px,
+        rgba(4,12,22,0) 1080px);
+    }
+    .auth-split > *{position:relative; z-index:1; grid-column:1;}
+    .auth-lockup{display:flex; align-items:center; gap:12px;}
+    .auth-lockup .brand-mark{width:38px; height:38px; font-size:17px;}
+    /* Fixed light values rather than tokens: this text sits on a photograph
+       that is dark in both themes, so it must be light in both themes. */
+    .auth-lockup .t{font-weight:700; font-size:15.5px; color:#F2F6F9; line-height:1.25;}
+    .auth-lockup .s{font-family:"IBM Plex Mono"; font-size:11px; letter-spacing:.03em; color:#9FB3C4;}
+    .auth-panel{display:flex; align-items:center; justify-content:flex-start; padding:24px 0;}
+    .auth-foot{display:block; font-family:"IBM Plex Mono"; font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:#8FA5B7;}
+  }
+
+  /* No fixed height and no inner scroller: the sign-up card is the tall one,
+     and on a short window the page simply scrolls with the background
+     covering the taller area, rather than the card scrolling inside a pane
+     while the photograph stays put. */
+
   .topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--surface); position:sticky; top:0; z-index:5;}
   .brand{display:flex; align-items:center; gap:10px;}
   /* Hamburger toggle for the collapsed mobile nav -- hidden on desktop,
@@ -78,14 +149,14 @@
   .nav-toggle{display:none; align-items:center; justify-content:center; width:34px; height:34px; padding:0; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); cursor:pointer; flex:none;}
   .nav-toggle:hover{border-color:var(--teal);}
   .nav-toggle .icon{width:18px; height:18px;}
-  .brand-mark{width:32px; height:32px; border-radius:8px; background:var(--teal); color:#fff; display:flex; align-items:center; justify-content:center; font-family:"Inter"; font-weight:700; font-size:16px;}
+  .brand-mark{width:32px; height:32px; border-radius:8px; background:var(--teal); color:var(--on-teal); display:flex; align-items:center; justify-content:center; font-family:"Inter"; font-weight:700; font-size:16px;}
   .brand-text h1{font-size:16.5px;}
   .brand-text .sub{font-size:11px; color:var(--ink-soft); font-family:"IBM Plex Mono"; letter-spacing:.03em;}
   .user-chip{display:flex; align-items:center; gap:10px; font-size:13px;}
   .role-badge{font-family:"IBM Plex Mono"; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:99px; border:1px solid var(--line); color:var(--teal-ink); background:var(--teal-bg);}
   .btn{cursor:pointer; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); padding:8px 14px; font-size:13.5px; font-weight:500; transition:background .12s, border-color .12s;}
   .btn:hover{border-color:var(--teal);}
-  .btn-primary{background:var(--teal); border-color:var(--teal); color:#fff;}
+  .btn-primary{background:var(--teal); border-color:var(--teal); color:var(--on-teal);}
   .btn-primary:hover{background:var(--teal-ink); border-color:var(--teal-ink);}
   .btn-ghost{border-color:transparent; background:transparent;}
   .btn-danger{color:var(--red);}
@@ -333,3 +404,56 @@
   .history-entry:last-child{border-bottom:none;}
   .history-entry-head{font-size:13px; margin-bottom:6px; display:flex; justify-content:space-between; gap:10px;}
   .history-changes .detail-row{padding:5px 0; font-size:12.5px;}
+
+
+  /* =====================================================================
+     Artwork. Every piece keeps its own pigment -- nothing is recoloured --
+     and sits on a paper plate: invisible against a light card, a mounted
+     tile in dark mode. That plate is not decoration; un-mixed watercolour
+     dropped straight onto a dark surface fluoresces, and the near-white
+     pieces vanish entirely.
+  ===================================================================== */
+  .plate{background:var(--plate); border:1px solid var(--plate-edge); border-radius:8px; box-shadow:var(--plate-sh);}
+  .art{background-repeat:no-repeat; background-position:center; background-size:contain; background-origin:content-box;}
+  .a-ear{background-image:url("/art/ear.png")}
+  .a-nose{background-image:url("/art/nose.png")}
+  .a-throat{background-image:url("/art/throat.png")}
+  .a-hn{background-image:url("/art/hn.png")}
+  .a-skull{background-image:url("/art/skull.png")}
+  .a-trauma{background-image:url("/art/trauma.png")}
+  .a-ossicles{background-image:url("/art/ossicles.png")}
+  .a-hearingaid{background-image:url("/art/hearingaid.png")}
+  .a-hands{background-image:url("/art/hands.png")}
+  .a-frame{background-image:url("/art/frame.png")}
+  .a-neuron{background-image:url("/art/neuron.png")}
+  .a-facial{background-image:url("/art/facial.png")}
+  .a-theatre{background-image:url("/art/theatre.png")}
+
+  /* artwork beside a stats bar, in place of the line icon */
+  .bar-label .bar-plate{width:26px; height:32px; padding:2px; flex:none;}
+
+  /* empty states */
+  .empty-state .es-plate{display:block; width:112px; height:80px; margin:0 auto 14px; padding:8px;}
+
+  /* the pending-approval screen, inside the printed border */
+  .auth-framed{position:relative; display:flex; align-items:center; justify-content:center;
+    min-height:100vh; padding:34px 20px; background:var(--plate);}
+  .auth-framed .frame-art{position:absolute; inset:8px; background-repeat:no-repeat;
+    background-position:center; background-size:100% 100%; pointer-events:none;}
+  .auth-framed .auth-card{position:relative; background:rgba(255,255,255,.93); color:#262320;
+    border-color:rgba(0,0,0,.07); box-shadow:0 6px 20px rgba(38,35,32,.12);}
+  .auth-framed .auth-card h1{color:#262320;}
+  .auth-framed .auth-sub{color:#6C645B;}
+  @media (max-width:560px){ .auth-framed .frame-art{display:none;} }
+
+  /* About page header */
+  .about-hero{position:relative; overflow:hidden; border:1px solid var(--line); border-radius:12px;
+    background:var(--surface); padding:26px 28px; margin-bottom:18px; min-height:190px;
+    display:flex; flex-direction:column; justify-content:center; box-shadow:var(--shadow);}
+  .about-hero .hero-art{position:absolute; right:0; top:0; bottom:0; width:52%;
+    background-size:cover; background-position:center; pointer-events:none;
+    -webkit-mask-image:linear-gradient(90deg,transparent,#000 45%); mask-image:linear-gradient(90deg,transparent,#000 45%);}
+  .about-hero h2, .about-hero p{position:relative;}
+  .about-hero h2{font-size:21px; margin-bottom:6px;}
+  .about-hero p{margin:0; max-width:42ch; font-size:13.5px; color:var(--ink-soft);}
+  @media (max-width:640px){ .about-hero .hero-art{display:none;} .about-hero{min-height:0;} }
