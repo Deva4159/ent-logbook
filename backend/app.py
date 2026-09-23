@@ -78,6 +78,35 @@ def app_js():
     return send_from_directory(STATIC_DIR, "app.js", mimetype="application/javascript")
 
 
+# Sign-in screen photograph. Named explicitly, like every other asset above,
+# rather than by re-enabling Flask's generic static handler. No max_age is
+# set, so it revalidates with an ETag and a 304 -- replacing the file takes
+# effect immediately instead of sitting in caches. It is only ever requested
+# above 901px; styles.css declares it inside a min-width query so phones
+# never fetch it.
+@app.get("/signin.webp")
+def signin_webp():
+    return send_from_directory(STATIC_DIR, "signin.webp", mimetype="image/webp")
+
+
+# Artwork used across the interface. An allow-list rather than a directory
+# wildcard, so this stays the same "every served path is named" rule the
+# routes above follow -- a new painting needs a line here, which is the
+# point. 404 on anything not listed.
+ART_FILES = {
+    "ear", "nose", "throat", "hn", "skull", "trauma",
+    "ossicles", "hearingaid", "hands", "frame", "neuron", "facial", "theatre",
+}
+
+
+@app.get("/art/<name>.png")
+def art_png(name):
+    if name not in ART_FILES:
+        return jsonify({"error": "not_found"}), 404
+    return send_from_directory(os.path.join(STATIC_DIR, "art"), name + ".png",
+                               mimetype="image/png")
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
