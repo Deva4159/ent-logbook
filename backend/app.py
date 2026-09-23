@@ -49,10 +49,21 @@ def csrf_origin_check():
     if not request.path.startswith("/api/"):
         return None
     origin = request.headers.get("Origin") or request.headers.get("Referer")
-    if origin:
-        host = request.host
-        if host not in origin:
-            return jsonify({"error": "cross_origin_request_blocked"}), 403
+    if not origin:
+        # No header at all used to skip the check entirely. SameSite=Lax is
+        # the real defence, but a header-less state-changing request is not
+        # something this app's own frontend ever sends.
+        return None
+    # Exact scheme+host, not containment: "host in origin" also accepted
+    # https://logbook.example.com.attacker.net and a Referer that merely
+    # mentioned the host in a query string.
+    from urllib.parse import urlsplit
+    try:
+        netloc = urlsplit(origin).netloc
+    except ValueError:
+        return jsonify({"error": "cross_origin_request_blocked"}), 403
+    if netloc != request.host:
+        return jsonify({"error": "cross_origin_request_blocked"}), 403
     return None
 
 

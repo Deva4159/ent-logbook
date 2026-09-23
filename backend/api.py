@@ -20,6 +20,61 @@ from db import get_db
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
+def known_unit_keys():
+    """The unit keys the department actually has, from the config list."""
+    cfg = get_config()
+    out = set()
+    for u in (cfg.get("units") or []):
+        if isinstance(u, dict) and isinstance(u.get("key"), str) and u["key"]:
+            out.add(u["key"])
+    return out
+
+
+def bad_unit_response(unit):
+    """400 for a unit key that isn't in the department's list.
+
+    This is the check that stops a trainee choosing which unit their work is
+    filed under. The unit on a posting is stamped onto every entry logged
+    during it (_resolve_unit_for_entry), and that stamp is what every
+    unit-scoped consultant query filters on -- so an unrecognised key put a
+    resident's entire logbook outside their Head of Unit's roster and CSV
+    export while it still counted on their own dashboard. The UI only ever
+    offered real units; the hole was the API accepting anything.
+    """
+    return jsonify({
+        "error": "Unknown unit.",
+        "detail": "'%s' is not a unit in this department's list." % (unit,),
+    }), 400
+
+
+def _iso_date_or_none(v):
+    """Accept only a real YYYY-MM-DD. Anything else is dropped.
+
+    Without this a stored junk date is unrecoverable through the UI: the
+    reminders endpoint takes MAX(entry_date) -- a string max, so "zzz" beats
+    every real date -- and then calls date.fromisoformat() on it, so the
+    author's dashboard 500s forever and they cannot reach the entry to
+    delete it.
+    """
+    if not isinstance(v, str):
+        return None
+    try:
+        datetime.date.fromisoformat(v.strip())
+    except (ValueError, TypeError):
+        return None
+    return v.strip()
+
+
+def _text(v, limit=20000):
+    """Coerce a JSON value to a bindable string. sqlite3 raises
+    ProgrammingError on a dict or list, which surfaced as a 500."""
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return None
+    return str(v)[:limit]
+
+
 ENTRY_TYPES = {"surgical", "other", "case", "academic", "seminar"}
 # Every role that logs entries and gets the resident-style dashboard/logbook
 # experience -- "PG resident" is just one of the three now.
@@ -317,6 +372,8 @@ def signup():
     unit = body.get("unit") if final_role in ("consultant", "fellow") else None
     if final_role == "fellow" and not unit:
         return jsonify({"error": "Fellows must select a parent unit at sign-up."}), 400
+    if unit and (not isinstance(unit, str) or unit not in known_unit_keys()):
+        return bad_unit_response(unit)
 
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = body.get("pgYear") if final_role in TRAINEE_ROLES else None
@@ -454,6 +511,12 @@ def add_posting():
     end_date = body.get("endDate") or None
     if not unit or not start_date:
         return jsonify({"error": "Unit and start date are required."}), 400
+    if not isinstance(unit, str) or unit not in known_unit_keys():
+        return bad_unit_response(unit)
+    if not _iso_date_or_none(start_date):
+        return jsonify({"error": "Start date must be a real date (YYYY-MM-DD)."}), 400
+    if end_date and not _iso_date_or_none(end_date):
+        return jsonify({"error": "End date must be a real date (YYYY-MM-DD)."}), 400
     if end_date and end_date < start_date:
         return jsonify({"error": "End date can't be before the start date."}), 400
     db = get_db()
@@ -490,7 +553,7 @@ def create_entry():
     entry_type = body.get("entryType")
     if entry_type not in ENTRY_TYPES:
         return jsonify({"error": "Unknown entry type."}), 400
-    entry_date = body.get("date") or datetime.date.today().isoformat()
+    entry_date = _iso_date_or_none(body.get("date")) or datetime.date.today().isoformat()
     unit = _resolve_unit_for_entry(g.user["username"], entry_date)
     now = datetime.datetime.utcnow().isoformat() + "Z"
 
@@ -630,7 +693,14 @@ def get_entry(entry_id):
         return jsonify({"error": "not_found"}), 404
     d = dict(row)
     # visibility: own entries, developer, or a consultant whose scope covers the entry's unit
-    if g.user["role"] == "developer" or d["author_username"] == g.user["username"]:
+    if d["author_username"] == g.user["username"]:
+        return jsonify({"entry": entry_row_to_dict(row)})
+    # A draft belongs to nobody but its author -- not to a developer and not
+    # to an HOD. Ids are sequential, so without this the whole department's
+    # unfinished entries are enumerable one GET at a time.
+    if d.get("status") == "draft":
+        return jsonify({"error": "forbidden"}), 403
+    if g.user["role"] == "developer":
         return jsonify({"entry": entry_row_to_dict(row)})
     if g.user["role"] == "consultant":
         scope = consultant_scope(g.user["username"])
@@ -808,7 +878,13 @@ def update_entry(entry_id):
 
 
 def _can_view_entry_history(user, entry_row):
-    if user["role"] == "developer" or user["username"] == entry_row["author_username"]:
+    if user["username"] == entry_row["author_username"]:
+        return True
+    # entry_edits.changes holds the full old/new value of every field, so a
+    # draft's history is the draft. Same rule as get_entry.
+    if (entry_row["status"] if "status" in entry_row.keys() else "final") == "draft":
+        return False
+    if user["role"] == "developer":
         return True
     if user["role"] != "consultant":
         return False
@@ -825,7 +901,9 @@ def _can_view_entry_history(user, entry_row):
 @login_required()
 def entry_history(entry_id):
     db = get_db()
-    entry_row = db.execute("SELECT author_username, unit FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    # status is needed by _can_view_entry_history -- without it the draft
+    # guard there silently falls through to "final".
+    entry_row = db.execute("SELECT author_username, unit, status FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not entry_row:
         return jsonify({"error": "not_found"}), 404
     if not _can_view_entry_history(g.user, entry_row):
@@ -1084,6 +1162,8 @@ def admin_create_user():
     unit = body.get("unit") if role in ("consultant", "fellow") else None
     if role == "fellow" and not unit:
         return jsonify({"error": "Fellows must have a parent unit."}), 400
+    if unit and (not isinstance(unit, str) or unit not in known_unit_keys()):
+        return bad_unit_response(unit)
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = body.get("pgYear") if role in TRAINEE_ROLES else None
     designation = body.get("designation") if role == "consultant" else None
@@ -1123,14 +1203,22 @@ def update_user(username):
     # (a Fellow reassigned, a consultant transferred) -- same gate as batch/
     # designation.
     if "unit" in body:
-        db.execute("UPDATE users SET unit = ? WHERE username = ?", (body.get("unit"), username))
+        new_unit = body.get("unit") or None
+        if new_unit is not None and (not isinstance(new_unit, str) or new_unit not in known_unit_keys()):
+            db.rollback()
+            return bad_unit_response(new_unit)
+        db.execute("UPDATE users SET unit = ? WHERE username = ?", (new_unit, username))
     # Role changes and password resets stay Developer-only -- broader than
     # the specific batch/designation/delete powers HOD was given.
     if caps["isDeveloper"]:
         if "role" in body and body["role"] in (TRAINEE_ROLES | {"consultant", "developer"}):
             db.execute("UPDATE users SET role = ? WHERE username = ?", (body["role"], username))
         if "password" in body and body["password"]:
-            if len(body["password"]) < 8:
+            if len(str(body["password"])) < 8:
+                # Roll back first: the role/active/profile UPDATEs above have
+                # already run on this thread-local connection, and without
+                # this they are committed by whatever request lands next.
+                db.rollback()
                 return jsonify({"error": "New password must be at least 8 characters."}), 400
             db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(body["password"]), username))
             destroy_all_sessions_for(username)
@@ -1313,6 +1401,47 @@ def list_role_assignments():
     return jsonify({"roleAssignments": [role_assignment_row_to_dict(r) for r in rows]})
 
 
+@api.get("/units/orphans")
+@login_required(role="developer")
+def unit_orphans():
+    """Rows pointing at a unit key the department no longer has.
+
+    Two ways to get here: a unit was deleted from Manage Lists while records
+    still referenced it, or -- before the validation above existed -- someone
+    posted a key that never existed. Entries with NO unit at all are counted
+    separately: that is the ordinary "logged before adding a posting" case,
+    not evasion, but it has the same effect on a Head of Unit's roster, so
+    it is worth seeing.
+    """
+    db = get_db()
+    known = known_unit_keys()
+    unknown = {}
+
+    def note(key, field, count):
+        if key is None or key == "" or key in known:
+            return
+        unknown.setdefault(key, {"unit": key, "postings": 0, "entries": 0, "users": 0, "assignments": 0})
+        unknown[key][field] += count
+
+    for r in db.execute("SELECT unit, COUNT(*) c FROM postings GROUP BY unit"):
+        note(r["unit"], "postings", r["c"])
+    for r in db.execute("SELECT unit, COUNT(*) c FROM entries GROUP BY unit"):
+        note(r["unit"], "entries", r["c"])
+    for r in db.execute("SELECT unit, COUNT(*) c FROM users GROUP BY unit"):
+        note(r["unit"], "users", r["c"])
+    for r in db.execute("SELECT unit, COUNT(*) c FROM role_assignments GROUP BY unit"):
+        note(r["unit"], "assignments", r["c"])
+
+    unattributed = db.execute(
+        "SELECT COUNT(*) c FROM entries WHERE (unit IS NULL OR unit = '') AND status = 'final'"
+    ).fetchone()["c"]
+    return jsonify({
+        "orphans": sorted(unknown.values(), key=lambda o: -(o["entries"] + o["postings"])),
+        "unattributedEntries": unattributed,
+        "knownUnits": sorted(known),
+    })
+
+
 @api.post("/role-assignments")
 @login_required(role="developer")
 def add_role_assignment():
@@ -1321,10 +1450,20 @@ def add_role_assignment():
     consultant = db.execute("SELECT display_name FROM users WHERE username = ?", (body.get("consultantUsername"),)).fetchone()
     if not consultant:
         return jsonify({"error": "No such consultant."}), 404
+    assignment_role = body.get("role")
+    if assignment_role not in ("head_of_unit", "coordinator", "hod"):
+        return jsonify({"error": "Role must be head_of_unit, coordinator or hod."}), 400
+    # A Head of Unit assignment IS a unit scope, so an unrecognised key here
+    # silently grants sight of nothing.
+    assign_unit = body.get("unit") or None
+    if assign_unit is not None and (not isinstance(assign_unit, str) or assign_unit not in known_unit_keys()):
+        return bad_unit_response(assign_unit)
+    if assignment_role == "head_of_unit" and not assign_unit:
+        return jsonify({"error": "A Head of Unit assignment needs a unit."}), 400
     now = datetime.datetime.utcnow().isoformat() + "Z"
     cur = db.execute(
         "INSERT INTO role_assignments (consultant_username, consultant_display_name, assignment_role, unit, start_at, end_at, assigned_by, assigned_at) VALUES (?,?,?,?,?,?,?,?)",
-        (body.get("consultantUsername"), consultant["display_name"], body.get("role"), body.get("unit"), body.get("startAt"), body.get("endAt"), g.user["username"], now),
+        (body.get("consultantUsername"), consultant["display_name"], assignment_role, assign_unit, body.get("startAt"), body.get("endAt"), g.user["username"], now),
     )
     db.commit()
     row = db.execute("SELECT * FROM role_assignments WHERE id = ?", (cur.lastrowid,)).fetchone()

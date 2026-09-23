@@ -36,7 +36,12 @@ def verify_password(hash_, plain):
 
 
 def clean_username(u):
-    u = (u or "").strip().lower()
+    # Anything can arrive here: these endpoints are unauthenticated and the
+    # body is attacker-controlled JSON. A list or dict used to raise
+    # AttributeError on .strip() and return a 500 traceback.
+    if not isinstance(u, str):
+        u = ""
+    u = u.strip().lower()
     return re.sub(r"[^a-z0-9._-]", "", u)
 
 
