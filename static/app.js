@@ -27,6 +27,7 @@
     devUsers: [],
     devUsersLoaded: false,
     devAllEntries: [],
+    unitOrphans: null,
     roleAssignments: [],
     roleAssignmentsLoaded: false,
     passwordResets: [],
@@ -285,6 +286,43 @@
     return '<span class="plate art a-'+key+(extraClass?" "+extraClass:"")+'" aria-hidden="true"></span>';
   }
 
+  // Skeletons rather than the word "Loading…". The page used to empty out
+  // and then snap back full; these hold the shape of what is arriving, so
+  // nothing jumps when it lands.
+  function skeletonTable(rows){
+    var r = "";
+    for(var i=0;i<(rows||5);i++) r += '<div class="sk-row"><span class="sk"></span><span class="sk"></span><span class="sk"></span><span class="sk"></span></div>';
+    return '<div class="sk-table" aria-busy="true" aria-label="Loading">'+r+'</div>';
+  }
+  function skeletonDash(){
+    var t = "";
+    for(var i=0;i<4;i++) t += '<div class="sk-tile"><span class="sk"></span><i class="sk"></i></div>';
+    return '<div aria-busy="true" aria-label="Loading"><div class="sk-tiles">'+t+'</div>'+skeletonTable(4)+'</div>';
+  }
+
+  // The dark palette was fully built but unreachable: nothing ever set
+  // data-theme, so a user on a light OS could not get it. "auto" keeps the
+  // previous behaviour of following the system.
+  function currentTheme(){
+    try{ return localStorage.getItem("entlog.theme") || "auto"; }catch(e){ return "auto"; }
+  }
+  function applyTheme(t){
+    var r = document.documentElement;
+    if(t === "auto") r.removeAttribute("data-theme"); else r.setAttribute("data-theme", t);
+    try{ localStorage.setItem("entlog.theme", t); }catch(e){}
+  }
+  function cycleTheme(){
+    var order = ["auto","light","dark"];
+    applyTheme(order[(order.indexOf(currentTheme())+1) % 3]);
+    render();
+  }
+  function themeButton(){
+    var t = currentTheme();
+    var label = t==="auto" ? "Theme: follows your system" : (t==="light" ? "Theme: light" : "Theme: dark");
+    return '<button type="button" class="theme-btn" id="btn-theme" title="'+esc(label)+'" aria-label="'+esc(label)+'">'+
+      icon(t==="dark" ? "skull" : (t==="light" ? "approvals" : "units"))+'</button>';
+  }
+
   function icon(key, extraClass){
     var body = ICONS[key];
     if(!body) return "";
@@ -418,7 +456,19 @@
   function fmtDateTime(s){ if(!s) return "—"; try{ var d=new Date(s); return d.toLocaleString(undefined,{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}); }catch(e){ return s; } }
   function cleanUsername(u){ return String(u||"").trim().toLowerCase().replace(/[^a-z0-9._-]/g,""); }
 
-  function toast(msg){ state.toast = msg; render(); setTimeout(function(){ if(state.toast===msg){ state.toast=""; render(); } }, 3200); }
+  // The dismiss deliberately does NOT re-render. Several fields are read off
+  // the live DOM rather than kept in state (the wizard's Comments / History /
+  // Examination, the entries search, the developer's new-password box), so a
+  // render 3.2s after a toast used to wipe whatever had been typed since.
+  function toast(msg){
+    state.toast = msg; render();
+    setTimeout(function(){
+      if(state.toast !== msg) return;
+      state.toast = "";
+      var b = document.querySelector("[data-toast]");
+      if(b && b.parentNode) b.parentNode.removeChild(b);
+    }, 3200);
+  }
 
   /* ============================================================
      API LAYER - every call goes to the real Flask/SQLite backend
@@ -461,6 +511,7 @@
   async function dGetReminders(){ return (await api("GET","/reminders")).reminders; }
   async function dGetEntryHistory(id){ return (await api("GET","/entries/"+id+"/history")).edits; }
   async function dGetConfig(){ return (await api("GET","/config")).config; }
+  async function dGetUnitOrphans(){ return await api("GET","/units/orphans"); }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
   async function dAddRoleAssignment(data){ return (await api("POST","/role-assignments",{
@@ -652,7 +703,13 @@
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
     if(v==="developer-users"){ await loadDevUsers(); render(); return; }
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
-    if(v==="developer-data"){ state.loading=true; render(); await loadDevUsers(); await loadDevEntries(); state.loading=false; render(); return; }
+    if(v==="developer-data"){
+      state.loading=true; render(); await loadDevUsers(); await loadDevEntries();
+      // Rows pointing at a unit the department no longer has. Best-effort:
+      // a failure here must not stop the page rendering.
+      try{ state.unitOrphans = await dGetUnitOrphans(); }catch(e){ state.unitOrphans = null; }
+      state.loading=false; render(); return;
+    }
     if(v==="developer-password-requests"){ state.loading=!state.passwordResetsLoaded; render(); await loadDevUsers(); await loadPasswordRequests(); state.loading=false; render(); return; }
     if(v==="signup-approvals"){ state.loading=!state.signupRequestsLoaded; render(); await loadSignupRequests(); state.loading=false; render(); return; }
     if(v==="manage-users"){ state.loading=!state.manageUsersLoaded; render(); await loadManageUsers(); state.loading=false; render(); return; }
@@ -1443,8 +1500,12 @@
     if(!name){ toast("Give the new site a name."); return; }
     var key = uniqueCatKey(slugify(name));
     var newCategories = state.config.categories.concat([{key:key, name:name, color: color || "var(--teal)"}]);
-    var patch = { categories: newCategories, procedures: {} };
-    patch.procedures[key] = [];
+    // Shallow-merged server-side (cfg.update(body) in api.py), so the WHOLE
+    // procedures map has to go up -- sending only the changed key deletes
+    // every other site's list.
+    var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
+    allProcs[key] = [];
+    var patch = { categories: newCategories, procedures: allProcs };
     try{
       await dUpdateConfig(patch);
       state.config.categories = newCategories;
@@ -1482,7 +1543,9 @@
     if(!text){ return; }
     var list = (state.config.procedures[catKey] || []).slice();
     list.splice(sortedInsertIndex(list, text), 0, text);
-    var patch = { procedures: {} }; patch.procedures[catKey] = list;
+    var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
+    allProcs[catKey] = list;                 // whole map -- see addCategory
+    var patch = { procedures: allProcs };
     try{
       await dUpdateConfig(patch);
       state.config.procedures[catKey] = list;
@@ -1497,7 +1560,9 @@
   // stale-index bug fixed elsewhere in this app's PATCH handling).
   async function removeProcedure(catKey, value){
     var list = (state.config.procedures[catKey] || []).filter(function(p){ return p!==value; });
-    var patch = { procedures: {} }; patch.procedures[catKey] = list;
+    var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
+    allProcs[catKey] = list;                 // whole map -- see addCategory
+    var patch = { procedures: allProcs };
     try{
       await dUpdateConfig(patch);
       state.config.procedures[catKey] = list;
@@ -1766,7 +1831,7 @@
         '<button type="button" class="nav-toggle" id="btn-nav-toggle" aria-label="'+(state.mobileNavOpen?"Close menu":"Open menu")+'">'+icon(state.mobileNavOpen?"close":"menu")+'</button>'+
         '<div class="brand-mark">EL</div><div class="brand-text"><h1>ENT Surgical Logbook</h1><div class="sub">'+"De-identified logbook"+'</div></div>'+
       '</div>'+
-      '<div class="user-chip"><span class="role-badge">'+esc(roleLabelText)+'</span><span>'+esc(state.user.displayName)+'</span><button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
+      '<div class="user-chip"><span class="role-badge">'+esc(roleLabelText)+'</span><span>'+esc(state.user.displayName)+'</span>'+themeButton()+'<button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
     '</div>'+
     '<div class="shell-body">'+
       '<nav class="sidenav'+(state.mobileNavOpen?" open":"")+'">'+navItems().map(function(item){
@@ -1776,7 +1841,7 @@
         return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
-        (state.toast ? '<div class="success-banner">'+esc(state.toast)+'</div>' : '')+
+        (state.toast ? '<div class="success-banner" data-toast>'+esc(state.toast)+'</div>' : '')+
         inner+
       '</main>'+
     '</div>'+
@@ -1833,10 +1898,10 @@
   }
 
   function renderDashboardResident(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var s = computeStats(finalizedOnly(state.myEntries));
     var todayUnit = unitForDate(state.user.postings, todayISO());
-    var recent = state.myEntries.slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
+    var recent = finalizedOnly(state.myEntries).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
     return ''+
     reminderBanner()+
     (todayUnit ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Current posting: '+unitShortHtml(todayUnit)+' — '+esc(unitFull(todayUnit))+'</div>'
@@ -1860,7 +1925,7 @@
   }
 
   function renderDashboardConsultant(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var caps = state.capabilities || {};
     var allEntries = [];
     state.roster.forEach(function(r){ allEntries = allEntries.concat(r.entries); });
@@ -1878,7 +1943,7 @@
   }
 
   function renderDashboardDeveloper(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var traineeCount = state.devUsers.filter(function(u){return isTraineeRole(u.role);}).length;
     var consultantCount = state.devUsers.filter(function(u){return u.role==="consultant";}).length;
     var pending = pendingPasswordRequestCount();
@@ -1903,7 +1968,12 @@
     entries.forEach(function(e){
       var t = normType(e);
       if(counts.hasOwnProperty(t)) counts[t]++;
-      entryProcedures(e).forEach(function(p){ procCounts[p] = (procCounts[p]||0)+1; });
+      // Only operative types contribute to the procedure chart. A linked
+      // Interesting Case is pre-filled with its parent surgical entry's
+      // procedures, so counting every type double-counted each one.
+      if(t==="surgical" || t==="other"){
+        entryProcedures(e).forEach(function(p){ procCounts[p] = (procCounts[p]||0)+1; });
+      }
       if(t==="surgical" || t==="other"){
         // A combined multi-site case (e.g. Ear+Nose in one sitting) counts
         // toward EVERY site it actually touched, not just the first --
@@ -1985,7 +2055,7 @@
       return '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">You currently have full access to every unit’s progress, as '+esc(roles.join(" & "))+'.</div>';
     }
     if(scope.units.length){
-      return '<div class="notice-banner">You can currently see entries logged under: <b>'+scope.units.map(unitShort).join(", ")+'</b>.</div>';
+      return '<div class="notice-banner">You can currently see entries logged under: <b>'+scope.units.map(function(k){ return esc(unitShort(k)); }).join(", ")+'</b>.</div>';
     }
     return '<div class="notice-banner">Your account has no unit set yet, so no residents’ entries are visible to you. Ask your Developer admin to set your unit or appoint you Head of Unit / Course Coordinator / HOD.</div>';
   }
@@ -2001,11 +2071,11 @@
         '<h2>Log a new entry</h2>'+
         '<p class="muted" style="margin:8px 0 16px;">Use the Hospital Number — never the patient’s name.</p>'+
         '<div class="cat-pick">'+
-          '<div class="cat-card" data-start="surgical"><span class="icn" style="color:var(--teal);">'+icon("surgical")+'</span><div><div style="font-weight:600;">Surgical Procedure</div><div class="muted" style="font-size:12.5px;">Any OT-booked operative case.</div></div></div>'+
-          '<div class="cat-card" data-start="other"><span class="icn" style="color:var(--amber);">'+icon("other")+'</span><div><div style="font-weight:600;">Other Procedure</div><div class="muted" style="font-size:12.5px;">OPD, bedside, ED or treatment-room procedures.</div></div></div>'+
-          '<div class="cat-card" data-start="case"><span class="icn" style="color:var(--ink-soft);">'+icon("case")+'</span><div><div style="font-weight:600;">Interesting Case</div><div class="muted" style="font-size:12.5px;">Rare presentations, diagnostic dilemmas, teaching cases.</div></div></div>'+
-          '<div class="cat-card" data-start="academic"><span class="icn" style="color:var(--green);">'+icon("academic")+'</span><div><div style="font-weight:600;">Academic Participation</div><div class="muted" style="font-size:12.5px;">CME, journal club, paper presentation, university activity.</div></div></div>'+
-          '<div class="cat-card" data-start="seminar"><span class="icn" style="color:var(--violet);">'+icon("seminar")+'</span><div><div style="font-weight:600;">Seminar / Presentation</div><div class="muted" style="font-size:12.5px;">Seminars, lectures or case presentations YOU conducted.</div></div></div>'+
+          '<div class="cat-card" role="button" tabindex="0" data-start="surgical"><span class="icn" style="color:var(--teal);">'+icon("surgical")+'</span><div><div style="font-weight:600;">Surgical Procedure</div><div class="muted" style="font-size:12.5px;">Any OT-booked operative case.</div></div></div>'+
+          '<div class="cat-card" role="button" tabindex="0" data-start="other"><span class="icn" style="color:var(--amber);">'+icon("other")+'</span><div><div style="font-weight:600;">Other Procedure</div><div class="muted" style="font-size:12.5px;">OPD, bedside, ED or treatment-room procedures.</div></div></div>'+
+          '<div class="cat-card" role="button" tabindex="0" data-start="case"><span class="icn" style="color:var(--ink-soft);">'+icon("case")+'</span><div><div style="font-weight:600;">Interesting Case</div><div class="muted" style="font-size:12.5px;">Rare presentations, diagnostic dilemmas, teaching cases.</div></div></div>'+
+          '<div class="cat-card" role="button" tabindex="0" data-start="academic"><span class="icn" style="color:var(--green);">'+icon("academic")+'</span><div><div style="font-weight:600;">Academic Participation</div><div class="muted" style="font-size:12.5px;">CME, journal club, paper presentation, university activity.</div></div></div>'+
+          '<div class="cat-card" role="button" tabindex="0" data-start="seminar"><span class="icn" style="color:var(--violet);">'+icon("seminar")+'</span><div><div style="font-weight:600;">Seminar / Presentation</div><div class="muted" style="font-size:12.5px;">Seminars, lectures or case presentations YOU conducted.</div></div></div>'+
         '</div>'+
       '</div>';
     }
@@ -2203,7 +2273,7 @@
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
-          '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
+          '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+esc(f.date)+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
         '</div>'+
         '<div class="row2">'+
@@ -2236,7 +2306,7 @@
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
-          '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+f.date+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
+          '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+esc(f.date)+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
         '</div>'+
         '<div class="row2">'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
@@ -2272,7 +2342,7 @@
       '<h2>'+(state.wiz.editingId?"Edit ":"")+'Interesting Case</h2>'+
       '<div class="row2">'+
         fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
-        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
+        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
       '</div>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
@@ -2294,7 +2364,7 @@
     return ''+
     '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Academic Participation</h2>'+
       '<div class="row2">'+
-        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
+        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
         '<div class="field"><label for="f-academicType">Type</label><select id="f-academicType" onchange="window.__entlog_toggleAcademicOther(this.value)">'+
           state.config.academicTypes.map(function(t){ return '<option '+(t===f.academicType?"selected":"")+'>'+esc(t)+'</option>'; }).join("")+
           '<option '+(f.academicType==="Other"?"selected":"")+'>Other</option>'+
@@ -2312,7 +2382,7 @@
     '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Seminar / Presentation</h2>'+
       '<p class="muted" style="margin-bottom:16px;">For seminars, lectures or case presentations <b>you</b> conducted — not ones you attended (log those as Academic Participation).</p>'+
       '<div class="row2">'+
-        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+f.date+'"></div>'+
+        '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
         '<div class="field"><label for="f-seminarType">Type</label><select id="f-seminarType" onchange="window.__entlog_toggleSeminarOther(this.value)">'+
           state.config.seminarTypes.map(function(t){ return '<option '+(t===f.seminarType?"selected":"")+'>'+esc(t)+'</option>'; }).join("")+
           '<option '+(f.seminarType==="Other"?"selected":"")+'>Other</option>'+
@@ -2477,6 +2547,7 @@
     render();
   }
   function toggleEntryMenu(menuKey){
+    syncEntriesSearchFromDom();   // the box is DOM-only; any render must sync
     var opening = state.openEntryMenu !== menuKey;
     state.openEntryMenu = opening ? menuKey : null;
     render();
@@ -2504,7 +2575,8 @@
           '<button type="button" class="btn btn-sm" data-entries-sort-dir="'+esc(uiKey)+'" title="Reverse sort order">'+(ui.sortDir==="asc"?"↑ Asc":"↓ Desc")+'</button>'+
         '</div>'+
       '</div>';
-    if(all.length===0) return toolbar+'<div class="empty-state">'+artPlate("hands","es-plate")+esc(opts.emptyText||"Nothing logged yet.")+'</div>';
+    if(all.length===0) return toolbar+'<div class="empty-state">'+artPlate("hands","es-plate")+esc(opts.emptyText||"Nothing logged yet.")+
+      (opts.uiKey==="mine" ? '<div class="es-cta"><button class="btn btn-primary" data-nav="resident-log">Log your first entry</button></div>' : '')+'</div>';
     if(sorted.length===0) return toolbar+'<div class="empty-state">No entries match “'+esc(ui.search)+'”.</div>';
     var rowsHtml = sorted.map(function(e,i){
       var idStr = String(e.id);
@@ -2514,14 +2586,14 @@
       var isDraft = e.status==="draft";
       return ''+
       '<div class="entry-card'+(isOpen?' entry-card-open':'')+'" data-entries-search-text="'+esc(entrySearchText(e))+'">'+
-        '<div class="entry-card-summary" data-entry-toggle="'+esc(uiKey)+'" data-entry-id="'+esc(idStr)+'">'+
+        '<div class="entry-card-summary" role="button" tabindex="0" aria-expanded="'+(isOpen?"true":"false")+'" data-entry-toggle="'+esc(uiKey)+'" data-entry-id="'+esc(idStr)+'">'+
           '<span class="entry-card-num tabular muted">'+(i+1)+'</span>'+
           '<span class="entry-card-date tabular">'+fmtDate(e.date)+'</span>'+
           entryTypeChip(e)+
           '<span class="entry-card-main">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</span>'+
           '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
           (opts.showStatusBadge && isDraft ? ' <span class="chip chip-amber">Draft</span>' : '')+
-          '<span class="entry-card-chevron" aria-hidden="true">'+(isOpen?"▲":"▼")+'</span>'+
+          '<span class="entry-card-chevron" aria-hidden="true">▼</span>'+
           (menuItems ? (
             '<span class="entry-menu-wrap">'+
               '<button type="button" class="btn btn-sm entry-menu-btn" data-entry-menu-btn="'+esc(menuKey)+'" aria-label="Row actions">⋮</button>'+
@@ -2549,7 +2621,7 @@
   }
 
   function renderResidentEntries(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var rows = state.myEntries;
     return ''+
     '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
@@ -2723,7 +2795,7 @@
   }
 
   function renderResidentProgress(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     return renderStatsAndCharts(finalizedOnly(state.myEntries));
   }
 
@@ -2770,7 +2842,7 @@
      RENDER: CONSULTANT
   ============================================================ */
   function renderConsultantRoster(){
-    if(state.loading) return '<div class="empty-state">Loading roster…</div>';
+    if(state.loading) return skeletonTable(5);
     var banner = renderScopeBanner();
     if(state.roster.length===0) return banner+'<div class="card"><div class="empty-state">No trainees’ entries are visible to you right now.</div></div>';
     return banner+''+
@@ -2889,7 +2961,8 @@
     var profileCell = profileParts.length ? profileParts.join("") : "—";
     return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td>'+roleCell+'</td><td>'+profileCell+'</td><td>'+statusChip+'</td>'+
       '<td style="white-space:nowrap;">'+
-        '<button class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-toggle-active="'+esc(u.username)+'" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> '+
+        (u.username === state.user.username ? '<span class="muted" style="font-size:12px;">your account</span> ' :
+          '<button class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-toggle-active="'+esc(u.username)+'" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> ')+
         '<button class="btn btn-sm btn-danger" data-delete-user="'+esc(u.username)+'">Delete</button>'+
       '</td></tr>';
   }
@@ -2900,7 +2973,7 @@
   }
 
   function renderDeveloperUsers(){
-    if(state.loading) return '<div class="empty-state">Loading users…</div>';
+    if(state.loading) return skeletonTable(5);
     var rows = state.devUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
     renderCreateUserForm()+
@@ -2910,7 +2983,7 @@
   }
 
   function renderManageUsers(){
-    if(state.loading) return '<div class="empty-state">Loading accounts…</div>';
+    if(state.loading) return skeletonTable(5);
     var rows = state.manageUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
     '<div class="card"><h2>Manage accounts ('+rows.length+')</h2>'+
@@ -2920,7 +2993,7 @@
   }
 
   function renderSignupApprovals(){
-    if(state.loading) return '<div class="empty-state">Loading sign-up requests…</div>';
+    if(state.loading) return skeletonTable(5);
     var rows = state.signupRequests.slice().sort(function(a,b){ return (a.createdAt||"").localeCompare(b.createdAt||""); });
     return ''+
     '<div class="card"><h2>Pending sign-ups ('+rows.length+')</h2>'+
@@ -2937,7 +3010,7 @@
   }
 
   function renderDeveloperPasswordRequests(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var rows = state.passwordResets.slice().sort(function(a,b){ return (b.requestedAt||"").localeCompare(a.requestedAt||""); });
     var pending = rows.filter(function(r){ return r.status==="pending"; });
     var resolved = rows.filter(function(r){ return r.status!=="pending"; });
@@ -2960,10 +3033,34 @@
   }
 
   function renderDeveloperData(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var traineeCount = state.devUsers.filter(function(u){return isTraineeRole(u.role);}).length;
     var consultantCount = state.devUsers.filter(function(u){return u.role==="consultant";}).length;
     var devCount = state.devUsers.filter(function(u){return u.role==="developer";}).length;
+    var orph = state.unitOrphans;
+    var orphanCard = "";
+    if(orph && ((orph.orphans && orph.orphans.length) || orph.unattributedEntries)){
+      var rows = (orph.orphans||[]).map(function(o){
+        return '<tr><td class="mono">'+esc(o.unit)+'</td><td class="tabular">'+o.entries+'</td>'+
+               '<td class="tabular">'+o.postings+'</td><td class="tabular">'+o.users+'</td>'+
+               '<td class="tabular">'+o.assignments+'</td></tr>';
+      }).join("");
+      orphanCard =
+        '<div class="card"><div class="section-head"><h2>Unit references that no longer resolve</h2></div>'+
+        '<p class="muted" style="margin-bottom:12px;">The unit on an entry is what every Head of Unit roster and unit CSV filters on. '+
+        'Anything listed here is filed under a key this department does not have, so it is invisible to unit-scoped consultants \u2014 '+
+        'though a Head of Department or Course Coordinator still sees it, since their scope is not filtered by unit. '+
+        'This normally means a unit was deleted from Manage Lists while records still referenced it.</p>'+
+        (rows ? '<div class="table-wrap"><table><thead><tr><th>Unit key</th><th>Entries</th><th>Postings</th>'+
+                '<th>People</th><th>Assignments</th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '')+
+        (orph.unattributedEntries ?
+          '<div class="notice-banner" style="margin-top:14px;"><span>'+orph.unattributedEntries+
+          ' finalised '+(orph.unattributedEntries===1?'entry has':'entries have')+' no unit at all \u2014 logged before a posting was added. '+
+          'Same effect on a roster, but an ordinary one rather than a sign of anything wrong.</span></div>' : '')+
+        '<p class="muted" style="margin-top:12px; font-size:12.5px;">To fix: re-add the unit under '+
+        '<b>Units &amp; Roles</b> with the same key, or edit the affected postings.</p>'+
+        '</div>';
+    }
     return ''+
     '<div class="stat-grid">'+
       statTile(state.devAllEntries.length,"Total entries")+
@@ -2971,6 +3068,7 @@
       statTile(consultantCount,"Consultants")+
       statTile(devCount,"Developers")+
     '</div>'+
+    orphanCard+
     '<div class="card"><h2>Export (your “local copy”)</h2>'+
       '<p class="muted" style="margin-bottom:14px;">This platform stores data server-side for the group; export a CSV whenever you want a local, offline copy — for backup, for Excel-side analysis, or before big changes.</p>'+
       '<div style="display:flex; gap:10px; flex-wrap:wrap;">'+
@@ -3067,7 +3165,7 @@
      RENDER: DEVELOPER - UNITS & ROLES
   ============================================================ */
   function renderDeveloperRoles(){
-    if(state.loading) return '<div class="empty-state">Loading…</div>';
+    if(state.loading) return skeletonDash();
     var units = state.config.units || [];
     var groups = {}, order = [];
     units.forEach(function(u){ if(!groups[u.group]){ groups[u.group]=[]; order.push(u.group); } groups[u.group].push(u); });
@@ -3157,6 +3255,7 @@
   /* ============================================================
      ROOT RENDER
   ============================================================ */
+  var __entlogLastView = null;
   function render(){
     var app = el("app");
     if(!app) return;
@@ -3191,6 +3290,13 @@
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "") + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "");
+    // THE GATE. render() runs on every state change -- every keystroke in a
+    // filter, every checkbox -- and replaces the entire DOM, so an entry
+    // animation attached to these elements would re-fire constantly and the
+    // list would strobe while you type. Only a real view change animates.
+    var main = app.querySelector("main");
+    if(main && state.view !== __entlogLastView) main.classList.add("view-enter");
+    __entlogLastView = state.view;
     wireShellEvents();
   }
 
@@ -3299,6 +3405,22 @@
     });
     var navToggle = el("btn-nav-toggle");
     if(navToggle) navToggle.onclick = function(){ state.mobileNavOpen = !state.mobileNavOpen; render(); };
+    var themeBtn = el("btn-theme"); if(themeBtn) themeBtn.onclick = cycleTheme;
+    // role="button" is a promise that Enter and Space work; keep it.
+    document.querySelectorAll('[role="button"][tabindex="0"]').forEach(function(nd){
+      nd.onkeydown = function(ev){
+        if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); nd.click(); }
+      };
+    });
+    // Escape closes whichever modal is open.
+    if(!window.__entlogEscBound){
+      window.__entlogEscBound = true;
+      document.addEventListener("keydown", function(ev){
+        if(ev.key !== "Escape") return;
+        if(state.viewingHistoryEntryId != null){ state.viewingHistoryEntryId = null; render(); }
+        else if(state.viewingEntryId){ state.viewingEntryId = null; render(); }
+      });
+    }
     var logout = el("btn-logout"); if(logout) logout.onclick = doLogout;
 
     // entry-detail modal (opened from the Case Report "Yes" link, or the
@@ -3580,8 +3702,10 @@
     document.querySelectorAll("[data-cat-name]").forEach(function(inp){
       inp.addEventListener("change", function(){
         var key = inp.getAttribute("data-cat-name");
-        var colorInp = document.querySelector('[data-cat-color="'+key+'"]');
-        editCategory(key, inp.value, colorInp ? colorInp.value : null);
+        // Pass null, not the swatch's resolved hex: toHexColor() resolved
+        // var(--cat-*) against the CURRENT theme, so renaming a site in dark
+        // mode used to freeze its dark value in for every light-mode user.
+        editCategory(key, inp.value, null);
       });
     });
     document.querySelectorAll("[data-cat-color]").forEach(function(inp){

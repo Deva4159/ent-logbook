@@ -16,9 +16,10 @@
     --on-teal:#FFFFFF;
     /* paper under the watercolour: invisible here, a mounted tile in dark */
     --plate:#FFFFFF; --plate-edge:rgba(0,0,0,.05); --plate-sh:0 1px 2px rgba(38,35,32,.07);
-    --amber:#8A5D00; --amber-bg:#F6EFDD; --red:#9A3B39; --red-bg:#F5E4E3; --green:#2F7D5B; --green-bg:#E1F0E7;
+    --amber:#8A5D00; --amber-bg:#F6EFDD; --red:#9A3B39; --red-bg:#F5E4E3; --green:#2A6E50; --green-bg:#E1F0E7;
     --violet:#5C4FA0; --violet-bg:#EAE7F5;
     --ink-line:#1B222C;
+    --line-strong:#B6AC9B;
     --shadow:0 1px 2px rgba(20,26,32,.06), 0 6px 18px rgba(20,26,32,.07);
     --cat-ear:#976C3E; --cat-nose:#3D7D94; --cat-throat:#5C7F34; --cat-hn:#B95465; --cat-skull:#35815B; --cat-trauma:#7667C1;
     color-scheme: light;
@@ -32,6 +33,8 @@
       --amber:#E0B663; --amber-bg:#3A2F14; --red:#E08F8C; --red-bg:#3A2422; --green:#7FBF9E; --green-bg:#1E332A;
       --violet:#B3A6DE; --violet-bg:#2A2640;
       --ink-line:#E7EAEE;
+    --line-strong:#5A544C;
+      --line-strong:#5A544C;
       --shadow:0 1px 2px rgba(0,0,0,.5), 0 8px 22px rgba(0,0,0,.4);
       --cat-ear:#AD7C47; --cat-nose:#4690AB; --cat-throat:#76A343; --cat-hn:#C46D7C; --cat-skull:#43A373; --cat-trauma:#897CC9;
       color-scheme: dark;
@@ -253,7 +256,7 @@
   .dash-card .icn .icon{width:22px; height:22px;}
   .dash-card .t{font-weight:600; font-size:14.5px; margin-bottom:3px;}
   .dash-card .d{font-size:12.5px; color:var(--ink-soft);}
-  .alert-count{display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 5px; border-radius:99px; background:var(--red); color:#fff; font-size:10.5px; font-weight:700; font-family:"IBM Plex Mono"; margin-left:6px;}
+  .alert-count{display:inline-flex; align-items:center; justify-content:center; min-width:18px; height:18px; padding:0 5px; border-radius:99px; background:var(--red); color:var(--paper); font-size:10.5px; font-weight:700; font-family:"IBM Plex Mono"; margin-left:6px;}
   .short-form{font-weight:700;}
 
   .bar-row{display:grid; grid-template-columns:190px 1fr 42px; gap:10px; align-items:center; margin-bottom:10px; font-size:12.5px;}
@@ -324,7 +327,13 @@
   .entries-sort{display:flex; align-items:center; gap:6px; flex:0 0 auto;}
   .entries-sort select{padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--surface); color:var(--ink); font-size:12.5px; font-family:inherit;}
   .entry-list{display:flex; flex-direction:column; gap:8px;}
-  .entry-card{border:1px solid var(--line); border-radius:10px; background:var(--surface); overflow:hidden;}
+  /* NO overflow:hidden here. It clipped .entry-menu, which is absolutely
+     positioned 4px BELOW the summary row -- on a collapsed card that put
+     94% of the menu outside the box, so Edit/Delete/History were invisible
+     and unclickable. The corners are rounded on the children instead. */
+  .entry-card{border:1px solid var(--line); border-radius:10px; background:var(--surface);}
+  .entry-card>.entry-card-summary{border-radius:9px;}
+  .entry-card-open>.entry-card-summary{border-radius:9px 9px 0 0;}
   .entry-card-summary{display:flex; align-items:center; gap:10px; padding:10px 12px; cursor:pointer; flex-wrap:wrap;}
   .entry-card-summary:hover{background:var(--surface-2);}
   .entry-card-num{flex:0 0 auto; width:22px;}
@@ -440,10 +449,15 @@
     min-height:100vh; padding:34px 20px; background:var(--plate);}
   .auth-framed .frame-art{position:absolute; inset:8px; background-repeat:no-repeat;
     background-position:center; background-size:100% 100%; pointer-events:none;}
-  .auth-framed .auth-card{position:relative; background:rgba(255,255,255,.93); color:#262320;
+  /* A genuine light island rather than a half-converted one: redeclare the
+     token set locally so every child -- eyebrow, label, button, hint --
+     follows, instead of patching them one at a time and missing four. */
+  .auth-framed .auth-card{
+    --surface:#FFFFFF; --paper:#FFFFFF; --surface-2:#EFEBE3;
+    --ink:#262320; --ink-soft:#6C645B; --line:#DCD5C9; --line-strong:#B6AC9B;
+    --teal:#1A6F8C; --teal-ink:#125469; --teal-bg:#DFEBEF; --on-teal:#FFFFFF;
+    position:relative; background:rgba(255,255,255,.93); color:var(--ink);
     border-color:rgba(0,0,0,.07); box-shadow:0 6px 20px rgba(38,35,32,.12);}
-  .auth-framed .auth-card h1{color:#262320;}
-  .auth-framed .auth-sub{color:#6C645B;}
   @media (max-width:560px){ .auth-framed .frame-art{display:none;} }
 
   /* About page header */
@@ -457,3 +471,173 @@
   .about-hero h2{font-size:21px; margin-bottom:6px;}
   .about-hero p{margin:0; max-width:42ch; font-size:13.5px; color:var(--ink-soft);}
   @media (max-width:640px){ .about-hero .hero-art{display:none;} .about-hero{min-height:0;} }
+
+
+  /* =====================================================================
+     MOTION
+     One place to tune it. A UI curve starts fast and settles; ease-in on a
+     click reads as lag.
+  ===================================================================== */
+  :root{
+    --dur-1:110ms; --dur-2:180ms; --dur-3:300ms; --dur-4:460ms;
+    --ease:cubic-bezier(.2,.7,.3,1); --ease-out:cubic-bezier(.16,1,.3,1);
+  }
+  /* Not optional. Vestibular disorders are an ENT problem -- these users are
+     disproportionately likely to have this switch on. */
+  @media (prefers-reduced-motion: reduce){
+    *, *::before, *::after{
+      animation-duration:.01ms !important; animation-iteration-count:1 !important;
+      transition-duration:.01ms !important; scroll-behavior:auto !important;
+    }
+  }
+  body{transition:background-color var(--dur-3) var(--ease), color var(--dur-3) var(--ease);}
+
+  /* ---- controls ---------------------------------------------------- */
+  /* Borders that ARE the affordance use --line-strong; dividers stay --line. */
+  input[type=text], input[type=password], input[type=number], input[type=date],
+  input[type=datetime-local], select, textarea, .entries-search, .mp-box-wrap{
+    border-color:var(--line-strong);
+    transition:border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
+  }
+  input:focus, select:focus, textarea:focus{
+    outline:none; border-color:var(--teal);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent);
+  }
+  ::placeholder{color:var(--ink-soft); opacity:1;}   /* UA default was 3.5:1 */
+
+  .btn{border-color:var(--line-strong);
+    transition:background-color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
+               color var(--dur-2) var(--ease), transform var(--dur-1) var(--ease),
+               box-shadow var(--dur-2) var(--ease);}
+  .btn:active{transform:translateY(1px);}
+  .btn-primary:hover{box-shadow:0 2px 10px color-mix(in srgb, var(--teal) 40%, transparent);}
+  /* The focus ring was --teal on a --teal button: 1.00:1, i.e. invisible on
+     every primary action in the app. Inset it in the label colour instead. */
+  .btn-primary:focus-visible{outline-color:var(--on-teal); outline-offset:-3px;}
+  .btn-ghost{border-color:transparent;}
+  .btn-ghost:hover{background:var(--surface-2); border-color:transparent;}
+  /* opacity:.5 put the primary button's label at 2.21:1. Explicit tokens. */
+  .btn:disabled, .btn[disabled]{background:var(--surface-2); color:var(--ink-soft);
+    border-color:var(--line); opacity:1; transform:none; box-shadow:none;}
+
+  .sidenav button{position:relative;
+    transition:background-color var(--dur-2) var(--ease), color var(--dur-2) var(--ease),
+               padding-left var(--dur-2) var(--ease);}
+  .sidenav button:hover{padding-left:15px;}
+  .sidenav button.active::before{content:""; position:absolute; left:0; top:8px; bottom:8px;
+    width:3px; border-radius:0 3px 3px 0; background:var(--teal);}
+
+  .dash-card{transition:border-color var(--dur-2) var(--ease), transform var(--dur-2) var(--ease-out),
+                        box-shadow var(--dur-2) var(--ease);}
+  .dash-card:hover{transform:translateY(-2px);}
+  .dash-card:active{transform:translateY(0);}
+  .stat-tile{transition:border-color var(--dur-2) var(--ease);}
+  .stat-tile:hover{border-color:var(--teal);}
+  tbody tr{transition:background-color var(--dur-1) var(--ease);}
+  tbody tr:hover{background:var(--surface-2);}
+  .cat-card{transition:border-color var(--dur-2) var(--ease);}
+  .cat-card .plate{transition:transform var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease);}
+  .cat-card:hover .plate{transform:scale(1.06) rotate(-1.5deg); box-shadow:0 4px 14px rgba(38,35,32,.16);}
+  /* The write-up status select looked like a static chip, so nobody found
+     out it was editable. */
+  .ps-select{transition:border-color var(--dur-2) var(--ease);}
+  .ps-select:hover{border-color:currentColor;}
+
+  /* keyboard reachability for the div-based controls */
+  .cat-card:focus-visible, .entry-card-summary:focus-visible, .ss-row:focus-visible{
+    outline:2px solid var(--teal); outline-offset:-2px;}
+
+  /* ---- the entries accordion --------------------------------------- */
+  .entry-card-chevron{transition:transform var(--dur-2) var(--ease);}
+  .entry-card-open .entry-card-chevron{transform:rotate(180deg);}
+  .entry-card-summary{transition:background-color var(--dur-1) var(--ease);}
+  /* site colour as a scanning aid, the way the stats bars already do it */
+  .cat-dot{transition:transform var(--dur-2) var(--ease-out);}
+  .entry-card-summary:hover .cat-dot{transform:scale(1.35);}
+
+  /* ---- loading ------------------------------------------------------ */
+  /* A spinner says "wait". A skeleton says "here is what is coming" and
+     holds the layout so nothing jumps when the data lands. */
+  .sk{background:linear-gradient(90deg, var(--surface-2) 25%,
+      color-mix(in srgb, var(--surface-2) 55%, var(--surface)) 37%, var(--surface-2) 50%);
+    background-size:400% 100%; border-radius:6px; animation:entlog-shimmer 1.4s linear infinite;}
+  @keyframes entlog-shimmer{ from{background-position:100% 0} to{background-position:0 0} }
+  .sk-table{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:4px 16px;}
+  .sk-row{display:grid; grid-template-columns:82px 1fr 120px 74px; gap:14px; align-items:center;
+    padding:11px 0; border-bottom:1px solid var(--line);}
+  .sk-row:last-child{border-bottom:none;}
+  .sk-row span{height:11px; display:block;}
+  .sk-tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:18px;}
+  .sk-tile{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:18px 16px;}
+  .sk-tile span{display:block; height:22px; width:52px; margin-bottom:9px;}
+  .sk-tile i{display:block; height:10px; width:80%;}
+
+  .btn .spin{width:13px; height:13px; border-radius:50%; display:inline-block; vertical-align:-2px;
+    margin-right:7px; border:2px solid color-mix(in srgb, currentColor 35%, transparent);
+    border-top-color:currentColor; animation:entlog-spin .6s linear infinite;}
+  @keyframes entlog-spin{ to{transform:rotate(360deg)} }
+
+  /* ---- view transitions -------------------------------------------- */
+  /* Gated in render(): app.js only adds .view-enter when state.view actually
+     CHANGED. Ungated, this would re-fire on every keystroke, because
+     render() replaces the whole DOM on every state change. */
+  .view-enter > *{animation:entlog-rise var(--dur-4) var(--ease-out) backwards;}
+  .view-enter > *:nth-child(1){animation-delay:0ms}
+  .view-enter > *:nth-child(2){animation-delay:45ms}
+  .view-enter > *:nth-child(3){animation-delay:90ms}
+  .view-enter > *:nth-child(4){animation-delay:135ms}
+  .view-enter > *:nth-child(n+5){animation-delay:175ms}
+  @keyframes entlog-rise{ from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:none} }
+  .view-enter .bar-fill{animation:entlog-fill var(--dur-4) var(--ease-out) backwards;}
+  @keyframes entlog-fill{ from{width:0} }
+
+  .modal-overlay{animation:entlog-fade var(--dur-2) var(--ease);}
+  .modal-card{animation:entlog-pop var(--dur-3) var(--ease-out);}
+  @keyframes entlog-fade{ from{opacity:0} }
+  @keyframes entlog-pop{ from{opacity:0; transform:translateY(12px) scale(.97)} }
+
+  /* ---- layout fixes -------------------------------------------------- */
+  /* The stats bars need 252px of fixed track; at 320px that overflowed the
+     card and at 360-390px the bar itself was a 36-66px stub. */
+  @media (max-width:560px){
+    .bar-row{grid-template-columns:1fr auto; grid-template-areas:"label count" "track track"; row-gap:5px;}
+    .bar-label{grid-area:label;} .bar-count{grid-area:count;} .bar-track{grid-area:track;}
+  }
+  /* The scroll cue was a dark shadow on a dark surface: 1.02:1, i.e. absent
+     exactly where the widest table needs it. */
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .table-wrap{
+      background-image:
+        linear-gradient(to right, var(--surface) 30%, transparent),
+        linear-gradient(to left, var(--surface) 30%, transparent),
+        linear-gradient(to right, rgba(255,255,255,.16), transparent),
+        linear-gradient(to left, rgba(255,255,255,.16), transparent);}
+  }
+  :root[data-theme="dark"] .table-wrap{
+    background-image:
+      linear-gradient(to right, var(--surface) 30%, transparent),
+      linear-gradient(to left, var(--surface) 30%, transparent),
+      linear-gradient(to right, rgba(255,255,255,.16), transparent),
+      linear-gradient(to left, rgba(255,255,255,.16), transparent);}
+
+  /* The nav scrolled away on every long page. z-index order now reflects
+     intent: entry-menu < ss-list < topbar < modal. */
+  @media (min-width:761px){
+    .sidenav{position:sticky; top:57px; align-self:start;
+      max-height:calc(100vh - 57px); overflow-y:auto;}
+  }
+  .entry-menu{z-index:4;}
+  .ss-list{z-index:6;}
+
+  /* ---- theme toggle -------------------------------------------------- */
+  .theme-btn{display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px;
+    padding:0; border-radius:8px; border:1px solid var(--line-strong); background:var(--surface);
+    color:var(--ink-soft); cursor:pointer; flex:none;
+    transition:color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
+               transform var(--dur-3) var(--ease-out);}
+  .theme-btn:hover{color:var(--ink); border-color:var(--teal);}
+  .theme-btn:active{transform:rotate(-25deg);}
+  .theme-btn .icon{width:17px; height:17px;}
+
+  /* ---- empty states get an exit ------------------------------------- */
+  .empty-state .es-cta{margin-top:14px;}
