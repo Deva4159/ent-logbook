@@ -187,3 +187,49 @@ CREATE TABLE IF NOT EXISTS entry_approvals (
   created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entry_approvals_entry ON entry_approvals(entry_id);
+
+
+-- ---------------------------------------------------------------- feedback
+-- Feedback, complaints and suggestions from anyone with an account, readable
+-- only by HOD / Course Coordinator / Developer.
+--
+-- author_username is NULL for an anonymous submission and that is the whole
+-- mechanism: there is no separate "hidden author" column, so an anonymous
+-- row genuinely does not contain who wrote it and nobody with database
+-- access can look it up afterwards. The trade is that an anonymous
+-- submission cannot be followed up or tracked by its own author -- the
+-- submit screen says so before they choose.
+--
+-- The submitter's ROLE is deliberately not stored either, even though it
+-- would help triage: in a department with one fellow, "anonymous, from a
+-- fellow" is not anonymous.
+--
+-- ON DELETE SET NULL, not CASCADE: closing an account should not erase a
+-- complaint that account raised. It becomes anonymous, which is the safe
+-- direction to fail in.
+CREATE TABLE IF NOT EXISTS feedback (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind            TEXT NOT NULL,   -- feedback | complaint | suggestion | bug
+  subject         TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  author_username TEXT REFERENCES users(username) ON DELETE SET NULL,
+  status          TEXT NOT NULL DEFAULT 'open',  -- open | in_progress | closed
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status, id DESC);
+
+-- Internal handling trail: status changes and private notes, in one
+-- append-only table for the same reason entry_approvals is one -- "when did
+-- this get picked up, by whom, and what was decided" stays answerable.
+-- Never shown to the submitter; they only ever see the status.
+CREATE TABLE IF NOT EXISTS feedback_notes (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  feedback_id     INTEGER NOT NULL REFERENCES feedback(id) ON DELETE CASCADE,
+  actor_username  TEXT NOT NULL,
+  action          TEXT NOT NULL,   -- note | status
+  note            TEXT,
+  status          TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_notes_fb ON feedback_notes(feedback_id);

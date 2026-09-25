@@ -1071,12 +1071,65 @@ def roster_entries():
     if not scope["full"]:
         allowed = set(scope["units"])
         all_entries = [e for e in all_entries if e["unit"] in allowed]
+    # Postings travel with the user. The roster's "Current unit" column has
+    # always read them off user.postings, and row_to_user has never carried
+    # them, so that column has shown a dash for every trainee since it was
+    # written.
+    #
+    # One grouped query rather than get_postings() per row: this endpoint
+    # already loads every entry in the department, and a per-trainee query
+    # on top of that is the kind of N+1 that only shows up once the
+    # department is a few years old.
+    postings_by_user = {}
+    for r in db.execute(
+        "SELECT username, id, unit, start_date, end_date FROM postings ORDER BY username, start_date"
+    ):
+        postings_by_user.setdefault(r["username"], []).append(
+            {"id": r["id"], "unit": r["unit"], "startDate": r["start_date"], "endDate": r["end_date"]}
+        )
+
+    today = datetime.date.today().isoformat()
+    allowed_units = set(scope["units"])
+
     roster = []
     for u in users:
+        all_postings = postings_by_user.get(u["username"], [])
         mine = [e for e in all_entries if e["authorUsername"] == u["username"]]
-        if scope["full"] or mine:
-            roster.append({"user": row_to_user(u), "entries": mine})
-    return jsonify({"roster": roster, "scope": scope})
+
+        if scope["full"]:
+            visible_postings = all_postings
+            include = True
+        else:
+            # Membership follows POSTINGS, not entries. A trainee rotating
+            # through this unit belongs on its Head of Unit's roster from the
+            # day the posting exists, whether or not they have logged
+            # anything yet -- "nobody has logged a case this month" is
+            # exactly what a roster is for showing. Past postings keep them
+            # listed; a future one lists them as upcoming.
+            #
+            # Entries in scope still count as well, so a record that somehow
+            # carries this unit without a matching posting is never orphaned
+            # out of the only view that would surface it.
+            visible_postings = [p for p in all_postings if p["unit"] in allowed_units]
+            include = bool(visible_postings or mine)
+
+        if not include:
+            continue
+
+        # Where they are TODAY, computed from every posting regardless of
+        # scope and sent as a bare unit key. Deliberate: a Head of Unit is
+        # told where a trainee currently is (so the department knows who is
+        # where) without being handed their whole rotation history, which
+        # `visible_postings` withholds.
+        current = unit_for_date(all_postings, today)
+
+        roster.append({
+            "user": row_to_user(u),
+            "postings": visible_postings,
+            "currentUnit": current,
+            "entries": mine,
+        })
+    return jsonify({"roster": roster, "scope": scope, "today": today})
 
 
 @api.get("/entries/all")
@@ -1123,11 +1176,20 @@ def entries_by_author(username):
                         "SELECT DISTINCT unit FROM entries WHERE author_username = ?", (username,)
                     ).fetchall()
                 }
-                in_scope = bool(entry_units & set(scope["units"]))
+                posting_units = {
+                    r["unit"] for r in db.execute(
+                        "SELECT DISTINCT unit FROM postings WHERE username = ?", (username,)
+                    ).fetchall()
+                }
+                # A posting into this unit is enough on its own: the roster
+                # now lists trainees by posting, so every row it shows has to
+                # be openable, including one who has logged nothing yet.
+                in_scope = bool((entry_units | posting_units) & set(scope["units"]))
             if not in_scope:
                 return jsonify({"error": "forbidden"}), 403
     else:
         return jsonify({"error": "forbidden"}), 403
+
     rows = db.execute(
         "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (username,)
     ).fetchall()
@@ -1136,7 +1198,23 @@ def entries_by_author(username):
         # Looking at someone else's entries (consultant/developer drill-down)
         # -- their drafts are private to them, same rule as the roster.
         entries = [e for e in entries if e["status"] != "draft"]
-    return jsonify({"entries": entries})
+
+    # Scope the ENTRIES, not just the door. This previously checked whether
+    # the caller could open the trainee at all and then returned every entry
+    # that trainee had ever logged -- so a Head of Unit who could see one
+    # case of theirs could read their rotations through every other unit
+    # too. A unit-scoped consultant sees only what was logged under a unit
+    # they oversee, which (because an entry's unit is stamped from the
+    # posting covering its date) is exactly the trainee's postings in their
+    # unit and nothing else.
+    postings = get_postings(username)
+    if (g.user["username"] != username and g.user["role"] == "consultant"):
+        scope = consultant_scope(g.user["username"])
+        if not scope["full"]:
+            allowed = set(scope["units"])
+            entries = [e for e in entries if e["unit"] in allowed]
+            postings = [p for p in postings if p["unit"] in allowed]
+    return jsonify({"entries": entries, "postings": postings})
 
 
 def _export_csv(rows, columns):
@@ -1176,6 +1254,158 @@ def export_entries_csv():
     rows = [e for e in (entry_row_to_dict(r) for r in get_db().execute("SELECT * FROM entries").fetchall()) if e["status"] != "draft"]
     csv_text = _export_csv(rows, ENTRY_EXPORT_COLUMNS)
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=ent-logbook-entries.csv"})
+
+
+# Stable machine keys for the column picker. The key is what the client
+# sends; the pair is the same (getter, label) shape _export_csv already
+# takes. Kept separate from ENTRY_EXPORT_COLUMNS so the fixed "everything"
+# export keeps working byte-for-byte if this list is ever reordered.
+EXPORT_COLUMN_CATALOGUE = [
+    ("date",        ("date", "Date")),
+    ("author",      ("authorUsername", "Resident")),
+    ("type",        ("entryType", "Type")),
+    ("unit",        ("unit", "Unit")),
+    ("approval",    ("approvalState", "Approval")),
+    ("site",        ("site", "Site")),
+    ("procedures",  (_joined("procedures"), "Procedures")),
+    ("hospitalNumber", ("hospitalNumber", "Hospital Number")),
+    ("age",         ("age", "Age")),
+    ("sex",         ("sex", "Sex")),
+    ("diagnoses",   (_joined("diagnoses"), "Primary Diagnoses")),
+    ("diagnosesSecondary", (_joined("diagnosesSecondary"), "Secondary Diagnoses")),
+    ("comorbidities", (_joined("comorbidities"), "Comorbidities")),
+    ("laterality",  ("laterality", "Side")),
+    ("setting",     ("setting", "Emergency/Elective")),
+    ("role",        ("role", "Role/Entrustment")),
+    ("consultant",  ("consultant", "Consultant")),
+    ("assistants",  ("assistants", "Assistants")),
+    ("otherSettingType", ("otherSettingType", "Other-procedure setting")),
+    ("history",     ("history", "Brief History")),
+    ("examination", ("examination", "Examination Findings")),
+    ("caseReport",  ("caseReport", "Case Report")),
+    ("academicType", ("academicType", "Academic Type")),
+    ("seminarType", ("seminarType", "Seminar Type")),
+    ("topic",       ("topic", "Topic")),
+    ("venue",       ("venue", "Venue")),
+    ("details",     ("details", "Details")),
+    ("comments",    ("comments", "Comments/Complications")),
+    ("paperStatus", ("paperStatus", "Paper Status")),
+]
+EXPORT_COLUMN_MAP = dict(EXPORT_COLUMN_CATALOGUE)
+EXPORT_COLUMN_ORDER = [k for k, _ in EXPORT_COLUMN_CATALOGUE]
+
+
+def _visible_entry_rows(db, user):
+    """Every entry this user is already allowed to see, drafts excluded.
+
+    Shared by the fixed export and the custom one so a filter can never be
+    the thing that decides what someone may read -- the scope is applied
+    first, and filters only ever narrow what is already permitted.
+    """
+    if user["role"] == "developer":
+        rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
+    elif user["role"] == "consultant":
+        scope = consultant_scope(user["username"])
+        if scope["full"]:
+            rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
+        elif scope["units"]:
+            placeholders = ",".join("?" * len(scope["units"]))
+            rows = db.execute(
+                f"SELECT * FROM entries WHERE unit IN ({placeholders}) ORDER BY entry_date DESC, id DESC",
+                tuple(scope["units"]),
+            ).fetchall()
+        else:
+            rows = []
+    else:
+        rows = db.execute(
+            "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC",
+            (user["username"],),
+        ).fetchall()
+    return [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]
+
+
+def _csv_list_arg(name):
+    raw = request.args.get(name) or ""
+    return [v for v in (p.strip() for p in raw.split(",")) if v]
+
+
+@api.get("/entries/export/custom.csv")
+@login_required()
+def export_custom_csv():
+    """The export builder: the caller picks which entries (rows) and which
+    fields (columns). Everything is a narrowing of _visible_entry_rows, so
+    no combination of parameters can widen what the caller may read.
+
+    Unknown column keys are ignored rather than rejected: a saved selection
+    in someone's browser should keep working after a column is renamed,
+    minus that column, instead of failing the whole download.
+    """
+    db = get_db()
+    rows = _visible_entry_rows(db, g.user)
+
+    types = set(_csv_list_arg("types"))
+    units = set(_csv_list_arg("units"))
+    approvals = set(_csv_list_arg("approval"))
+    authors = set(_csv_list_arg("authors"))
+    date_from = (request.args.get("from") or "").strip()
+    date_to = (request.args.get("to") or "").strip()
+
+    def keep(e):
+        if types and e.get("entryType") not in types:
+            return False
+        # "__none__" is how the picker asks for entries with no unit: an
+        # empty string in a query parameter is indistinguishable from an
+        # unset filter, so it cannot be sent literally.
+        if units and (e.get("unit") or "__none__") not in units:
+            return False
+        # Only operative records and case write-ups carry an approval state;
+        # filtering by it would otherwise silently drop every academic and
+        # seminar entry the moment someone ticks "Approved".
+        if approvals and e.get("entryType") in APPROVABLE_TYPES and (e.get("approvalState") or "not_submitted") not in approvals:
+            return False
+        if authors and e.get("authorUsername") not in authors:
+            return False
+        d = e.get("date") or ""
+        if date_from and d < date_from:
+            return False
+        if date_to and d > date_to:
+            return False
+        return True
+
+    rows = [e for e in rows if keep(e)]
+
+    picked = [k for k in _csv_list_arg("columns") if k in EXPORT_COLUMN_MAP]
+    if not picked:
+        picked = EXPORT_COLUMN_ORDER
+    # Column ORDER follows the catalogue, not the order the checkboxes were
+    # ticked in -- two people exporting the same fields get the same file,
+    # which is what makes the outputs comparable.
+    picked = [k for k in EXPORT_COLUMN_ORDER if k in set(picked)]
+    columns = [EXPORT_COLUMN_MAP[k] for k in picked]
+
+    csv_text = _export_csv(rows, columns)
+    filename = f"ent-logbook-{g.user['username']}-{datetime.datetime.utcnow().strftime('%Y%m%d')}.csv"
+    return Response(csv_text, mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@api.get("/entries/export/options")
+@login_required()
+def export_options():
+    """What the picker can offer THIS caller: the column catalogue, plus the
+    units and authors actually present in what they can see (a trainee gets
+    only themselves, so the author filter is hidden for them)."""
+    db = get_db()
+    rows = _visible_entry_rows(db, g.user)
+    units = sorted({e.get("unit") or "" for e in rows})
+    authors = sorted({e.get("authorUsername") for e in rows if e.get("authorUsername")})
+    return jsonify({
+        "columns": [{"key": k, "label": EXPORT_COLUMN_MAP[k][1]} for k in EXPORT_COLUMN_ORDER],
+        "units": [u for u in units if u],
+        "hasUnattributed": "" in units,   # rendered as the "__none__" sentinel
+        "authors": [{"username": a, "displayName": _display_name(db, a)} for a in authors],
+        "total": len(rows),
+    })
 
 
 @api.get("/entries/export/mine.csv")
@@ -2085,3 +2315,205 @@ def remove_role_assignment(assignment_id):
     db.execute("DELETE FROM role_assignments WHERE id = ?", (assignment_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+# =====================================================================
+#  FEEDBACK / COMPLAINTS / SUGGESTIONS
+#
+#  Anyone with an account can raise one. Only Head of Department, Course
+#  Coordinator and Developer can read them.
+#
+#  Anonymity is structural, not a flag that hides a stored name: an
+#  anonymous submission writes NULL into author_username, so there is
+#  nothing in the database to look up afterwards. The cost is that an
+#  anonymous submission cannot be followed up or tracked by its own author,
+#  and the submit screen says so before the choice is made.
+# =====================================================================
+
+FEEDBACK_KINDS = {"feedback", "complaint", "suggestion", "bug"}
+FEEDBACK_STATUSES = {"open", "in_progress", "closed"}
+FEEDBACK_MAX_SUBJECT = 200
+FEEDBACK_MAX_BODY = 8000
+
+
+def _can_read_feedback(username):
+    caps = user_capabilities(username)
+    return bool(caps["isHod"] or caps["isCoordinator"] or caps["isDeveloper"])
+
+
+def _feedback_row_to_dict(db, row, include_author):
+    d = dict(row)
+    out = {
+        "id": d["id"],
+        "kind": d["kind"],
+        "subject": d["subject"],
+        "body": d["body"],
+        "status": d["status"],
+        "createdAt": d["created_at"],
+        "updatedAt": d["updated_at"],
+        "anonymous": d["author_username"] is None,
+    }
+    if include_author and d["author_username"]:
+        out["authorUsername"] = d["author_username"]
+        out["authorDisplayName"] = _display_name(db, d["author_username"])
+    return out
+
+
+def _feedback_notes(db, feedback_id):
+    rows = db.execute(
+        "SELECT actor_username, action, note, status, created_at FROM feedback_notes"
+        " WHERE feedback_id = ? ORDER BY id ASC", (feedback_id,)
+    ).fetchall()
+    return [{
+        "actorUsername": r["actor_username"],
+        "actorDisplayName": _display_name(db, r["actor_username"]),
+        "action": r["action"], "note": r["note"], "status": r["status"],
+        "createdAt": r["created_at"],
+    } for r in rows]
+
+
+@api.post("/feedback")
+@login_required()
+def create_feedback():
+    body = request.get_json(force=True, silent=True) or {}
+    kind = (body.get("kind") or "feedback").strip()
+    if kind not in FEEDBACK_KINDS:
+        return jsonify({"error": "Pick what kind of message this is."}), 400
+    subject = str(body.get("subject") or "").strip()
+    text = str(body.get("body") or "").strip()
+    if not subject:
+        return jsonify({"error": "Give it a one-line subject."}), 400
+    if not text:
+        return jsonify({"error": "Say what you would like to raise."}), 400
+    if len(subject) > FEEDBACK_MAX_SUBJECT:
+        return jsonify({"error": f"Keep the subject under {FEEDBACK_MAX_SUBJECT} characters."}), 400
+    if len(text) > FEEDBACK_MAX_BODY:
+        return jsonify({"error": f"Keep the message under {FEEDBACK_MAX_BODY} characters."}), 400
+
+    anonymous = bool(body.get("anonymous"))
+    db = get_db()
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    cur = db.execute(
+        "INSERT INTO feedback (kind, subject, body, author_username, status, created_at)"
+        " VALUES (?,?,?,?,'open',?)",
+        (kind, subject, text, None if anonymous else g.user["username"], now),
+    )
+    db.commit()
+    # An anonymous submission gets no id back either: an id the submitter
+    # holds is a handle a later conversation could be matched against.
+    return jsonify({"ok": True, "anonymous": anonymous,
+                    "id": None if anonymous else cur.lastrowid})
+
+
+@api.get("/feedback/mine")
+@login_required()
+def my_feedback():
+    """Named submissions only -- an anonymous one has no author to match on,
+    which is the point of it."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM feedback WHERE author_username = ? ORDER BY id DESC",
+        (g.user["username"],),
+    ).fetchall()
+    return jsonify({"feedback": [_feedback_row_to_dict(db, r, include_author=False) for r in rows]})
+
+
+@api.get("/feedback")
+@login_required()
+def list_feedback():
+    if not _can_read_feedback(g.user["username"]):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    status = (request.args.get("status") or "").strip()
+    if status and status in FEEDBACK_STATUSES:
+        rows = db.execute("SELECT * FROM feedback WHERE status = ? ORDER BY id DESC", (status,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM feedback ORDER BY id DESC").fetchall()
+    counts = {s: 0 for s in FEEDBACK_STATUSES}
+    for r in db.execute("SELECT status, COUNT(*) c FROM feedback GROUP BY status"):
+        if r["status"] in counts:
+            counts[r["status"]] = r["c"]
+    return jsonify({
+        "feedback": [_feedback_row_to_dict(db, r, include_author=True) for r in rows],
+        "counts": counts,
+    })
+
+
+@api.get("/feedback/<int:feedback_id>")
+@login_required()
+def get_feedback(feedback_id):
+    if not _can_read_feedback(g.user["username"]):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    row = db.execute("SELECT * FROM feedback WHERE id = ?", (feedback_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    out = _feedback_row_to_dict(db, row, include_author=True)
+    out["notes"] = _feedback_notes(db, feedback_id)
+    return jsonify({"feedback": out})
+
+
+@api.patch("/feedback/<int:feedback_id>")
+@login_required()
+def update_feedback(feedback_id):
+    """Status only. The submission itself is never edited by the people
+    handling it -- a complaint that can be rewritten by its recipient is
+    not a record of anything."""
+    if not _can_read_feedback(g.user["username"]):
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    status = (body.get("status") or "").strip()
+    if status not in FEEDBACK_STATUSES:
+        return jsonify({"error": "Unknown status."}), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM feedback WHERE id = ?", (feedback_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if row["status"] == status:
+        return jsonify({"feedback": _feedback_row_to_dict(db, row, include_author=True)})
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    db.execute("UPDATE feedback SET status = ?, updated_at = ? WHERE id = ?", (status, now, feedback_id))
+    db.execute(
+        "INSERT INTO feedback_notes (feedback_id, actor_username, action, note, status, created_at)"
+        " VALUES (?,?,'status',?,?,?)",
+        (feedback_id, g.user["username"], (body.get("note") or None), status, now),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM feedback WHERE id = ?", (feedback_id,)).fetchone()
+    return jsonify({"feedback": _feedback_row_to_dict(db, row, include_author=True)})
+
+
+@api.post("/feedback/<int:feedback_id>/notes")
+@login_required()
+def add_feedback_note(feedback_id):
+    if not _can_read_feedback(g.user["username"]):
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    note = str(body.get("note") or "").strip()
+    if not note:
+        return jsonify({"error": "Write the note first."}), 400
+    if len(note) > FEEDBACK_MAX_BODY:
+        return jsonify({"error": "That note is too long."}), 400
+    db = get_db()
+    if not db.execute("SELECT 1 FROM feedback WHERE id = ?", (feedback_id,)).fetchone():
+        return jsonify({"error": "not_found"}), 404
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    db.execute(
+        "INSERT INTO feedback_notes (feedback_id, actor_username, action, note, status, created_at)"
+        " VALUES (?,?,'note',?,NULL,?)",
+        (feedback_id, g.user["username"], note, now),
+    )
+    db.execute("UPDATE feedback SET updated_at = ? WHERE id = ?", (now, feedback_id))
+    db.commit()
+    return jsonify({"notes": _feedback_notes(db, feedback_id)})
+
+
+@api.get("/feedback/summary")
+@login_required()
+def feedback_summary():
+    """Open count for the sidebar badge. Silent 0 for anyone who cannot read
+    them, so the dashboard does not have to know the rule."""
+    if not _can_read_feedback(g.user["username"]):
+        return jsonify({"open": 0, "canRead": False})
+    r = get_db().execute("SELECT COUNT(*) c FROM feedback WHERE status = 'open'").fetchone()
+    return jsonify({"open": r["c"], "canRead": True})
