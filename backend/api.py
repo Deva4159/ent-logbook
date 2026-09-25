@@ -819,11 +819,19 @@ def delete_entry(entry_id):
         return jsonify({"error": "not_found"}), 404
     if row["author_username"] != g.user["username"] and g.user["role"] != "developer":
         return jsonify({"error": "forbidden"}), 403
-    if row["approval_state"] == "approved" and g.user["role"] != "developer":
+    # Nobody hard-deletes an attested record -- not the author, not a
+    # developer. entry_approvals is ON DELETE CASCADE, so a delete here does
+    # not just remove the case: it removes the consultant's signature and the
+    # whole audit trail proving the case was ever signed. That is the one
+    # thing this feature exists to make impossible to lose. A developer who
+    # genuinely needs the record gone releases it first (which is itself
+    # logged, on the approving consultant's authority) and then deletes.
+    if row["approval_state"] == "approved":
         return jsonify({
             "error": "approved_record_locked",
-            "detail": "This record has been approved and cannot be deleted. Ask the "
-                      "approving consultant to release it first.",
+            "detail": "This record has been signed off and cannot be deleted. The "
+                      "approving consultant (or a Head of Unit / Coordinator / HOD) "
+                      "must release it first.",
         }), 409
     db.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
     db.commit()
@@ -1495,16 +1503,87 @@ def read_config():
     return jsonify({"config": get_config()})
 
 
+# `procedures` is a map of site-key -> list. A plain cfg.update() replaces
+# the WHOLE map, so a caller that sends only the site it changed silently
+# deletes every other site's list. That is not hypothetical: it is how this
+# department's catalogue was reduced to two ear procedures in production.
+# The current frontend works around it by re-sending the entire map on every
+# save, but "every call site must remember to send everything" is exactly
+# the kind of contract that breaks the next time someone adds a call site.
+# Merged per sub-key here instead, so the server is safe whatever arrives.
+#
+# A site's list is still removable -- send it explicitly as null (or remove
+# its category, which drops the list with it) -- so this buys safety without
+# making deletion impossible.
+NESTED_CONFIG_KEYS = {"procedures"}
+
+
+def _merge_config(cfg, body):
+    for key, value in body.items():
+        if key in NESTED_CONFIG_KEYS and isinstance(value, dict) and isinstance(cfg.get(key), dict):
+            merged = dict(cfg[key])
+            for sub, sub_value in value.items():
+                if sub_value is None:
+                    merged.pop(sub, None)
+                else:
+                    merged[sub] = sub_value
+            cfg[key] = merged
+        else:
+            cfg[key] = value
+    return cfg
+
+
+def _prune_orphan_procedures(cfg):
+    """A removed category leaves its procedure list behind forever, because
+    removeCategory only ever patched `categories`. Dead weight on every
+    read, and it reappears the moment someone re-creates a site with the
+    same key."""
+    cats = {c.get("key") for c in (cfg.get("categories") or []) if isinstance(c, dict)}
+    procs = cfg.get("procedures")
+    if isinstance(procs, dict) and cats:
+        cfg["procedures"] = {k: v for k, v in procs.items() if k in cats}
+    return cfg
+
+
 @api.patch("/config")
 @login_required(role="developer")
 def update_config():
     body = request.get_json(force=True, silent=True) or {}
     db = get_db()
-    cfg = get_config()
-    cfg.update(body)
+    cfg = _prune_orphan_procedures(_merge_config(get_config(), body))
     db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
     db.commit()
     return jsonify({"config": cfg})
+
+
+@api.post("/config/restore-procedure-defaults")
+@login_required(role="developer")
+def restore_procedure_defaults():
+    """Puts the shipped procedure lists back for any site that has lost them,
+    without touching anything the department has added itself.
+
+    Needed because the merge bug above already destroyed live data, and the
+    only other way to repair it is typing sixty-odd procedures back in by
+    hand through Manage Lists.
+    """
+    from db import DEFAULT_PROCEDURES
+
+    db = get_db()
+    cfg = get_config()
+    procs = dict(cfg.get("procedures") or {})
+    restored = {}
+    for site, defaults in DEFAULT_PROCEDURES.items():
+        existing = procs.get(site) or []
+        # Union, not replace: a site the department has curated keeps its own
+        # entries and gains back only the defaults that went missing.
+        added = [p for p in defaults if p not in existing]
+        if added:
+            procs[site] = sorted(existing + added, key=lambda s: s.lower())
+            restored[site] = len(added)
+    cfg["procedures"] = procs
+    db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
+    db.commit()
+    return jsonify({"config": cfg, "restored": restored})
 
 
 # ---------------------------------------------------------- role assigns
@@ -1624,6 +1703,24 @@ def _submit_one(db, entry_id, approver, comment=None):
         return False, {"error": "Finish the entry before sending it for approval."}, 400
     if row["approval_state"] == "approved":
         return False, {"error": "Already approved."}, 409
+    # Re-sending a record that is already waiting on someone. Silently
+    # re-pointing it at a second consultant is how a trainee shops for a
+    # signature: the first consultant's queue loses the record with no
+    # notice and the trail reads as two ordinary submissions. Re-sending to
+    # the SAME consultant is a no-op worth refusing outright; re-sending to a
+    # different one is allowed (the nominated consultant may have left) but
+    # is recorded as a reassignment naming both.
+    if row["approval_state"] == "pending":
+        if row["approver_username"] == approver:
+            return False, {"error": "This record is already waiting with that consultant."}, 409
+        _log_approval(db, entry_id, "reassigned", g.user,
+                      comment="Moved from %s to %s%s" % (
+                          row["approver_username"], approver,
+                          (" — " + comment) if comment else ""),
+                      approver_username=approver,
+                      on_behalf_of=row["approver_username"])
+        _set_approval(db, entry_id, "pending", approver)
+        return True, None, 200
     _log_approval(db, entry_id, "submitted", g.user, comment=comment,
                   approver_username=approver)
     _set_approval(db, entry_id, "pending", approver)
@@ -1810,7 +1907,12 @@ def request_unlock(entry_id):
         return jsonify({"error": "forbidden"}), 403
     if row["approval_state"] != "approved":
         return jsonify({"error": "This record is not locked."}), 409
-    _log_approval(db, entry_id, "unlock_requested", g.user, comment=body.get("comment"))
+    # Same reasoning as request-changes: an unlock request with no reason
+    # lands in a consultant's queue as a bare flag they have to chase.
+    comment = str(body.get("comment") or "").strip()
+    if not comment:
+        return jsonify({"error": "Say what needs correcting."}), 400
+    _log_approval(db, entry_id, "unlock_requested", g.user, comment=comment)
     db.commit()
     return jsonify({"ok": True})
 
@@ -1919,7 +2021,17 @@ def approval_summary():
         if caps["isHod"] or caps["isCoordinator"] or caps["isHeadOfUnit"]:
             overdue = []
             for r in pending:
-                in_reach = caps["isHod"] or caps["isCoordinator"] or (r["unit"] in scope["units"])
+                # An entry logged on a date no posting covers is stored with
+                # an empty unit (see unit_for_date). It is nobody's unit, so
+                # a Head of Unit would never see it here -- which is exactly
+                # backwards: those are the records most likely to be
+                # forgotten, and the HoU delegate route cannot act on them
+                # either, so they must at least be visible to somebody with
+                # oversight.
+                unattributed = not (r["unit"] or "").strip()
+                in_reach = (caps["isHod"] or caps["isCoordinator"]
+                            or r["unit"] in scope["units"]
+                            or unattributed)
                 if not in_reach:
                     continue
                 hist = _approval_history(db, r["id"])
