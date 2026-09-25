@@ -716,3 +716,84 @@
     .q-act{width:100%; justify-content:flex-end;}
     .q-act .btn{flex:1;}
   }
+
+  /* ============================================================
+     ROSTER: current-posting cell
+     Three lines in one table cell, so the row height is set by this column.
+     Kept tight (no card, no padding) because it repeats once per trainee.
+  ============================================================ */
+  /* The roster gained columns (Academic and Seminars for HOD/Coordinator,
+     plus this one) and at 1080px of main content twelve columns compress
+     until "Batch of 2025" wraps onto three lines. A min-width lets
+     .table-wrap's overflow-x:auto do its job -- the table scrolls sideways
+     instead of every cell being crushed. */
+  .roster-table{min-width:1000px;}
+  .roster-table td, .roster-table th{white-space:nowrap;}
+  .posting-cell{display:flex; flex-direction:column; gap:3px; min-width:158px;}
+  .posting-dates{font-size:12.5px; white-space:nowrap;}
+  .posting-elapsed{font-size:12.5px; font-weight:600;}
+  /* A 3px bar, not a percentage label: the question is "are they just
+     arriving or just leaving", which a bar answers at a glance and a
+     number makes you do arithmetic for. aria-label carries the percentage
+     for anyone not seeing it. */
+  .posting-bar{height:3px; border-radius:99px; background:var(--surface-2); overflow:hidden; max-width:150px;}
+  .posting-bar span{display:block; height:100%; background:var(--teal); border-radius:99px;}
+
+  /* ============================================================
+     EXPORT BUILDER
+  ============================================================ */
+  /* Wider than the standard modal: two columns of choices side by side is
+     the whole point -- filters on the left, columns on the right, both
+     visible while you decide. Collapses to one column below 760px. */
+  .modal-wide{max-width:860px;}
+  .exp-presets{display:flex; gap:8px; flex-wrap:wrap;}
+  .exp-grid{display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:start;}
+  .exp-grid h3{font-size:14px; margin-bottom:10px;}
+  .exp-sub{font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin:14px 0 7px;}
+  .pick-row{display:flex; flex-wrap:wrap; gap:7px;}
+  /* The checkbox itself is hidden, not removed: it stays focusable and the
+     label text stays the accessible name, so keyboard and screen-reader
+     users get a normal checkbox while everyone else sees a chip. */
+  .pick-chip{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; padding:5px 11px;
+    border:1px solid var(--line-strong); border-radius:99px; cursor:pointer; background:var(--surface); color:var(--ink);}
+  .pick-chip input{position:absolute; opacity:0; width:0; height:0;}
+  .pick-chip:hover{border-color:var(--teal);}
+  .pick-chip.on{background:var(--teal-bg); border-color:var(--teal); color:var(--teal-ink); font-weight:600;}
+  .pick-chip:focus-within{outline:2px solid var(--teal); outline-offset:2px;}
+  .exp-colbar{display:flex; gap:8px; margin-bottom:10px;}
+  .exp-cols{display:flex; flex-direction:column; gap:2px; max-height:340px; overflow-y:auto;
+    border:1px solid var(--line); border-radius:8px; padding:8px;}
+  .exp-col{display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 6px; border-radius:6px; cursor:pointer;}
+  .exp-col:hover{background:var(--surface-2);}
+  .exp-col.on{font-weight:600;}
+  @media (max-width:760px){
+    .exp-grid{grid-template-columns:1fr; gap:18px;}
+    .exp-cols{max-height:220px;}
+  }
+
+  /* ============================================================
+     FEEDBACK
+  ============================================================ */
+  .fb-list{display:flex; flex-direction:column; gap:10px;}
+  .fb-row{display:flex; gap:14px; align-items:flex-start; justify-content:space-between;
+    border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:var(--surface);}
+  .fb-row.open{border-color:var(--teal);}
+  .fb-main{min-width:0; flex:1;}
+  .fb-top{display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:5px;}
+  .fb-top b{font-size:14px;}
+  /* Collapsed rows clamp to three lines rather than truncating to one: a
+     complaint's first line is rarely the part that tells you whether it is
+     urgent. Opening it shows the whole thing. */
+  .fb-body{font-size:13.5px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;}
+  .fb-row.open .fb-body{display:block; -webkit-line-clamp:none; overflow:visible;}
+  .fb-meta{font-size:12px; margin-top:6px;}
+  .fb-side{display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex:none;}
+  .fb-detail{margin-top:14px; padding-top:14px; border-top:1px dashed var(--line);}
+  .fb-actions{display:flex; gap:8px; flex-wrap:wrap;}
+  .fb-note{border-left:2px solid var(--line-strong); padding:2px 0 2px 10px; margin-bottom:8px; font-size:13px;}
+  .fb-note-meta{font-size:11.5px; margin-bottom:2px;}
+  @media (max-width:560px){
+    .fb-row{flex-direction:column;}
+    .fb-side{flex-direction:row; align-items:center; align-self:stretch; justify-content:space-between;}
+  }

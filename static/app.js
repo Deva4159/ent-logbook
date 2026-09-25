@@ -24,6 +24,7 @@
     rosterLoaded: false,
     detailUser: null,
     detailEntries: [],
+    detailPostings: [],
     devUsers: [],
     devUsersLoaded: false,
     devAllEntries: [],
@@ -31,6 +32,15 @@
     approvalSummary: null,
     approvalQueue: null,
     approvalPick: {},          // id -> true, for bulk submit / bulk approve
+    exportDialog: null,        // { sel, options, preset }
+    feedbackDraft: { kind:"suggestion", subject:"", body:"", anonymous:false },
+    feedbackBusy: false,
+    feedbackMine: null,
+    feedbackInbox: null,
+    feedbackFilter: "",
+    feedbackOpenId: null,
+    feedbackNotes: {},         // id -> notes[]
+    feedbackOpenCount: 0,
     submitDialog: null,        // { ids:[], approver:"" }
     decideDialog: null,        // { id, action }
 
@@ -540,6 +550,11 @@
     var path = username===state.user.username ? "/entries/mine" : "/entries/by-author/"+encodeURIComponent(username);
     return (await api("GET", path)).entries;
   }
+  // Same endpoint, but the posting blocks the caller is allowed to see --
+  // their own unit's for a Head of Unit, all of them for HOD/Coordinator.
+  async function dGetAuthorDetail(username){
+    return await api("GET","/entries/by-author/"+encodeURIComponent(username));
+  }
   async function dListAllEntries(){ return (await api("GET","/entries/all")).entries; }
   async function dGetReminders(){ return (await api("GET","/reminders")).reminders; }
   async function dGetEntryHistory(id){ return (await api("GET","/entries/"+id+"/history")).edits; }
@@ -558,6 +573,18 @@
   async function aRelease(id){ return await api("POST","/entries/"+id+"/release",{}); }
   async function aRequestUnlock(id, comment){ return await api("POST","/entries/"+id+"/request-unlock",{comment:comment}); }
   async function aHistory(id){ return (await api("GET","/entries/"+id+"/approvals")).approvals; }
+
+  /* ---------------- export builder ---------------- */
+  async function xOptions(){ return await api("GET","/entries/export/options"); }
+
+  /* ---------------- feedback ---------------- */
+  async function fbCreate(body){ return await api("POST","/feedback", body); }
+  async function fbMine(){ return (await api("GET","/feedback/mine")).feedback; }
+  async function fbInbox(status){ return await api("GET","/feedback"+(status?"?status="+encodeURIComponent(status):"")); }
+  async function fbDetail(id){ return (await api("GET","/feedback/"+id)).feedback; }
+  async function fbSetStatus(id, status){ return await api("PATCH","/feedback/"+id, {status:status}); }
+  async function fbAddNote(id, note){ return (await api("POST","/feedback/"+id+"/notes", {note:note})).notes; }
+  async function fbSummary(){ return await api("GET","/feedback/summary"); }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
@@ -732,6 +759,10 @@
     state.manageUsersLoaded = true;
   }
 
+  async function refreshFeedbackBadge(){
+    if(!canReadFeedback()){ state.feedbackOpenCount = 0; return; }
+    try{ state.feedbackOpenCount = (await fbSummary()).open || 0; }catch(e){ state.feedbackOpenCount = 0; }
+  }
   async function refreshApprovalSummary(){
     try{ state.approvalSummary = await aSummary(); }catch(e){ state.approvalSummary = null; }
   }
@@ -744,8 +775,10 @@
       else if(role==="consultant"){
         await loadRoster();
         await refreshApprovalSummary();
+        await refreshFeedbackBadge();
         if(caps.canApprove){ await loadSignupRequests(); }
       }
+      else if(role==="developer"){ await refreshFeedbackBadge(); }
       else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); await loadSignupRequests(); }
       state.loading=false; render(); return;
     }
@@ -754,6 +787,15 @@
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
     if(v==="developer-users"){ await loadDevUsers(); render(); return; }
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
+    if(v==="feedback"){
+      state.loading=true; render();
+      try{ state.feedbackMine = await fbMine(); }catch(e){ state.feedbackMine = []; }
+      if(canReadFeedback()){
+        try{ state.feedbackInbox = await fbInbox(state.feedbackFilter); }catch(e){ state.feedbackInbox = {feedback:[],counts:{}}; }
+      }
+      await refreshFeedbackBadge();
+      state.loading=false; render(); return;
+    }
     if(v==="approval-queue"){
       state.loading=true; render();
       await loadConsultants();
@@ -774,16 +816,25 @@
   }
 
   async function openResidentDetail(username){
-    state.detailUser = null; state.detailEntries=[];
+    state.detailUser = null; state.detailEntries=[]; state.detailPostings=[];
     state.view = "consultant-detail";
     render();
     try{
       var found = state.roster.filter(function(r){ return r.user.username===username; })[0];
-      if(found){ state.detailUser = found.user; state.detailEntries = found.entries; }
-      else {
+      if(found){
+        state.detailUser = found.user;
+        state.detailEntries = found.entries;
+        state.detailPostings = found.postings || [];
+      } else {
         state.detailUser = await dGetUser(username);
-        state.detailEntries = await dListEntriesByAuthor(username);
       }
+      // Always re-fetch from the endpoint: the roster row carries only the
+      // entries the caller may see, which is right, but the postings panel
+      // wants the same list the server would scope for this caller, and a
+      // trainee opened from outside the roster has neither.
+      var d = await dGetAuthorDetail(username);
+      state.detailEntries = d.entries;
+      state.detailPostings = d.postings || [];
     }catch(e){}
     render();
   }
@@ -1717,6 +1768,190 @@
   }
 
   /* ============================================================
+     EXPORT BUILDER
+
+     Rows (which entries) and columns (which fields), both chosen by the
+     person exporting. The server applies the same scope it always did
+     BEFORE any filter runs, so nothing here can widen what someone reads --
+     a filter only ever narrows what they could already see.
+
+     The selection is remembered in this browser, because the useful case
+     is exporting the same shape every few months, not once.
+  ============================================================ */
+  var EXPORT_PRESETS = {
+    operative: { label: "Operative log",
+      hint: "What a logbook submission usually wants: what was done, where, which side, and at what level of independence.",
+      types: ["surgical","other"],
+      columns: ["date","type","unit","site","procedures","laterality","role","setting","consultant","approval"] },
+    cases: { label: "Case write-ups",
+      hint: "Interesting Cases with their history, examination and diagnoses.",
+      types: ["case"],
+      columns: ["date","unit","hospitalNumber","age","sex","diagnoses","diagnosesSecondary","comorbidities","history","examination","approval","paperStatus"] },
+    teaching: { label: "Teaching record",
+      hint: "Academic participation and seminars delivered.",
+      types: ["academic","seminar"],
+      columns: ["date","type","unit","academicType","seminarType","topic","venue","details"] },
+    everything: { label: "Everything",
+      hint: "Every entry type, every field. The widest file and the least readable one.",
+      types: [], columns: [] },
+  };
+  var EXPORT_TYPE_LABELS = [
+    ["surgical","Surgical procedures"], ["other","Other procedures"], ["case","Interesting cases"],
+    ["academic","Academic participation"], ["seminar","Seminars / presentations"],
+  ];
+  // A sentinel, because the value a "no posting on file" entry actually
+  // carries is the empty string -- and an empty string in a query parameter
+  // is indistinguishable from "this filter was not set", so ticking only
+  // that box would have exported everything.
+  var UNIT_NONE = "__none__";
+  var EXPORT_APPROVAL_LABELS = [
+    ["approved","Approved"], ["pending","Awaiting sign-off"],
+    ["changes_requested","Changes asked"], ["not_submitted","Not sent"],
+  ];
+
+  function defaultExportSel(){
+    return { types: [], columns: EXPORT_PRESETS.operative.columns.slice(),
+             units: [], approval: [], authors: [], from: "", to: "" };
+  }
+  function loadExportSel(){
+    try{
+      var raw = localStorage.getItem("entlog.export");
+      if(raw){
+        var v = JSON.parse(raw);
+        if(v && Array.isArray(v.columns) && v.columns.length) return Object.assign(defaultExportSel(), v);
+      }
+    }catch(e){}
+    return defaultExportSel();
+  }
+  function saveExportSel(sel){
+    try{ localStorage.setItem("entlog.export", JSON.stringify(sel)); }catch(e){}
+  }
+
+  // Counted here rather than asked of the server on every checkbox tick:
+  // the entries this person can see are already loaded for the screen they
+  // are on. It is an estimate of the same rule, so it is labelled "about".
+  function exportRowEstimate(sel){
+    var pool = [];
+    if(isTraineeRole(state.user.role)) pool = (state.myEntries||[]);
+    else if(state.roster && state.roster.length) pool = state.roster.reduce(function(a,r){ return a.concat(r.entries||[]); }, []);
+    else return null;
+    var n = 0;
+    pool.forEach(function(e){
+      if(e.status==="draft") return;
+      var t = normType(e);
+      if(sel.types.length && sel.types.indexOf(t)===-1) return;
+      if(sel.units.length && sel.units.indexOf(e.unit || UNIT_NONE)===-1) return;
+      if(sel.approval.length && APPROVABLE.indexOf(t)!==-1
+         && sel.approval.indexOf(e.approvalState||"not_submitted")===-1) return;
+      if(sel.authors.length && sel.authors.indexOf(e.authorUsername)===-1) return;
+      if(sel.from && (e.date||"") < sel.from) return;
+      if(sel.to && (e.date||"") > sel.to) return;
+      n++;
+    });
+    return n;
+  }
+
+  function exportChip(group, value, label, sel){
+    var on = (sel[group]||[]).indexOf(value)!==-1;
+    return '<label class="pick-chip'+(on?" on":"")+'">'+
+      '<input type="checkbox" data-exp-group="'+esc(group)+'" value="'+esc(value)+'"'+(on?" checked":"")+'>'+
+      esc(label)+'</label>';
+  }
+
+  // Which preset, if any, the current selection happens to equal. Computed
+  // rather than remembered, so a preset stays highlighted after a reload and
+  // stops being highlighted the moment a selection drifts from it -- either
+  // way the highlight describes what is actually selected.
+  function matchingPreset(sel){
+    function same(a,b){ return a.length===b.length && a.slice().sort().join("|")===b.slice().sort().join("|"); }
+    var keys = Object.keys(EXPORT_PRESETS);
+    for(var i=0;i<keys.length;i++){
+      var p = EXPORT_PRESETS[keys[i]];
+      if(same(sel.types, p.types) && same(sel.columns, p.columns)) return keys[i];
+    }
+    return null;
+  }
+
+  function renderExportDialog(){
+    var d = state.exportDialog; if(!d) return "";
+    var sel = d.sel, opt = d.options;
+    if(!opt) return '<div class="modal-overlay" data-export-overlay><div class="modal-card" style="max-width:520px;">'+
+      '<h2>Export</h2><p class="muted">Loading what you can export…</p></div></div>';
+    var est = exportRowEstimate(sel);
+    var active = matchingPreset(sel);
+    var allCols = opt.columns || [];
+    var picked = sel.columns;
+    return '<div class="modal-overlay" data-export-overlay><div class="modal-card modal-wide">'+
+      '<button class="modal-close" data-export-cancel aria-label="Close">&times;</button>'+
+      '<h2>Export to CSV</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 16px;">Choose which entries go in the file and which columns it has. '+
+        'Drafts are never exported. Your choices are remembered on this computer.</p>'+
+
+      '<div class="exp-presets">'+Object.keys(EXPORT_PRESETS).map(function(k){
+        return '<button type="button" class="btn btn-sm'+(active===k?" btn-primary":"")+'" data-exp-preset="'+k+'">'+esc(EXPORT_PRESETS[k].label)+'</button>';
+      }).join("")+'</div>'+
+      (active ? '<p class="muted" style="font-size:12.5px; margin:8px 0 16px;">'+esc(EXPORT_PRESETS[active].hint)+'</p>'
+              : '<p class="muted" style="font-size:12.5px; margin:8px 0 16px;">A starting point \u2014 adjust anything below.</p>')+
+
+      '<div class="exp-grid">'+
+        '<section><h3>Which entries</h3>'+
+          '<div class="exp-sub">Entry type <span class="muted">(none ticked = all)</span></div>'+
+          '<div class="pick-row">'+EXPORT_TYPE_LABELS.map(function(t){ return exportChip("types",t[0],t[1],sel); }).join("")+'</div>'+
+          '<div class="exp-sub">Dates</div>'+
+          '<div class="row2">'+
+            '<div class="field"><label for="exp-from">From</label><input id="exp-from" type="date" value="'+esc(sel.from||"")+'"></div>'+
+            '<div class="field"><label for="exp-to">To</label><input id="exp-to" type="date" value="'+esc(sel.to||"")+'"></div>'+
+          '</div>'+
+          ((opt.units||[]).length>1 ? '<div class="exp-sub">Unit</div><div class="pick-row">'+
+            opt.units.map(function(u){ return exportChip("units",u,unitShort(u),sel); }).join("")+
+            (opt.hasUnattributed ? exportChip("units",UNIT_NONE,"No posting on file",sel) : '')+
+          '</div>' : '')+
+          ((opt.authors||[]).length>1 ? '<div class="exp-sub">Trainee</div><div class="pick-row">'+
+            opt.authors.map(function(a){ return exportChip("authors",a.username,a.displayName||a.username,sel); }).join("")+
+          '</div>' : '')+
+          '<div class="exp-sub">Sign-off state <span class="muted">(operative records and cases only)</span></div>'+
+          '<div class="pick-row">'+EXPORT_APPROVAL_LABELS.map(function(a){ return exportChip("approval",a[0],a[1],sel); }).join("")+'</div>'+
+        '</section>'+
+
+        '<section><h3>Which columns <span class="muted" style="font-weight:400; font-size:12.5px;">('+picked.length+' of '+allCols.length+')</span></h3>'+
+          '<div class="exp-colbar">'+
+            '<button type="button" class="btn btn-sm" data-exp-cols="all">All</button>'+
+            '<button type="button" class="btn btn-sm" data-exp-cols="none">None</button>'+
+          '</div>'+
+          '<div class="exp-cols">'+allCols.map(function(c){
+            var on = picked.indexOf(c.key)!==-1;
+            return '<label class="exp-col'+(on?" on":"")+'"><input type="checkbox" data-exp-col="'+esc(c.key)+'"'+(on?" checked":"")+'>'+esc(c.label)+'</label>';
+          }).join("")+'</div>'+
+          '<p class="muted" style="font-size:12px; margin-top:10px;">Columns always come out in this order, whichever you tick, so two exports of the same fields line up.</p>'+
+        '</section>'+
+      '</div>'+
+
+      '<div class="btn-row">'+
+        '<span class="muted" style="font-size:12.5px; align-self:center;">'+
+          (est==null ? '' : 'About '+est+' row'+(est===1?'':'s')+' · '+picked.length+' column'+(picked.length===1?'':'s'))+'</span>'+
+        '<span style="display:flex; gap:10px;">'+
+          '<button class="btn" data-export-cancel>Cancel</button>'+
+          '<button class="btn btn-primary" data-export-go'+(picked.length?'':' disabled')+'>Download CSV</button>'+
+        '</span>'+
+      '</div>'+
+    '</div></div>';
+  }
+
+  function exportURL(sel){
+    // Download is disabled while nothing is ticked, so this is never called
+    // with an empty list -- and it must not quietly substitute "all", which
+    // is what made the None button look broken.
+    var q = [];
+    var cols = sel.columns;
+    function add(k, arr){ if(arr && arr.length) q.push(k+"="+encodeURIComponent(arr.join(","))); }
+    add("columns", cols); add("types", sel.types); add("units", sel.units);
+    add("approval", sel.approval); add("authors", sel.authors);
+    if(sel.from) q.push("from="+encodeURIComponent(sel.from));
+    if(sel.to) q.push("to="+encodeURIComponent(sel.to));
+    return "/api/entries/export/custom.csv"+(q.length?"?"+q.join("&"):"");
+  }
+
+  /* ============================================================
      RENDER: AUTH SCREENS
   ============================================================ */
   // Every auth screen is the same card on the same shell, so the shell is
@@ -1878,7 +2113,7 @@
   }
   function navItems(){
     var caps = state.capabilities || {};
-    if(isTraineeRole(state.user.role)) return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["account","My Account"],["about","About / Roadmap"]];
+    if(isTraineeRole(state.user.role)) return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]];
     if(state.user.role==="consultant"){
       var items = [["dashboard","Dashboard"],["consultant-roster","Roster"]];
       // "Approvals" already means account sign-ups in this app, so the case
@@ -1886,10 +2121,11 @@
       items.push(["approval-queue","Case Sign-off"]);
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
+      items.push(["feedback","Feedback"]);
       items.push(["account","My Account"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["account","My Account"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -1907,6 +2143,7 @@
       '<nav class="sidenav'+(state.mobileNavOpen?" open":"")+'">'+navItems().map(function(item){
         var badge = "";
         if(item[0]==="developer-password-requests" && pendingCount>0) badge = '<span class="alert-count">'+pendingCount+'</span>';
+        if(item[0]==="feedback" && state.feedbackOpenCount>0) badge = '<span class="alert-count">'+state.feedbackOpenCount+'</span>';
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
         if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
@@ -2109,7 +2346,17 @@
     try{ var d = new Date(ym+"-01T00:00:00"); return d.toLocaleDateString(undefined,{month:"short",year:"numeric"}); }
     catch(e){ return ym; }
   }
-  function renderStatsAndCharts(entries){
+  // opts.hideTeaching drops the Academic and Seminar tiles. Used on the
+  // consultant's view of a trainee: a unit consultant or Head of Unit is
+  // looking at operative work, and the teaching record is the Head of
+  // Department's and Course Coordinator's business.
+  //
+  // This is decluttering, NOT access control. The entries themselves are
+  // still listed below the charts and the API still returns them, so
+  // anyone determined to count them can. Treat it as tidying the view, not
+  // as a rule about who may see what.
+  function renderStatsAndCharts(entries, opts){
+    opts = opts || {};
     var s = computeStats(entries);
     var maxProc = s.procRows.length ? s.procRows[0].count : 0;
     var maxSite = s.siteRows.length ? s.siteRows[0].count : 0;
@@ -2118,7 +2365,8 @@
     var maxTrend = trend.length ? Math.max.apply(null, trend.map(function(r){ return r.total; })) : 0;
     return ''+
     '<div class="stats-block"><h3>Total</h3><div class="stat-grid">'+
-      statTile(s.total,"Total")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar")+
+      statTile(s.total,"Total")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+
+      (opts.hideTeaching ? "" : statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar"))+
     '</div></div>'+
     (trend.length ? '<div class="card stats-block"><h3>Time-based (entries per month, all types)</h3>'+
       trend.map(function(r){ return barRow(fmtMonthLabel(r.month), r.total, maxTrend, "var(--violet)"); }).join("")+
@@ -2142,7 +2390,10 @@
       return '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">You currently have full access to every unit’s progress, as '+esc(roles.join(" & "))+'.</div>';
     }
     if(scope.units.length){
-      return '<div class="notice-banner">You can currently see entries logged under: <b>'+scope.units.map(function(k){ return esc(unitShort(k)); }).join(", ")+'</b>.</div>';
+      return '<div class="notice-banner"><span>You can see records logged under <b>'+
+        scope.units.map(function(k){ return esc(unitShort(k)); }).join(", ")+
+        '</b> — that is, what each trainee did during their posting there. '+
+        'Their work in other units is not shown to you.</span></div>';
     }
     return '<div class="notice-banner">Your account has no unit set yet, so no residents’ entries are visible to you. Ask your Developer admin to set your unit or appoint you Head of Unit / Course Coordinator / HOD.</div>';
   }
@@ -2860,7 +3111,7 @@
     return ''+
     approvalCounters()+
     bulkBar+
-    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
+    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="open-export">Export\u2026</button></div>'+
     renderEntriesList({
       uiKey: "my-entries",
       entries: rows,
@@ -3086,20 +3337,187 @@
   /* ============================================================
      RENDER: CONSULTANT
   ============================================================ */
+  // Whole-department oversight: Head of Department and Course Coordinator.
+  // A plain consultant and a Head of Unit see the operative columns only.
+  function seesTeachingColumns(){
+    var caps = state.capabilities || {};
+    return !!(caps.isHod || caps.isCoordinator || caps.isDeveloper);
+  }
+
+  // Days between two ISO dates, inclusive of the start day. Kept to whole
+  // days and rendered as weeks/months, because a posting is a rota block --
+  // "11 wks in" is the useful figure, "79 days" is not.
+  function daysBetween(fromISO, toISO){
+    var a = new Date(fromISO+"T00:00:00"), b = new Date(toISO+"T00:00:00");
+    if(isNaN(a) || isNaN(b)) return null;
+    return Math.floor((b-a)/86400000) + 1;
+  }
+  function humanSpan(days){
+    if(days==null) return "";
+    if(days < 14) return days+(days===1?" day":" days");
+    if(days < 70) return Math.round(days/7)+" wks";
+    var m = days/30.44;
+    return (m<10 ? m.toFixed(1) : String(Math.round(m)))+" mo";
+  }
+
+  // Sorts and classifies a set of posting blocks against today.
+  function postingBlocks(postings){
+    var today = todayISO();
+    var list = (postings||[]).filter(function(p){ return p.startDate; })
+      .slice().sort(function(a,b){ return a.startDate.localeCompare(b.startDate); });
+    var live = list.filter(function(p){ return p.startDate<=today && (!p.endDate || p.endDate>=today); });
+    var past = list.filter(function(p){ return p.endDate && p.endDate<today; });
+    var future = list.filter(function(p){ return p.startDate>today; });
+    // Days counted only up to today for a block still running, so "time in
+    // this unit" is time actually served, not time scheduled.
+    var served = 0;
+    list.forEach(function(p){
+      if(p.startDate>today) return;
+      var end = (!p.endDate || p.endDate>today) ? today : p.endDate;
+      var d = daysBetween(p.startDate, end);
+      if(d>0) served += d;
+    });
+    return { all:list, live:live[live.length-1]||null, past:past, future:future, servedDays:served, today:today };
+  }
+
+  // Progress through one block: dates, how far in, and a bar.
+  function postingProgress(p, today){
+    var elapsed = daysBetween(p.startDate, today);
+    var total = p.endDate ? daysBetween(p.startDate, p.endDate) : null;
+    var pct = (total && total>0) ? Math.min(100, Math.round((elapsed/total)*100)) : null;
+    return '<div class="posting-dates tabular">'+fmtDate(p.startDate)+' – '+(p.endDate?fmtDate(p.endDate):'open')+'</div>'+
+      '<div class="posting-elapsed">'+humanSpan(elapsed)+' in'+
+        (total ? ' <span class="muted">of '+humanSpan(total)+'</span>' : '')+'</div>'+
+      (pct!=null ? '<div class="posting-bar" role="img" aria-label="'+pct+'% through this posting"><span style="width:'+pct+'%"></span></div>' : '');
+  }
+
+  // HOD / Course Coordinator column: the posting the trainee is on TODAY,
+  // wherever that is. Replaces the old "Last entry" column -- their most
+  // recent entry is still the first row of their entry list.
+  function currentPostingCell(postings){
+    var b = postingBlocks(postings);
+    if(!b.live){
+      // Three different situations, three different people to chase:
+      // nothing on file is a data-entry gap, a gap between blocks is a rota
+      // gap, and a block that has not started yet is neither.
+      if(b.future.length)
+        return '<div class="posting-cell"><span class="chip chip-teal">Starts '+fmtDate(b.future[0].startDate)+'</span></div>';
+      return '<span class="muted">'+(b.all.length ? "Between postings" : "No postings on file")+'</span>';
+    }
+    return '<div class="posting-cell">'+postingProgress(b.live, b.today)+'</div>';
+  }
+
+  // Head of Unit column: how long this trainee has spent in THIS unit,
+  // which is the figure a unit's consultant is actually accountable for.
+  // Their current unit is a separate column, because it is often somewhere
+  // else entirely and the department still needs to know where they are.
+  function unitTimeCell(postings){
+    var b = postingBlocks(postings);
+    // Count only blocks that have actually started. A trainee who did one
+    // rotation and is booked for a second has served 3 months across ONE
+    // posting, not two -- counting the booking would overstate the figure
+    // this column exists to report.
+    var servedBlocks = b.all.filter(function(p){ return p.startDate<=b.today; }).length;
+    var totalLine = servedBlocks>1
+      ? '<div class="posting-elapsed muted">'+humanSpan(b.servedDays)+' across '+servedBlocks+' postings</div>' : '';
+    var returns = b.future.length
+      ? '<div class="posting-elapsed"><span class="chip chip-teal">'+
+          (servedBlocks ? 'Returns ' : 'Starts ')+fmtDate(b.future[0].startDate)+'</span></div>' : '';
+
+    if(b.live) return '<div class="posting-cell">'+postingProgress(b.live, b.today)+totalLine+returns+'</div>';
+    if(b.past.length){
+      // Served time leads, because that is the figure a unit is accountable
+      // for. A booked return is secondary -- it was reading as the headline
+      // for someone who had already been and gone.
+      var last = b.past[b.past.length-1];
+      return '<div class="posting-cell">'+
+        '<div class="posting-dates tabular">'+fmtDate(last.startDate)+' – '+fmtDate(last.endDate)+'</div>'+
+        '<div class="posting-elapsed">'+humanSpan(b.servedDays)+
+          (servedBlocks>1 ? ' across '+servedBlocks+' postings' : ' served')+'</div>'+
+        returns+
+      '</div>';
+    }
+    if(b.future.length) return '<div class="posting-cell">'+returns+'</div>';
+    return '<span class="muted">—</span>';
+  }
+
+  // The "where are they now" marker, shown to everyone. A Head of Unit gets
+  // this one fact about units they do not oversee -- not the trainee's
+  // rotation history, which the server withholds.
+  function currentUnitCell(row){
+    var u = row.currentUnit || unitForDate(row.postings, todayISO());
+    if(!u) return '<span class="muted">—</span>';
+    return unitShortHtml(u);
+  }
+
   function renderConsultantRoster(){
     if(state.loading) return skeletonTable(5);
     var banner = renderScopeBanner();
     if(state.roster.length===0) return banner+'<div class="card"><div class="empty-state">No trainees’ entries are visible to you right now.</div></div>';
+    var teaching = seesTeachingColumns();
+    var full = !!(state.consultantScope && state.consultantScope.full);
+    var myUnits = (state.consultantScope && state.consultantScope.units) || [];
+    var unitName = myUnits.length===1 ? unitShort(myUnits[0]) : "your units";
     return banner+''+
-    '<div class="card"><div class="section-head"><h2>Trainee roster</h2><button class="btn btn-sm" id="export-my-entries">Export visible entries (CSV)</button></div>'+
-    '<div class="table-wrap"><table><thead><tr><th>Trainee</th><th>Role</th><th>Batch</th><th>Current unit</th><th>Total</th><th>Surgical</th><th>Other</th><th>Cases</th><th>Academic</th><th>Seminars</th><th>Last entry</th><th></th></tr></thead><tbody>'+
+    '<div class="card"><div class="section-head"><h2>Trainee roster</h2><button class="btn btn-sm" id="open-export">Export…</button></div>'+
+    (full ? '' : '<p class="muted" style="font-size:12.5px; margin:-6px 0 14px;">'+
+      'Everyone who has been, is, or is due to be posted to '+esc(unitName)+'. '+
+      'The counts and the case records are for their time in '+esc(unitName)+' only \u2014 not their whole logbook. '+
+      '\u201cCurrently in\u201d shows where they are today, which may be elsewhere.</p>')+
+    '<div class="table-wrap"><table class="roster-table"><thead><tr>'+
+      '<th>Trainee</th><th>Role</th><th>Batch</th><th>Currently in</th>'+
+      '<th>Total</th><th>Surgical</th><th>Other</th><th>Cases</th>'+
+      (teaching ? '<th>Academic</th><th>Seminars</th>' : '')+
+      '<th>'+(full ? 'Current posting' : 'Time in '+esc(unitName))+'</th><th></th>'+
+    '</tr></thead><tbody>'+
       state.roster.map(function(r){
         var s = computeStats(r.entries);
-        var last = r.entries.map(function(e){return e.date;}).sort().slice(-1)[0];
-        var currentUnit = unitForDate(r.user.postings, todayISO());
-        return '<tr><td>'+esc(r.user.displayName)+'</td><td><span class="chip chip-grey">'+esc(roleLabel(r.user.role))+'</span></td><td>'+esc(r.user.pgYear||"—")+'</td><td>'+(currentUnit?unitShortHtml(currentUnit):"—")+'</td><td class="tabular">'+s.total+'</td><td class="tabular">'+s.surgical+'</td><td class="tabular">'+s.other+'</td><td class="tabular">'+s["case"]+'</td><td class="tabular">'+s.academic+'</td><td class="tabular">'+s.seminar+'</td><td class="tabular">'+fmtDate(last)+'</td><td><button class="btn btn-sm" data-view-resident="'+esc(r.user.username)+'">View</button></td></tr>';
+        return '<tr>'+
+          '<td>'+esc(r.user.displayName)+'</td>'+
+          '<td><span class="chip chip-grey">'+esc(roleLabel(r.user.role))+'</span></td>'+
+          '<td>'+esc(r.user.pgYear||"—")+'</td>'+
+          '<td>'+currentUnitCell(r)+'</td>'+
+          '<td class="tabular">'+s.total+'</td><td class="tabular">'+s.surgical+'</td>'+
+          '<td class="tabular">'+s.other+'</td><td class="tabular">'+s["case"]+'</td>'+
+          (teaching ? '<td class="tabular">'+s.academic+'</td><td class="tabular">'+s.seminar+'</td>' : '')+
+          '<td>'+(full ? currentPostingCell(r.postings) : unitTimeCell(r.postings))+'</td>'+
+          '<td><button class="btn btn-sm" data-view-resident="'+esc(r.user.username)+'">View</button></td>'+
+        '</tr>';
       }).join("")+
     '</tbody></table></div></div>';
+  }
+
+  // The posting blocks behind everything on this page. For a Head of Unit
+  // these are their own unit's blocks only -- the server does not send the
+  // rest -- so the panel doubles as a statement of what the records below
+  // it cover.
+  function renderPostingBlocks(){
+    var list = state.detailPostings || [];
+    var full = !!(state.consultantScope && state.consultantScope.full);
+    if(!list.length){
+      return '<div class="card"><h2 style="font-size:15px;">Postings</h2>'+
+        '<p class="muted" style="font-size:13px;">No postings on file'+(full?'':' in your unit')+'.</p></div>';
+    }
+    var b = postingBlocks(list);
+    var rows = b.all.slice().reverse().map(function(p){
+      var state_ = p.startDate>b.today ? ["Upcoming","chip-teal"]
+        : (!p.endDate || p.endDate>=b.today) ? ["Current","chip-green"] : ["Completed","chip-grey"];
+      var end = (!p.endDate || p.endDate>b.today) ? b.today : p.endDate;
+      var served = p.startDate>b.today ? null : daysBetween(p.startDate, end);
+      return '<tr><td>'+unitShortHtml(p.unit)+'</td>'+
+        '<td class="tabular">'+fmtDate(p.startDate)+'</td>'+
+        '<td class="tabular">'+(p.endDate?fmtDate(p.endDate):'<span class="muted">open</span>')+'</td>'+
+        '<td class="tabular">'+(served!=null?humanSpan(served):'<span class="muted">—</span>')+'</td>'+
+        '<td><span class="chip '+state_[1]+'">'+state_[0]+'</span></td></tr>';
+    }).join("");
+    return '<div class="card"><div class="section-head"><h2 style="font-size:15px;">Postings'+
+        (full?'':' in your unit')+'</h2>'+
+        '<span class="muted" style="font-size:12.5px;">'+humanSpan(b.servedDays)+' served'+
+          (b.all.length>1 ? ' across '+b.all.length+' postings' : '')+'</span></div>'+
+      (full ? '' : '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+
+        'The records below cover these postings only.</p>')+
+      '<div class="table-wrap"><table><thead><tr><th>Unit</th><th>From</th><th>To</th><th>Served</th><th></th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table></div></div>';
   }
 
   function renderConsultantDetail(){
@@ -3117,7 +3535,8 @@
     renderScopeBanner()+
     '<button class="btn btn-sm" id="back-to-roster" style="margin-bottom:14px;">← Back to roster</button>'+
     '<div class="card"><h2>'+esc(state.detailUser.displayName)+'</h2><p class="muted">'+esc(state.detailUser.pgYear||"")+'</p></div>'+
-    renderStatsAndCharts(entries)+
+    renderPostingBlocks()+
+    renderStatsAndCharts(entries, { hideTeaching: !seesTeachingColumns() })+
     '<div class="card"><h2>Entries ('+entries.length+')</h2>'+
     renderEntriesList({
       uiKey: uiKey,
@@ -3489,6 +3908,22 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "6.0", date: "2026-09-26", title: "Roster, export builder and feedback",
+      note: "Three additions asked for by the department, plus two roster faults found while building them \u2014 one of them a consultant seeing more than their unit.",
+      changes: [
+        ["fixed", "<b>A Head of Unit could read a trainee’s work in every other unit.</b> Opening a trainee checked whether you were allowed to open them and then returned their entire logbook, every unit included. A unit’s consultant now sees only what was logged during that trainee’s postings in their unit — on the roster, on the trainee’s page, in the charts and in exports alike."],
+        ["fixed", "<b>“Current unit” in the roster has never shown anything.</b> The roster was built from a user record that does not carry postings, so the lookup always came back empty and every trainee showed a dash."],
+        ["changed", "<b>The roster now lists everyone who has ever been posted to your unit</b>, not only those who have logged something there. Someone who logged nothing during their rotation is exactly who a roster should surface, and a trainee due to arrive is listed as upcoming."],
+        ["changed", "<b>“Last entry” is replaced by time in the unit.</b> A Head of Unit sees how long each trainee has served in their unit, across repeat rotations, with a booked return shown underneath. The Head of Department and Course Coordinator see the posting the trainee is on today instead, wherever that is."],
+        ["added", "<b>“Currently in”</b> — where each trainee is posted today, shown to everyone. A Head of Unit is told that one fact about units they do not oversee, so the department always knows where people are, without being given anyone’s rotation history."],
+        ["added", "<b>A postings panel</b> on a trainee’s page, listing each block with its dates, time served and whether it is completed, current or upcoming. A Head of Unit sees their own unit’s blocks; the Head of Department and Course Coordinator see all of them."],
+        ["changed", "<b>The roster shows a unit consultant and Head of Unit the operative columns only</b> — Total, Surgical, Other and Cases. Academic and Seminars are shown to the Head of Department and Course Coordinator, who oversee the teaching record. The same applies to the tiles on a trainee’s page."],
+        ["added", "<b>An export builder.</b> Choose which entries go in the file — by type, date range, unit, trainee or sign-off state — and which of the 29 columns it has, with presets for an operative log, case write-ups and a teaching record. Columns always come out in the same order, so two exports of the same fields line up. Your choices are remembered in your browser."],
+        ["added", "<b>Feedback, complaints and suggestions</b>, read only by the Head of Department, the Course Coordinator and the Developer admin. Send it under your name and you can follow its status; send it anonymously and no author is stored at all, so nobody can look it up afterwards — and for the same reason nobody can reply to you."],
+        ["added", "Whoever handles a submission marks it Open, Being looked at or Closed, and can keep internal notes on it. The person who sent it sees the status, never the notes."],
+      ],
+    },
+    {
       version: "5.0", date: "2026-09-25", title: "Live-site bug audit",
       note: "Six defects found by testing the deployed site and reproduced against the same code before fixing.",
       changes: [
@@ -3581,6 +4016,158 @@
       }).join("")+'</ol></div>';
   }
 
+  /* ============================================================
+     FEEDBACK / COMPLAINTS / SUGGESTIONS
+
+     Anyone with an account can raise one; only Head of Department, Course
+     Coordinator and Developer can read them.
+
+     Anonymity here is real, not a display flag: an anonymous submission
+     stores no author at all, so nobody -- including a Developer with
+     database access -- can look up who sent it. The price is that an
+     anonymous submission cannot be tracked or followed up, which the form
+     says plainly before the choice is made rather than after.
+  ============================================================ */
+  var FEEDBACK_KINDS = [
+    ["suggestion","Suggestion","Something that would make this better."],
+    ["feedback","Feedback","How something is working in practice."],
+    ["complaint","Complaint","Something that needs to be looked into."],
+    ["bug","Something broken","The app itself is misbehaving."],
+  ];
+  var FEEDBACK_STATUS = {
+    open:        ["Open",        "chip-amber"],
+    in_progress: ["Being looked at","chip-teal"],
+    closed:      ["Closed",      "chip-green"],
+  };
+  function canReadFeedback(){
+    var caps = state.capabilities || {};
+    return !!(caps.isHod || caps.isCoordinator || caps.isDeveloper);
+  }
+  function feedbackStatusChip(s){
+    var d = FEEDBACK_STATUS[s] || FEEDBACK_STATUS.open;
+    return '<span class="chip '+d[1]+'">'+esc(d[0])+'</span>';
+  }
+  function feedbackKindLabel(k){
+    var m = FEEDBACK_KINDS.filter(function(x){ return x[0]===k; })[0];
+    return m ? m[1] : k;
+  }
+
+  function renderFeedbackCompose(){
+    var f = state.feedbackDraft;
+    return '<div class="card"><h2>Raise something</h2>'+
+      '<p class="muted" style="font-size:13px; margin-top:-6px; margin-bottom:14px;">'+
+        'Read only by the Head of Department, the Course Coordinator and the Developer admin. '+
+        'Not by your unit consultant, and not by anyone else on the roster.</p>'+
+      '<div class="field"><label>What kind of message is this?</label><div class="radio-group">'+
+        FEEDBACK_KINDS.map(function(k){
+          return radioCard("fb-kind",k[0],f.kind===k[0],k[1],k[2]);
+        }).join("")+
+      '</div></div>'+
+      '<div class="field"><label for="fb-subject">Subject</label>'+
+        '<input id="fb-subject" type="text" maxlength="200" placeholder="One line — what is this about?" value="'+esc(f.subject||"")+'"></div>'+
+      '<div class="field"><label for="fb-body">Message</label>'+
+        '<textarea id="fb-body" rows="6" placeholder="What happened, or what would you change?">'+esc(f.body||"")+'</textarea></div>'+
+      '<div class="field"><label>Send this as</label><div class="radio-group">'+
+        radioCard("fb-anon","named",!f.anonymous,"My name",
+          "They can come back to you for detail, and you can follow the status under “What I have raised”.")+
+        radioCard("fb-anon","anon",!!f.anonymous,"Anonymously",
+          "Your name is never stored, so nobody can look it up afterwards — and for the same reason nobody can reply to you, and you will not be able to track it.")+
+      '</div></div>'+
+      (f.anonymous ? '<div class="notice-banner"><span>Once you send this anonymously it leaves no link back to you at all. '+
+        'If you may want to add to it later, or want an answer, send it under your name instead.</span></div>' : '')+
+      '<div class="btn-row"><span></span>'+
+        '<button class="btn btn-primary" id="fb-send"'+(state.feedbackBusy?" disabled":"")+'>'+
+          (state.feedbackBusy?'<span class="spin"></span>Sending…':'Send')+'</button></div>'+
+    '</div>';
+  }
+
+  function renderFeedbackMine(){
+    var rows = state.feedbackMine;
+    if(rows==null) return "";
+    return '<div class="card"><h2 style="font-size:15px;">What I have raised</h2>'+
+      '<p class="muted" style="font-size:12.5px; margin-top:-6px; margin-bottom:12px;">'+
+        'Named submissions only — anything you sent anonymously does not appear here, by design.</p>'+
+      (rows.length ? '<div class="fb-list">'+rows.map(function(r){
+        return '<div class="fb-row"><div class="fb-main">'+
+          '<div class="fb-top"><span class="chip chip-grey">'+esc(feedbackKindLabel(r.kind))+'</span>'+
+            '<b>'+esc(r.subject)+'</b></div>'+
+          '<div class="fb-body muted">'+esc(r.body)+'</div>'+
+          '<div class="fb-meta muted">Sent '+fmtDateTime(r.createdAt)+'</div>'+
+        '</div><div>'+feedbackStatusChip(r.status)+'</div></div>';
+      }).join("")+'</div>'
+        : '<p class="muted" style="font-size:13px;">Nothing yet.</p>')+
+    '</div>';
+  }
+
+  function renderFeedbackInbox(){
+    var data = state.feedbackInbox;
+    if(!data) return '<div class="card"><div class="empty-state">Loading…</div></div>';
+    var rows = data.feedback || [], counts = data.counts || {};
+    var filter = state.feedbackFilter || "";
+    return '<div class="card"><div class="section-head"><h2>Inbox</h2>'+
+        '<div class="pick-row" style="margin:0;">'+
+          ['','open','in_progress','closed'].map(function(s){
+            var label = s ? FEEDBACK_STATUS[s][0] : "All";
+            var n = s ? (counts[s]||0) : (rows.length && !filter ? rows.length : (counts.open||0)+(counts.in_progress||0)+(counts.closed||0));
+            return '<button type="button" class="btn btn-sm'+(filter===s?" btn-primary":"")+'" data-fb-filter="'+s+'">'+esc(label)+' ('+n+')</button>';
+          }).join("")+
+        '</div></div>'+
+      (rows.length ? '<div class="fb-list">'+rows.map(function(r){
+        var open = state.feedbackOpenId===r.id;
+        return '<div class="fb-row'+(open?" open":"")+'">'+
+          '<div class="fb-main">'+
+            '<div class="fb-top">'+
+              '<span class="chip chip-grey">'+esc(feedbackKindLabel(r.kind))+'</span>'+
+              '<b>'+esc(r.subject)+'</b>'+
+              (r.anonymous ? '<span class="chip chip-violet">Anonymous</span>' : '')+
+            '</div>'+
+            '<div class="fb-body'+(open?"":" muted")+'">'+esc(r.body)+'</div>'+
+            '<div class="fb-meta muted">'+
+              (r.anonymous ? 'No author recorded' : esc(r.authorDisplayName||r.authorUsername))+
+              ' &middot; '+fmtDateTime(r.createdAt)+'</div>'+
+            (open ? renderFeedbackDetail(r) : '')+
+          '</div>'+
+          '<div class="fb-side">'+feedbackStatusChip(r.status)+
+            '<button class="btn btn-sm" data-fb-open="'+r.id+'">'+(open?"Close":"Handle")+'</button>'+
+          '</div>'+
+        '</div>';
+      }).join("")+'</div>'
+        : '<div class="empty-state">Nothing here.</div>')+
+    '</div>';
+  }
+
+  function renderFeedbackDetail(r){
+    var notes = (state.feedbackNotes||{})[r.id];
+    return '<div class="fb-detail">'+
+      '<div class="fb-actions">'+
+        Object.keys(FEEDBACK_STATUS).map(function(s){
+          return '<button type="button" class="btn btn-sm'+(r.status===s?" btn-primary":"")+'" data-fb-status="'+r.id+'" data-fb-value="'+s+'">'+esc(FEEDBACK_STATUS[s][0])+'</button>';
+        }).join("")+
+      '</div>'+
+      '<div class="fb-notes">'+
+        '<div class="exp-sub">Internal notes <span class="muted">— never shown to whoever sent this</span></div>'+
+        (notes==null ? '<p class="muted" style="font-size:13px;">Loading…</p>' :
+          (notes.length ? notes.map(function(n){
+            return '<div class="fb-note"><div class="fb-note-meta muted">'+
+              esc(n.actorDisplayName||n.actorUsername)+' &middot; '+fmtDateTime(n.createdAt)+
+              (n.action==="status" ? ' &middot; marked '+esc((FEEDBACK_STATUS[n.status]||["?"])[0]) : '')+
+              '</div>'+(n.note ? '<div>'+esc(n.note)+'</div>' : '')+'</div>';
+          }).join("") : '<p class="muted" style="font-size:13px;">No notes yet.</p>'))+
+        '<div style="display:flex; gap:8px; margin-top:10px;">'+
+          '<input type="text" id="fb-note-'+r.id+'" placeholder="Add a note…" style="flex:1;">'+
+          '<button class="btn btn-sm" data-fb-note="'+r.id+'">Add</button>'+
+        '</div>'+
+      '</div>'+
+    '</div>';
+  }
+
+  function renderFeedback(){
+    if(state.loading) return skeletonDash();
+    return renderFeedbackCompose()+
+      (canReadFeedback() ? renderFeedbackInbox() : "")+
+      renderFeedbackMine();
+  }
+
   function renderAbout(){
     return ''+
     '<div class="about-hero"><span class="hero-art a-theatre"></span>'+
@@ -3649,10 +4236,11 @@
     else if(state.view==="manage-users") inner = renderManageUsers();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
+    else if(state.view==="feedback") inner = renderFeedback();
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
       + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
-      + renderSubmitDialog() + renderDecideDialog();
+      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog();
     // THE GATE. render() runs on every state change -- every keystroke in a
     // filter, every checkbox -- and replaces the entire DOM, so an entry
     // animation attached to these elements would re-fire constantly and the
@@ -4162,6 +4750,160 @@
     var expE = el("export-entries"); if(expE) expE.onclick = exportEntriesCSV;
     var expU = el("export-users"); if(expU) expU.onclick = exportUsersCSV;
     var expMine = el("export-my-entries"); if(expMine) expMine.onclick = exportMyEntriesCSV;
+
+    /* ---------------- export builder ---------------- */
+    var openExp = el("open-export"); if(openExp) openExp.onclick = async function(){
+      state.exportDialog = { sel: loadExportSel(), options: null };
+      render();
+      try{ state.exportDialog.options = await xOptions(); }
+      catch(e){ state.exportDialog = null; toast(e.message||"Could not open the export options."); }
+      render();
+    };
+    function expSel(){ return state.exportDialog && state.exportDialog.sel; }
+    // Read the two date inputs back before ANY re-render: they are plain
+    // DOM, not kept in state, so a render triggered by a checkbox would
+    // otherwise wipe a date the user had just typed.
+    function syncExpDates(){
+      var sel = expSel(); if(!sel) return;
+      var f = el("exp-from"), t = el("exp-to");
+      if(f) sel.from = f.value || "";
+      if(t) sel.to = t.value || "";
+    }
+    document.querySelectorAll("[data-exp-preset]").forEach(function(b){
+      b.onclick = function(){
+        syncExpDates();
+        var k = b.getAttribute("data-exp-preset"), p = EXPORT_PRESETS[k], sel = expSel();
+        sel.types = p.types.slice();
+        sel.columns = p.columns.slice();
+        render();
+      };
+    });
+    document.querySelectorAll("[data-exp-group]").forEach(function(cb){
+      cb.onchange = function(){
+        syncExpDates();
+        var g = cb.getAttribute("data-exp-group"), v = cb.value, sel = expSel();
+        sel[g] = sel[g] || [];
+        var i = sel[g].indexOf(v);
+        if(cb.checked){ if(i===-1) sel[g].push(v); } else if(i!==-1){ sel[g].splice(i,1); }
+        render();
+      };
+    });
+    document.querySelectorAll("[data-exp-col]").forEach(function(cb){
+      cb.onchange = function(){
+        syncExpDates();
+        var sel = expSel(), k = cb.getAttribute("data-exp-col");
+        var all = (state.exportDialog.options.columns||[]).map(function(c){ return c.key; });
+        var i = sel.columns.indexOf(k);
+        if(cb.checked){ if(i===-1) sel.columns.push(k); } else if(i!==-1){ sel.columns.splice(i,1); }
+        render();
+      };
+    });
+    document.querySelectorAll("[data-exp-cols]").forEach(function(b){
+      b.onclick = function(){
+        syncExpDates();
+        var sel = expSel(), all = (state.exportDialog.options.columns||[]).map(function(c){ return c.key; });
+        sel.columns = b.getAttribute("data-exp-cols")==="all" ? all.slice() : [];
+        render();
+      };
+    });
+    document.querySelectorAll("[data-export-cancel]").forEach(function(b){
+      b.onclick = function(){ state.exportDialog = null; render(); };
+    });
+    var expOv = document.querySelector("[data-export-overlay]");
+    if(expOv) expOv.onclick = function(ev){ if(ev.target===expOv){ state.exportDialog = null; render(); } };
+    var expGo = document.querySelector("[data-export-go]");
+    if(expGo) expGo.onclick = function(){
+      syncExpDates();
+      var d = state.exportDialog;
+      saveExportSel(d.sel);
+      window.location.href = exportURL(d.sel);
+      state.exportDialog = null;
+      toast("Building your CSV…");
+      render();
+    };
+
+    /* ---------------- feedback ---------------- */
+    document.querySelectorAll('input[name="fb-kind"]').forEach(function(r){
+      r.onchange = function(){ syncFeedbackDraft(); state.feedbackDraft.kind = r.value; render(); };
+    });
+    document.querySelectorAll('input[name="fb-anon"]').forEach(function(r){
+      r.onchange = function(){ syncFeedbackDraft(); state.feedbackDraft.anonymous = (r.value==="anon"); render(); };
+    });
+    // Subject and message live in the DOM, not in state, so anything that
+    // re-renders the page has to lift them out first -- the same rule the
+    // entry wizard follows for its free-text fields.
+    function syncFeedbackDraft(){
+      var s1 = el("fb-subject"), b1 = el("fb-body");
+      if(s1) state.feedbackDraft.subject = s1.value;
+      if(b1) state.feedbackDraft.body = b1.value;
+    }
+    var fbSend = el("fb-send"); if(fbSend) fbSend.onclick = async function(){
+      syncFeedbackDraft();
+      var d = state.feedbackDraft;
+      if(!(d.subject||"").trim()){ toast("Give it a one-line subject."); return; }
+      if(!(d.body||"").trim()){ toast("Say what you would like to raise."); return; }
+      state.feedbackBusy = true; render();
+      try{
+        await fbCreate({ kind:d.kind, subject:d.subject, body:d.body, anonymous:d.anonymous });
+        var wasAnon = d.anonymous;
+        state.feedbackDraft = { kind:"suggestion", subject:"", body:"", anonymous:false };
+        state.feedbackBusy = false;
+        try{ state.feedbackMine = await fbMine(); }catch(e){}
+        if(canReadFeedback()){ try{ state.feedbackInbox = await fbInbox(state.feedbackFilter); }catch(e){} }
+        await refreshFeedbackBadge();
+        toast(wasAnon ? "Sent anonymously. It carries no link back to you."
+                      : "Sent. You can follow it under “What I have raised”.");
+        render();
+      }catch(e){ state.feedbackBusy=false; toast(e.message||"Could not send that."); render(); }
+    };
+    document.querySelectorAll("[data-fb-filter]").forEach(function(b){
+      b.onclick = async function(){
+        syncFeedbackDraft();
+        state.feedbackFilter = b.getAttribute("data-fb-filter");
+        state.feedbackOpenId = null;
+        try{ state.feedbackInbox = await fbInbox(state.feedbackFilter); }catch(e){}
+        render();
+      };
+    });
+    document.querySelectorAll("[data-fb-open]").forEach(function(b){
+      b.onclick = async function(){
+        syncFeedbackDraft();
+        var id = parseInt(b.getAttribute("data-fb-open"),10);
+        if(state.feedbackOpenId===id){ state.feedbackOpenId=null; render(); return; }
+        state.feedbackOpenId = id; render();
+        try{
+          var d = await fbDetail(id);
+          state.feedbackNotes[id] = d.notes || [];
+        }catch(e){ state.feedbackNotes[id] = []; toast(e.message||"Could not load that."); }
+        render();
+      };
+    });
+    document.querySelectorAll("[data-fb-status]").forEach(function(b){
+      b.onclick = async function(){
+        syncFeedbackDraft();
+        var id = parseInt(b.getAttribute("data-fb-status"),10);
+        try{
+          await fbSetStatus(id, b.getAttribute("data-fb-value"));
+          state.feedbackInbox = await fbInbox(state.feedbackFilter);
+          try{ state.feedbackNotes[id] = (await fbDetail(id)).notes || []; }catch(e){}
+          await refreshFeedbackBadge();
+          render();
+        }catch(e){ toast(e.message||"Could not update that."); }
+      };
+    });
+    document.querySelectorAll("[data-fb-note]").forEach(function(b){
+      b.onclick = async function(){
+        syncFeedbackDraft();
+        var id = parseInt(b.getAttribute("data-fb-note"),10);
+        var inp = el("fb-note-"+id), note = inp ? inp.value : "";
+        if(!note.trim()){ toast("Write the note first."); return; }
+        try{
+          state.feedbackNotes[id] = await fbAddNote(id, note);
+          toast("Note added.");
+          render();
+        }catch(e){ toast(e.message||"Could not add that."); }
+      };
+    });
 
     // developer - create user
     var toggleCreateBtn = el("toggle-create-user"); if(toggleCreateBtn) toggleCreateBtn.onclick = function(){
