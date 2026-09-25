@@ -559,6 +559,7 @@
   async function aRequestUnlock(id, comment){ return await api("POST","/entries/"+id+"/request-unlock",{comment:comment}); }
   async function aHistory(id){ return (await api("GET","/entries/"+id+"/approvals")).approvals; }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
+  async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
   async function dAddRoleAssignment(data){ return (await api("POST","/role-assignments",{
     consultantUsername:data.consultantUsername, role:data.role, unit:data.unit, startAt:data.startAt, endAt:data.endAt
@@ -1576,7 +1577,12 @@
     if(!confirm("Remove this site? Its procedure list goes with it. Already-logged entries keep the old site name as plain text.")) return;
     var newCategories = state.config.categories.filter(function(c){ return c.key!==key; });
     try{
-      await dUpdateConfig({ categories: newCategories });
+      // null drops just this site's list server-side; without it the removed
+      // site's procedures sat in the config forever and came back if anyone
+      // ever re-created a site with the same key.
+      var drop = {}; drop[key] = null;
+      await dUpdateConfig({ categories: newCategories, procedures: drop });
+      delete state.config.procedures[key];
       state.config.categories = newCategories;
       if(state.devListDraft.selectedCat===key){ state.devListDraft.selectedCat = newCategories.length ? newCategories[0].key : null; }
       toast("Site removed.");
@@ -3375,6 +3381,13 @@
         '<input type="text" id="newcat-name" placeholder="New site name…" style="flex:1;">'+
         '<button class="btn btn-primary btn-sm" id="add-category">Add site</button>'+
       '</div>'+
+      // Repair path for catalogues that lost their lists to the old
+      // whole-map overwrite. Adds back only what is missing, so a site the
+      // department has curated keeps everything it already has.
+      '<div style="border-top:1px dashed var(--line); margin-top:14px; padding-top:12px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">'+
+        '<span class="muted" style="font-size:12.5px; max-width:60ch;">Missing procedures a site used to have? This puts the shipped lists back for every site, without removing anything you have added.</span>'+
+        '<button class="btn btn-sm" id="restore-procs">Restore default procedure lists</button>'+
+      '</div>'+
     '</div>'+
     (selCat ? (
     '<div class="card"><h2 style="font-size:15px;">Procedures in “'+esc(selCat.name)+'”</h2>'+
@@ -3461,6 +3474,113 @@
   /* ============================================================
      RENDER: ABOUT / ROADMAP
   ============================================================ */
+  /* ============================================================
+     CHANGELOG
+
+     Hardcoded rather than stored in the config table on purpose. A
+     changelog describes the BUILD -- the code the browser is actually
+     running -- so keeping it in the database would let the two drift:
+     restore an older database and the log would claim features the code
+     no longer has. It ships with the file it describes, so it cannot lie.
+
+     Newest first. Dates are build dates, not deployment dates -- when a
+     release reached the live site is up to whoever deployed it.
+     Types: "added" | "changed" | "fixed".
+  ============================================================ */
+  var CHANGELOG = [
+    {
+      version: "5.0", date: "2026-09-25", title: "Live-site bug audit",
+      note: "Six defects found by testing the deployed site and reproduced against the same code before fixing.",
+      changes: [
+        ["fixed", "<b>Procedure lists could be wiped by editing one site.</b> Saving a single site’s procedures under Manage Lists replaced the whole procedure map and deleted every other site’s list. This had already happened on the live site: 63 of 65 procedures were gone, leaving nose, throat, head-and-neck, skull-base and trauma cases impossible to log. The server now merges each site separately."],
+        ["added", "<b>Restore default procedure lists</b> under Manage Lists — puts back any shipped procedure a site has lost, without removing anything the department has added itself."],
+        ["fixed", "<b>A signed-off record could be permanently deleted</b> by a Developer, taking the consultant’s signature and the whole sign-off history with it. Now refused for everyone; the record has to be released first."],
+        ["fixed", "<b>Re-sending a record already awaiting sign-off silently moved it to a different consultant</b>, and the first consultant’s queue lost it with no trace. Re-sending to the same consultant is now refused; a genuine change of approver is recorded as a reassignment naming both."],
+        ["fixed", "<b>Records logged on a date with no posting were invisible to oversight.</b> They carry no unit, so they never appeared in the overdue panel and could not be signed off by a Head of Unit acting as delegate. Overdue ones now surface to anyone with an oversight role."],
+        ["fixed", "“Ask to unlock” accepted a blank reason, so it reached a consultant as a bare flag with nothing to act on. A reason is now required, as it already was for “Ask for changes”."],
+        ["fixed", "Pressing Enter in the username box did nothing — only the password box submitted. Both now work, on sign-in and Developer sign-in."],
+        ["fixed", "Removing a site left its procedure list behind in the configuration, and it reappeared if a site with the same key was ever created again."],
+      ],
+    },
+    {
+      version: "4.0", date: "2026-09-25", title: "Consultant sign-off",
+      note: "Operative records and case write-ups are attested by a named consultant. Academic and Seminar entries are untouched — they are the trainee’s own attendance record and nobody signs for them.",
+      changes: [
+        ["added", "<b>Send for sign-off.</b> A trainee finalises a record and nominates the consultant who should sign it. A linked Interesting Case and its parent operation are two independent approvals — signing one never signs the other."],
+        ["added", "<b>Case Sign-off queue</b> for consultants: approve, or send back with a required note explaining what needs changing."],
+        ["added", "<b>Approved records are locked.</b> The consultant attested to one specific version, so the trainee cannot edit or delete it afterwards. They can ask for an unlock; the approver (or a Head of Unit / Coordinator / HOD) releases it."],
+        ["added", "<b>Bulk send and bulk sign-off</b>, up to 200 records at a time — the back-catalogue path, so a department’s existing history can be opted in gradually rather than landing in every consultant’s queue on day one."],
+        ["added", "<b>Sign-off counters</b> on the trainee dashboard and the entries list, plus a full per-record sign-off history."],
+        ["added", "<b>Escalation after 7 days.</b> Anything waiting longer shows on the dashboard of every Head of Unit, Coordinator and HOD with oversight of that unit, so one consultant being away cannot stall a trainee’s logbook."],
+        ["changed", "Editing a signed record in a way that changes the case itself returns it to “awaiting sign-off” automatically. Comments and write-up status do not."],
+      ],
+    },
+    {
+      version: "3.0", date: "2026-09-23", title: "Interface review and 23 fixes",
+      note: "A pass over the whole site for appearance, motion and defects.",
+      changes: [
+        ["fixed", "<b>The row action menu was 94% invisible</b> — the card it sat inside was clipping it, so only a sliver of the menu could ever be seen."],
+        ["fixed", "<b>Adding one procedure deleted every other site’s list</b> in the browser. (The server-side half of this same bug was not caught until 5.0 — see above.)"],
+        ["fixed", "<b>A draft could be read by anyone who guessed its number.</b> Entry ids run in sequence, so the department’s unfinished entries were enumerable. A draft now belongs to its author alone."],
+        ["fixed", "<b>A unit name could inject code into the consultant scope banner.</b> Closed."],
+        ["fixed", "<b>A rejected profile edit still saved part of itself.</b> The refused request left its privileged writes behind for the next request to commit."],
+        ["fixed", "<b>The Consultant dashboard was stuck on “Loading…”</b> for anyone who was a Head of Department or Course Coordinator."],
+        ["fixed", "<b>A resident could hide their logbook</b> by logging entries against a unit they were never posted to. The unit is now stamped from the posting that covers the entry’s date and cannot be chosen by hand."],
+        ["fixed", "Contrast failures throughout, including a focus ring that was invisible against its own button, and unreadable placeholder text."],
+        ["added", "<b>Dark mode.</b> It had been written but was unreachable — nothing ever switched it on. There is now a toggle in the top bar cycling automatic / light / dark."],
+        ["added", "Transitions and entry animations, with a full <i>reduced motion</i> path for anyone whose system asks for one."],
+        ["added", "Loading skeletons in place of bare “Loading…” text."],
+        ["added", "A Developer report of records pointing at units the department no longer has, and of records logged with no posting at all."],
+      ],
+    },
+    {
+      version: "2.0", date: "2026-09-23", title: "Artwork, icons and palette",
+      changes: [
+        ["added", "<b>A drawn icon set</b> — nineteen icons rebuilt on a single grid so they sit at a consistent weight beside each other."],
+        ["added", "<b>A photographic sign-in screen</b>, served from this server rather than fetched from outside it."],
+        ["added", "<b>Anatomical watercolour plates</b> across the dashboard, site categories and empty states."],
+        ["changed", "<b>The colour scheme is now taken from the artwork</b> rather than the artwork being recoloured to match a palette chosen beforehand."],
+      ],
+    },
+    {
+      version: "1.0", date: "2026-09-21", title: "First working logbook",
+      changes: [
+        ["added", "Five entry types: Surgical Procedure, Other Procedure, Interesting Case, Academic Participation, Seminar / Presentation."],
+        ["added", "Date-based unit postings, so every entry permanently carries the unit that was active on its date."],
+        ["added", "Resident, Consultant and Developer views, with Head of Unit / Course Coordinator / HOD appointments."],
+        ["added", "Progress statistics, CSV export, and a full per-entry edit history."],
+      ],
+    },
+  ];
+  var APP_VERSION = CHANGELOG[0].version;
+
+  var CHANGE_TAG = {
+    added:   ["New",     "chip-green"],
+    changed: ["Changed", "chip-teal"],
+    fixed:   ["Fixed",   "chip-amber"],
+  };
+
+  function renderChangelog(){
+    return '<div class="card"><div class="section-head"><h2>Updates</h2>'+
+      '<span class="chip chip-grey">Running version '+esc(APP_VERSION)+'</span></div>'+
+      '<p class="muted" style="font-size:12.5px; margin:-6px 0 16px;">Every release, newest first, and what changed in it. '+
+        'Dates are when the release was built — ask your Developer admin when it reached this server.</p>'+
+      '<ol class="chl">'+CHANGELOG.map(function(r){
+        return '<li class="chl-rel">'+
+          '<div class="chl-head">'+
+            '<span class="chl-ver">v'+esc(r.version)+'</span>'+
+            '<b>'+esc(r.title)+'</b>'+
+            '<span class="chl-date tabular">'+fmtDate(r.date)+'</span>'+
+          '</div>'+
+          (r.note ? '<p class="chl-note muted">'+r.note+'</p>' : '')+
+          '<ul class="chl-items">'+r.changes.map(function(c){
+            var tag = CHANGE_TAG[c[0]] || CHANGE_TAG.changed;
+            return '<li><span class="chip '+tag[1]+' chl-tag">'+tag[0]+'</span><span>'+c[1]+'</span></li>';
+          }).join("")+'</ul>'+
+        '</li>';
+      }).join("")+'</ol></div>';
+  }
+
   function renderAbout(){
     return ''+
     '<div class="about-hero"><span class="hero-art a-theatre"></span>'+
@@ -3470,6 +3590,7 @@
     '<div class="card"><h2>What this is</h2>'+
       '<p class="muted">A shared ENT logbook — a Dashboard homepage, five entry types (Surgical Procedure, Other Procedure, Interesting Case, Academic Participation, Seminar / Presentation), date-based unit postings, and role-based views (Resident / Consultant / Developer) — running on its own server and database, independent of any third-party platform.</p>'+
     '</div>'+
+    renderChangelog()+
     '<div class="card"><h2 style="font-size:15px;">Still de-identified — on purpose</h2>'+
       '<p class="muted">Every entry is logged by Hospital Number only, never a patient name. Passwords are hashed on the server (never sent or stored as a reversible form), sessions are httpOnly cookies that can be revoked instantly by a Developer admin, and login attempts are rate-limited. That said: hosting a real department’s hospital numbers still deserves an explicit conversation with your institution’s data-governance or information-security office before this goes past a small pilot with dummy data — technical security and institutional sign-off are two different checkboxes.</p>'+
     '</div>'+
@@ -3481,8 +3602,8 @@
     '</div>'+
     '<div class="card roadmap"><h2>Known limitations, on purpose</h2><ul>'+
       '<li><b>De-identified only.</b> No patient-name field anywhere — log by Hospital Number. Please don’t work around that.</li>'+
-      '<li><b>Consultants currently see progress only.</b> Verification / sign-off on individual entries is a planned next step.</li>'+
-      '<li><b>“Procedure performed” is filtered by the Site you pick.</b> If a case genuinely spans sites, add the extra procedure by free text — it will show up correctly in every count either way.</li>'+
+      '<li><b>“Procedure performed” is filtered by the Site you pick</b>, and the list is fixed — there is no free-text box. A case that genuinely spans sites gets a second site block (“Add another site”), each with its own procedures, laterality and role. If a procedure you need is missing from a site, ask your Developer admin to add it under Manage Lists.</li>'+
+      '<li><b>Consultants sign off records, they do not rewrite them.</b> A consultant can approve a record or send it back with a note; correcting it is the trainee’s job, which is what keeps the logbook the trainee’s own account of the case.</li>'+
       '<li><b>Password resets are manual.</b> A request just joins the Developer’s queue; there’s no email sending configured, so a resident should also mention it in person if it’s urgent.</li>'+
       '<li><b>Appointment status is computed at render time</b> — correct whenever the page is open, but nobody is proactively notified when one starts or lapses.</li>'+
       '<li><b>No automatic off-site backups yet.</b> The database is one file on the server’s disk — whoever hosts this should schedule regular backups (see the deployment README).</li>'+
@@ -3597,14 +3718,24 @@
     var btnLogin = el("btn-login"); if(btnLogin) btnLogin.onclick = function(){
       doLogin(el("login-username").value, el("login-password").value);
     };
-    var pwField = el("login-password"); if(pwField) pwField.addEventListener("keydown", function(ev){ if(ev.key==="Enter") el("btn-login").click(); });
+    // Enter submits from EITHER field. There is no <form> anywhere in this
+    // app (every screen is innerHTML-rendered), so nothing gives implicit
+    // submit for free -- and typing a username then hitting Enter, which is
+    // what most people do, did nothing at all.
+    ["login-username","login-password"].forEach(function(id){
+      var f = el(id);
+      if(f) f.addEventListener("keydown", function(ev){ if(ev.key==="Enter"){ ev.preventDefault(); el("btn-login").click(); } });
+    });
 
     var goDevLogin = el("go-devlogin"); if(goDevLogin) goDevLogin.onclick = function(){ state.authMode="dev-login"; state.authError=""; render(); };
     var goLoginFromDev = el("go-login-from-dev"); if(goLoginFromDev) goLoginFromDev.onclick = function(){ state.authMode="login"; state.authError=""; render(); };
     var btnDevLogin = el("btn-devlogin"); if(btnDevLogin) btnDevLogin.onclick = function(){
       doLogin(el("dev-username").value, el("dev-password").value, "developer");
     };
-    var devPwField = el("dev-password"); if(devPwField) devPwField.addEventListener("keydown", function(ev){ if(ev.key==="Enter") el("btn-devlogin").click(); });
+    ["dev-username","dev-password"].forEach(function(id){
+      var f = el(id);
+      if(f) f.addEventListener("keydown", function(ev){ if(ev.key==="Enter"){ ev.preventDefault(); el("btn-devlogin").click(); } });
+    });
 
     var goForgot = el("go-forgot"); if(goForgot) goForgot.onclick = function(){ state.authMode="forgot"; state.authError=""; render(); };
     var goLoginFromForgot = el("go-login-from-forgot"); if(goLoginFromForgot) goLoginFromForgot.onclick = function(){ state.authMode="login"; state.authError=""; render(); };
@@ -4099,6 +4230,21 @@
     });
     var addCat = el("add-category"); if(addCat) addCat.onclick = function(){
       addCategory(el("newcat-name").value, el("newcat-color").value);
+    };
+    var restoreProcs = el("restore-procs"); if(restoreProcs) restoreProcs.onclick = async function(){
+      restoreProcs.disabled = true; restoreProcs.innerHTML = '<span class="spin"></span>Restoring…';
+      try{
+        var r = await dRestoreProcedureDefaults();
+        state.config = r.config;
+        var sites = Object.keys(r.restored || {});
+        var n = sites.reduce(function(a,k){ return a + r.restored[k]; }, 0);
+        toast(n ? "Restored "+n+" procedure"+(n===1?"":"s")+" across "+sites.length+" site"+(sites.length===1?"":"s")+"."
+                : "Nothing missing — every default is already in your lists.");
+        render();
+      }catch(e){
+        restoreProcs.disabled = false; restoreProcs.textContent = "Restore default procedure lists";
+        toast(e.message || "Could not restore those.");
+      }
     };
     document.querySelectorAll("[data-add-proc]").forEach(function(b){
       b.onclick = function(){
