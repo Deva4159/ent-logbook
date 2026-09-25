@@ -83,8 +83,18 @@ CREATE TABLE IF NOT EXISTS entries (
   -- away. A draft is visible only to its own author -- excluded from the
   -- roster, stats and CSV export queries every consultant/HOD-facing
   -- endpoint runs (see list_entries/roster/stats/export in api.py).
-  status                TEXT NOT NULL DEFAULT 'final' CHECK (status IN ('draft','final'))
+  status                TEXT NOT NULL DEFAULT 'final' CHECK (status IN ('draft','final')),
+  -- Consultant sign-off. A CACHE of entry_approvals below, maintained by the
+  -- same code that writes it -- the log is the truth. Cached because the
+  -- entries list and the approval queue would otherwise each need a join and
+  -- a walk of the log per row.
+  approval_state        TEXT NOT NULL DEFAULT 'not_submitted',
+  -- Who it was sent to. NOT consultant_username: that is free text plus an
+  -- optional account, is frequently NULL, and an Interesting Case has no
+  -- consultant field at all. The PG nominates a real account at submit.
+  approver_username     TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_entries_approver ON entries(approver_username, approval_state);
 CREATE INDEX IF NOT EXISTS idx_entries_author ON entries(author_username);
 CREATE INDEX IF NOT EXISTS idx_entries_unit ON entries(unit);
 
@@ -149,3 +159,31 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   attempted_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_key ON login_attempts(key, attempted_at);
+
+
+-- Append-only record of every approval event, mirroring entry_edits.
+--
+-- Deliberately NOT a boolean on entries that flips: flipping it back when a
+-- record is re-edited destroys the evidence that approval ever happened. If
+-- this logbook is put in front of an examiner, "was this case signed off, by
+-- whom, and of which version" has to remain answerable after the entry has
+-- been edited twice since.
+--
+-- edits_at_action is MAX(entry_edits.id) at the instant of the action. That
+-- is what pins an approval to a *version* of the entry, so "approved, then
+-- materially changed" is exact rather than inferred.
+CREATE TABLE IF NOT EXISTS entry_approvals (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id          INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  -- submitted | approved | changes_requested | withdrawn | released
+  -- | unlock_requested | reopened_by_edit
+  action            TEXT NOT NULL,
+  actor_username    TEXT NOT NULL,
+  actor_role        TEXT,            -- frozen at the time of the action
+  approver_username TEXT,            -- who it was sent to (on 'submitted')
+  on_behalf_of      TEXT,            -- set when a HoU/HOD acts for an absent consultant
+  comment           TEXT,
+  edits_at_action   INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entry_approvals_entry ON entry_approvals(entry_id);

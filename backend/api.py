@@ -244,6 +244,8 @@ def entry_row_to_dict(row):
         "venue": d["venue"],
         "details": d["details"],
         "paperStatus": d.get("paper_status"),
+        "approvalState": d.get("approval_state") or "not_submitted",
+        "approverUsername": d.get("approver_username"),
         "status": d.get("status") or "final",
     }
 
@@ -251,6 +253,105 @@ def entry_row_to_dict(row):
 # Fields excluded from the edit-history diff: identity/authorship never
 # changes, and createdAt is set once at insert and never touched by an edit.
 ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt"}
+
+# ---------------------------------------------------------- approvals
+# Only operative records and case write-ups are signed off. Academic and
+# Seminar entries are the trainee's own attendance record; nobody attests
+# to them.
+APPROVABLE_TYPES = {"surgical", "other", "case"}
+APPROVAL_STATES = {"not_submitted", "pending", "changes_requested", "approved"}
+
+# Changing one of these invalidates an approval, because it changes what the
+# consultant attested to. Everything else does not.
+#
+# This list is load-bearing, not cosmetic. paperStatus is PATCHed straight
+# from a dropdown in the entries list -- if *any* edit reopened approval, a
+# case would bounce back to the consultant every time a PG ticked off their
+# write-up, and the queue would become noise within a week.
+MATERIAL_FIELDS = {
+    "procedureBlocks",          # site, procedures, laterality, entrustment level
+    "date", "unit",
+    "consultant", "consultantUsername",
+    "diagnoses", "diagnosesSecondary", "comorbidities",
+    "hospitalNumber", "age", "sex",
+    "setting", "otherSettingType",
+    "history", "examination", "caseReport",   # the substance of a case write-up
+}
+# Deliberately NOT material: comments, paperStatus, assistants, linkedFromId.
+# assistants is the closest call -- it is a factual record of who was in the
+# room -- but changing it does not alter what was attested to.
+
+
+def approval_escalation_days():
+    try:
+        v = int(get_config().get("approvalEscalationDays", 7))
+        return v if v > 0 else 7
+    except (TypeError, ValueError):
+        return 7
+
+
+def _max_edit_id(db, entry_id):
+    """MAX(entry_edits.id) right now. Stored on each approval row so an
+    approval is pinned to a *version* of the entry rather than to the entry."""
+    r = db.execute("SELECT COALESCE(MAX(id), 0) m FROM entry_edits WHERE entry_id = ?", (entry_id,)).fetchone()
+    return r["m"] if r else 0
+
+
+def _log_approval(db, entry_id, action, actor, comment=None,
+                  approver_username=None, on_behalf_of=None):
+    db.execute(
+        "INSERT INTO entry_approvals (entry_id, action, actor_username, actor_role,"
+        " approver_username, on_behalf_of, comment, edits_at_action, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (entry_id, action, actor["username"], actor.get("role"),
+         approver_username, on_behalf_of, _text(comment, 4000),
+         _max_edit_id(db, entry_id), datetime.datetime.utcnow().isoformat() + "Z"),
+    )
+
+
+def _delegate_for(user, entry_row):
+    """A Head of Unit for this entry's unit, a Coordinator or the HOD may act
+    when the nominated consultant cannot. Without this, one consultant
+    leaving the department strands every pending record naming them, for
+    good. Recorded as a delegate action, never as the consultant's own.
+    """
+    if user["role"] != "consultant":
+        return False
+    caps = user_capabilities(user["username"])
+    if caps["isHod"] or caps["isCoordinator"]:
+        return True
+    if caps["isHeadOfUnit"]:
+        return entry_row["unit"] in consultant_scope(user["username"])["units"]
+    return False
+
+
+def _can_decide(user, entry_row):
+    """(allowed, on_behalf_of). A trainee can never approve -- not their own
+    record, not anyone's, regardless of who is set as approver."""
+    if user["role"] != "consultant":
+        return False, None
+    if entry_row["approver_username"] == user["username"]:
+        return True, None
+    if _delegate_for(user, entry_row):
+        return True, entry_row["approver_username"]
+    return False, None
+
+
+def _valid_approver(db, username):
+    if not isinstance(username, str) or not username:
+        return None
+    return db.execute(
+        "SELECT username FROM users WHERE username = ? AND role = 'consultant'"
+        " AND active = 1 AND approval_status = 'approved'", (username,)
+    ).fetchone()
+
+
+def _set_approval(db, entry_id, state, approver=None):
+    if approver is None:
+        db.execute("UPDATE entries SET approval_state = ? WHERE id = ?", (state, entry_id))
+    else:
+        db.execute("UPDATE entries SET approval_state = ?, approver_username = ? WHERE id = ?",
+                   (state, approver, entry_id))
 
 PAPER_STATUSES = {"not_done", "in_progress", "done"}
 
@@ -713,11 +814,17 @@ def get_entry(entry_id):
 @login_required()
 def delete_entry(entry_id):
     db = get_db()
-    row = db.execute("SELECT author_username FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    row = db.execute("SELECT author_username, approval_state FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not row:
         return jsonify({"error": "not_found"}), 404
     if row["author_username"] != g.user["username"] and g.user["role"] != "developer":
         return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] == "approved" and g.user["role"] != "developer":
+        return jsonify({
+            "error": "approved_record_locked",
+            "detail": "This record has been approved and cannot be deleted. Ask the "
+                      "approving consultant to release it first.",
+        }), 409
     db.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
     db.commit()
     return jsonify({"ok": True})
@@ -740,6 +847,24 @@ def update_entry(entry_id):
         return jsonify({"error": "forbidden"}), 403
 
     body = request.get_json(force=True, silent=True) or {}
+    # An approved record is locked. The consultant attested to a specific
+    # version of it; letting the author rewrite it underneath that signature
+    # is the whole reason the lock exists. Only the approver or a delegate
+    # can release it, and releasing returns it to changes_requested so the
+    # author knows it needs resubmitting.
+    #
+    # paperStatus is exempt: it is the PG's own write-up tracker, set from a
+    # dropdown in the entries list, and has nothing to do with what was
+    # signed off. Locking it would make the tracker unusable on exactly the
+    # cases most likely to become papers.
+    if (existing["approval_state"] == "approved"
+            and existing["author_username"] == g.user["username"]
+            and set(body) - {"paperStatus"}):
+        return jsonify({
+            "error": "approved_record_locked",
+            "detail": "This record has been approved and is locked. Ask the approving "
+                      "consultant to release it before editing.",
+        }), 409
     entry_type = body.get("entryType") or existing["entry_type"]
     if entry_type not in ENTRY_TYPES:
         return jsonify({"error": "Unknown entry type."}), 400
@@ -873,6 +998,16 @@ def update_entry(entry_id):
             "INSERT INTO entry_edits (entry_id, edited_by, edited_at, changes) VALUES (?,?,?,?)",
             (entry_id, g.user["username"], datetime.datetime.utcnow().isoformat() + "Z", json.dumps(changes)),
         )
+        # A material edit to a record that was already out for review, or
+        # already approved, sends it back automatically. Not via a dialog:
+        # a record must never sit there claiming an approval it no longer
+        # has while the author decides whether to resubmit.
+        material = sorted(set(changes) & MATERIAL_FIELDS)
+        if material and existing["approval_state"] in ("pending", "approved"):
+            _log_approval(db, entry_id, "reopened_by_edit", g.user,
+                          comment="Material change to: " + ", ".join(material))
+            _set_approval(db, entry_id, "pending")
+            after["approvalState"] = "pending"
     db.commit()
     return jsonify({"entry": after})
 
@@ -1011,6 +1146,7 @@ def _joined(field):
 
 ENTRY_EXPORT_COLUMNS = [
     ("date", "Date"), ("authorUsername", "Resident"), ("entryType", "Type"), ("unit", "Unit"),
+    ("approvalState", "Approval"),
     ("site", "Site"), (_joined("procedures"), "Procedures"), ("hospitalNumber", "Hospital Number"),
     ("age", "Age"), ("sex", "Sex"), (_joined("diagnoses"), "Primary Diagnoses"),
     (_joined("diagnosesSecondary"), "Secondary Diagnoses"), (_joined("comorbidities"), "Comorbidities"),
@@ -1440,6 +1576,366 @@ def unit_orphans():
         "unattributedEntries": unattributed,
         "knownUnits": sorted(known),
     })
+
+
+# =====================================================================
+#  APPROVALS
+#  Surgical Procedure, Other Procedure and Interesting Case only. A linked
+#  case and its parent operation are two independent approvals of two
+#  different documents -- approving one never approves the other.
+# =====================================================================
+
+def _display_name(db, username):
+    if not username:
+        return None
+    r = db.execute("SELECT display_name FROM users WHERE username = ?", (username,)).fetchone()
+    return (r["display_name"] if r else None) or username
+
+
+def _approval_history(db, entry_id):
+    rows = db.execute(
+        "SELECT action, actor_username, actor_role, approver_username, on_behalf_of,"
+        " comment, created_at FROM entry_approvals WHERE entry_id = ? ORDER BY id ASC",
+        (entry_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _days_since(iso):
+    if not iso:
+        return 0
+    try:
+        then = datetime.datetime.fromisoformat(str(iso).replace("Z", ""))
+    except (ValueError, TypeError):
+        return 0
+    return max(0, (datetime.datetime.utcnow() - then).days)
+
+
+def _submit_one(db, entry_id, approver, comment=None):
+    """Returns (ok, error_dict, http_status)."""
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return False, {"error": "not_found"}, 404
+    if row["author_username"] != g.user["username"]:
+        return False, {"error": "forbidden"}, 403
+    if row["entry_type"] not in APPROVABLE_TYPES:
+        return False, {"error": "Only operative records and case write-ups are approved."}, 400
+    if row["status"] != "final":
+        return False, {"error": "Finish the entry before sending it for approval."}, 400
+    if row["approval_state"] == "approved":
+        return False, {"error": "Already approved."}, 409
+    _log_approval(db, entry_id, "submitted", g.user, comment=comment,
+                  approver_username=approver)
+    _set_approval(db, entry_id, "pending", approver)
+    return True, None, 200
+
+
+@api.post("/entries/<int:entry_id>/submit")
+@login_required()
+def submit_for_approval(entry_id):
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    # The approver is nominated here rather than read off consultant_username:
+    # that field is free text plus an OPTIONAL account, is frequently NULL,
+    # and an Interesting Case has no consultant field at all. The free-text
+    # consultant stays as the record of who supervised, which is not always
+    # the same person who signs it off.
+    approver = _valid_approver(db, body.get("approverUsername"))
+    if not approver:
+        return jsonify({"error": "Pick an active consultant to send this to."}), 400
+    ok, err, code = _submit_one(db, entry_id, approver["username"], body.get("comment"))
+    if not ok:
+        db.rollback()
+        return jsonify(err), code
+    db.commit()
+    return jsonify({"entry": entry_row_to_dict(
+        db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone())})
+
+
+@api.post("/entries/bulk-submit")
+@login_required()
+def bulk_submit_for_approval():
+    """The back-catalogue path. Everything predating this feature is
+    'not_submitted' by design -- dropping a department's history into its
+    consultants' queues on day one is how the feature gets ignored -- so a
+    PG opts their own history in, in batches."""
+    body = request.get_json(force=True, silent=True) or {}
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "Pick at least one record."}), 400
+    if len(ids) > 200:
+        return jsonify({"error": "Send at most 200 records at a time."}), 400
+    db = get_db()
+    approver = _valid_approver(db, body.get("approverUsername"))
+    if not approver:
+        return jsonify({"error": "Pick an active consultant to send these to."}), 400
+    done, skipped = [], []
+    for raw in ids:
+        try:
+            eid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        ok, err, _ = _submit_one(db, eid, approver["username"], body.get("comment"))
+        (done if ok else skipped).append(
+            eid if ok else {"id": eid, "reason": (err or {}).get("error")})
+    db.commit()
+    return jsonify({"submitted": done, "skipped": skipped})
+
+
+@api.post("/entries/<int:entry_id>/withdraw")
+@login_required()
+def withdraw_from_approval(entry_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if row["author_username"] != g.user["username"]:
+        return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] not in ("pending", "changes_requested"):
+        return jsonify({"error": "Nothing to withdraw."}), 409
+    _log_approval(db, entry_id, "withdrawn", g.user)
+    _set_approval(db, entry_id, "not_submitted", None)
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def _decide(entry_id, action, require_comment):
+    body = request.get_json(force=True, silent=True) or {}
+    comment = body.get("comment")
+    if require_comment and not str(comment or "").strip():
+        return jsonify({"error": "Say what needs changing."}), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    allowed, on_behalf = _can_decide(g.user, row)
+    if not allowed:
+        return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] not in ("pending", "approved"):
+        return jsonify({"error": "This record is not awaiting a decision."}), 409
+    if action == "approved":
+        _log_approval(db, entry_id, "approved", g.user, comment=comment, on_behalf_of=on_behalf)
+        _set_approval(db, entry_id, "approved")
+    else:
+        _log_approval(db, entry_id, "changes_requested", g.user, comment=comment, on_behalf_of=on_behalf)
+        _set_approval(db, entry_id, "changes_requested")
+    db.commit()
+    return jsonify({"entry": entry_row_to_dict(
+        db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone())})
+
+
+@api.post("/entries/<int:entry_id>/approve")
+@login_required()
+def approve_entry(entry_id):
+    return _decide(entry_id, "approved", require_comment=False)
+
+
+@api.post("/entries/<int:entry_id>/request-changes")
+@login_required()
+def request_changes_entry(entry_id):
+    # A comment is required. "Changes requested" with no reason is worse than
+    # no feedback: the trainee has to guess, and usually resubmits unchanged.
+    return _decide(entry_id, "changes_requested", require_comment=True)
+
+
+@api.post("/entries/bulk-approve")
+@login_required()
+def bulk_approve():
+    """A consultant coming back to a rotation's worth of cases will not do
+    thirty records at four taps each. Approve only -- requesting changes is
+    per-record by definition, since it needs a reason."""
+    body = request.get_json(force=True, silent=True) or {}
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "Pick at least one record."}), 400
+    if len(ids) > 200:
+        return jsonify({"error": "Approve at most 200 records at a time."}), 400
+    db = get_db()
+    done, skipped = [], []
+    for raw in ids:
+        try:
+            eid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        row = db.execute("SELECT * FROM entries WHERE id = ?", (eid,)).fetchone()
+        if not row:
+            skipped.append({"id": eid, "reason": "not_found"}); continue
+        allowed, on_behalf = _can_decide(g.user, row)
+        if not allowed:
+            skipped.append({"id": eid, "reason": "forbidden"}); continue
+        if row["approval_state"] != "pending":
+            skipped.append({"id": eid, "reason": "not_pending"}); continue
+        _log_approval(db, eid, "approved", g.user, comment=body.get("comment"), on_behalf_of=on_behalf)
+        _set_approval(db, eid, "approved")
+        done.append(eid)
+    db.commit()
+    return jsonify({"approved": done, "skipped": skipped})
+
+
+@api.post("/entries/<int:entry_id>/release")
+@login_required()
+def release_entry(entry_id):
+    """Unlock an approved record so its author can edit it again. Only the
+    approver or a delegate -- the lock exists precisely so the author cannot
+    do this themselves. Lands in changes_requested, not not_submitted, so the
+    author sees it needs attention and resubmitting."""
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    allowed, on_behalf = _can_decide(g.user, row)
+    if not allowed:
+        return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] != "approved":
+        return jsonify({"error": "This record is not locked."}), 409
+    _log_approval(db, entry_id, "released", g.user, comment=body.get("comment"), on_behalf_of=on_behalf)
+    _set_approval(db, entry_id, "changes_requested")
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@api.post("/entries/<int:entry_id>/request-unlock")
+@login_required()
+def request_unlock(entry_id):
+    """The author spotted an error in an approved, locked record. This only
+    records the ask and surfaces it in the approver's queue -- it does not
+    unlock anything."""
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if row["author_username"] != g.user["username"]:
+        return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] != "approved":
+        return jsonify({"error": "This record is not locked."}), 409
+    _log_approval(db, entry_id, "unlock_requested", g.user, comment=body.get("comment"))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@api.get("/entries/<int:entry_id>/approvals")
+@login_required()
+def entry_approval_history(entry_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    allowed = (row["author_username"] == g.user["username"]
+               or g.user["role"] == "developer")
+    if not allowed:
+        allowed, _ = _can_decide(g.user, row)
+    if not allowed:
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({"approvals": _approval_history(db, entry_id)})
+
+
+@api.get("/approvals/queue")
+@login_required()
+def approval_queue():
+    """Records naming me as approver, plus anything I can act on as a
+    delegate.
+
+    Deliberately NOT filtered by consultant_scope(): a PG on a peripheral
+    posting may legitimately nominate a consultant from another unit, and
+    that consultant must still see it. This is a second, narrow visibility
+    path -- entries naming this consultant as approver, and nothing else. It
+    widens no other endpoint.
+    """
+    if g.user["role"] != "consultant":
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    caps = user_capabilities(g.user["username"])
+    scope = consultant_scope(g.user["username"])
+    rows = db.execute(
+        "SELECT * FROM entries WHERE approval_state = 'pending' AND status = 'final'"
+        " ORDER BY id ASC"
+    ).fetchall()
+    limit = approval_escalation_days()
+    mine, delegated = [], []
+    for r in rows:
+        own = r["approver_username"] == g.user["username"]
+        can_delegate = (not own) and (
+            caps["isHod"] or caps["isCoordinator"]
+            or (caps["isHeadOfUnit"] and r["unit"] in scope["units"]))
+        if not own and not can_delegate:
+            continue
+        hist = _approval_history(db, r["id"])
+        submitted_at = next((h["created_at"] for h in reversed(hist)
+                             if h["action"] == "submitted"), r["created_at"])
+        item = entry_row_to_dict(r)
+        item["authorDisplayName"] = _display_name(db, r["author_username"])
+        item["approverDisplayName"] = _display_name(db, r["approver_username"])
+        item["submittedAt"] = submitted_at
+        item["waitingDays"] = _days_since(submitted_at)
+        item["overdue"] = item["waitingDays"] >= limit
+        item["unlockRequested"] = any(h["action"] == "unlock_requested" for h in hist)
+        item["onBehalfOf"] = None if own else r["approver_username"]
+        (mine if own else delegated).append(item)
+    return jsonify({"queue": mine, "delegated": delegated, "escalationDays": limit})
+
+
+@api.get("/approvals/summary")
+@login_required()
+def approval_summary():
+    """Counters. Shape depends on who is asking."""
+    db = get_db()
+    limit = approval_escalation_days()
+    out = {"escalationDays": limit}
+    types = "('surgical','other','case')"
+
+    if g.user["role"] in TRAINEE_ROLES:
+        counts = {s: 0 for s in APPROVAL_STATES}
+        for r in db.execute(
+            "SELECT approval_state st, COUNT(*) c FROM entries WHERE author_username = ?"
+            " AND status = 'final' AND entry_type IN " + types + " GROUP BY approval_state",
+            (g.user["username"],),
+        ):
+            counts[r["st"]] = r["c"]
+        out["mine"] = counts
+
+    if g.user["role"] == "consultant":
+        caps = user_capabilities(g.user["username"])
+        scope = consultant_scope(g.user["username"])
+        pending = db.execute(
+            "SELECT * FROM entries WHERE approval_state = 'pending' AND status = 'final'"
+        ).fetchall()
+        mine = [r for r in pending if r["approver_username"] == g.user["username"]]
+        ages = []
+        for r in mine:
+            hist = _approval_history(db, r["id"])
+            sub = next((h["created_at"] for h in reversed(hist) if h["action"] == "submitted"), r["created_at"])
+            ages.append(_days_since(sub))
+        out["queue"] = {
+            "pending": len(mine),
+            "oldestDays": max(ages) if ages else 0,
+            "overdue": sum(1 for a in ages if a >= limit),
+        }
+        # Anything sitting past the threshold anywhere this consultant has
+        # oversight of. In-app notification only reaches the nominated
+        # consultant when they log in -- this is what stops a record waiting
+        # indefinitely because one person is on leave.
+        if caps["isHod"] or caps["isCoordinator"] or caps["isHeadOfUnit"]:
+            overdue = []
+            for r in pending:
+                in_reach = caps["isHod"] or caps["isCoordinator"] or (r["unit"] in scope["units"])
+                if not in_reach:
+                    continue
+                hist = _approval_history(db, r["id"])
+                sub = next((h["created_at"] for h in reversed(hist) if h["action"] == "submitted"), r["created_at"])
+                days = _days_since(sub)
+                if days >= limit:
+                    overdue.append({
+                        "id": r["id"], "author": _display_name(db, r["author_username"]),
+                        "unit": r["unit"],
+                        "approver": _display_name(db, r["approver_username"]), "waitingDays": days,
+                        "entryType": r["entry_type"], "date": r["entry_date"],
+                    })
+            overdue.sort(key=lambda o: -o["waitingDays"])
+            out["unitOverdue"] = overdue[:50]
+            out["unitOverdueTotal"] = len(overdue)
+    return jsonify(out)
 
 
 @api.post("/role-assignments")

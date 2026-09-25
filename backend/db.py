@@ -70,6 +70,10 @@ DEFAULT_CONFIG = {
     "pgYears": ["JR-1", "JR-2", "JR-3"],
     "units": DEFAULT_UNITS,
     "consultantDesignations": ["Assistant Professor", "Associate Professor", "Professor"],
+    # Days a record may sit unapproved before it surfaces on the Head of
+    # Unit's dashboard. In-app notification only reaches a consultant when
+    # they log in, and consultants are the least frequent users of this app.
+    "approvalEscalationDays": 7,
     "diagnoses": ["Chronic Otitis Media", "Chronic Rhinosinusitis", "Deviated Nasal Septum", "Obstructive Sleep Apnea", "Head & Neck Malignancy", "Vocal Cord Palsy", "Otosclerosis", "Congenital Aural Atresia", "Allergic Rhinitis", "Laryngeal Papillomatosis", "Cholesteatoma", "Thyroid Nodule / Goitre"],
     "comorbidities": ["Diabetes Mellitus", "Hypertension", "Coronary Artery Disease", "Chronic Kidney Disease", "COPD / Asthma", "Hypothyroidism", "Immunocompromised", "None"],
     "academicTypes": ["CME", "Journal club", "Paper presentation", "University"],
@@ -198,6 +202,30 @@ def migrate_entries_table(conn):
         conn.execute("ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'final'")
         conn.commit()
         cols.add("status")
+
+    if "approval_state" not in cols:
+        # Consultant sign-off. 'not_submitted' | 'pending' | 'changes_requested'
+        # | 'approved'. Every pre-existing row backfills to 'not_submitted' on
+        # purpose: dropping a department's whole back catalogue into its
+        # consultants' queues on the morning this ships is how the feature
+        # gets ignored. PGs opt their own history in, in batches, from
+        # My Entries.
+        #
+        # This column is a CACHE of the entry_approvals log, not the truth.
+        # It exists so the entries list and the approval queue are one
+        # indexed read instead of a join plus a walk of the log.
+        conn.execute("ALTER TABLE entries ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'not_submitted'")
+        conn.commit()
+        cols.add("approval_state")
+
+    if "approver_username" not in cols:
+        # Who the record was sent to. Deliberately NOT consultant_username:
+        # that field is free text plus an optional account, is frequently
+        # NULL, and doesn't exist at all on an Interesting Case. The PG
+        # nominates a real account at submit time.
+        conn.execute("ALTER TABLE entries ADD COLUMN approver_username TEXT")
+        conn.commit()
+        cols.add("approver_username")
 
 
 def init_db():
