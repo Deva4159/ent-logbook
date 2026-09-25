@@ -641,3 +641,39 @@
 
   /* ---- empty states get an exit ------------------------------------- */
   .empty-state .es-cta{margin-top:14px;}
+
+  /* =====================================================================
+     APPROVAL / SIGN-OFF
+  ===================================================================== */
+  .entry-card-approval{flex:0 0 auto;}
+  .row-pick{flex:0 0 auto; display:inline-flex; align-items:center; margin-left:4px; cursor:pointer;}
+  .row-pick input{width:16px; height:16px; accent-color:var(--teal); cursor:pointer;}
+
+  /* Sticky so the action stays reachable after scrolling a long list --
+     selecting 40 records then having to scroll back up to act on them is
+     how a bulk tool goes unused. */
+  .bulk-bar{position:sticky; top:57px; z-index:3; display:flex; align-items:center; gap:10px;
+    background:var(--teal-bg); color:var(--teal-ink); border:1px solid var(--teal);
+    border-radius:10px; padding:9px 12px; margin-bottom:12px; font-size:13px; font-weight:600;
+    box-shadow:var(--shadow);}
+  .bulk-bar > span{margin-right:auto;}
+
+  .q-list{display:flex; flex-direction:column; gap:8px;}
+  .q-row{display:flex; align-items:center; gap:11px; border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px; background:var(--surface);
+    transition:border-color var(--dur-2) var(--ease);}
+  .q-row:hover{border-color:var(--teal);}
+  /* A left rule rather than a tinted row: the queue is read at a glance and
+     a full red background on a third of the rows stops meaning anything. */
+  .q-overdue{border-left:3px solid var(--red);}
+  .q-main{flex:1; min-width:0;}
+  .q-top{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13.5px;}
+  .q-top .muted{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .q-meta{font-size:12px; margin-top:3px;}
+  .q-age-over{color:var(--red); font-weight:600;}
+  .q-act{display:flex; gap:6px; flex:0 0 auto;}
+  @media (max-width:700px){
+    .q-row{flex-wrap:wrap;}
+    .q-act{width:100%; justify-content:flex-end;}
+    .q-act .btn{flex:1;}
+  }

@@ -28,6 +28,12 @@
     devUsersLoaded: false,
     devAllEntries: [],
     unitOrphans: null,
+    approvalSummary: null,
+    approvalQueue: null,
+    approvalPick: {},          // id -> true, for bulk submit / bulk approve
+    submitDialog: null,        // { ids:[], approver:"" }
+    decideDialog: null,        // { id, action }
+
     roleAssignments: [],
     roleAssignmentsLoaded: false,
     passwordResets: [],
@@ -323,6 +329,33 @@
       icon(t==="dark" ? "skull" : (t==="light" ? "approvals" : "units"))+'</button>';
   }
 
+  /* ============================================================
+     APPROVAL — display helpers
+     Only operative records and case write-ups are signed off. A linked
+     case and its parent operation are two independent approvals.
+  ============================================================ */
+  var APPROVABLE = ["surgical","other","case"];
+  function isApprovable(e){ return APPROVABLE.indexOf(normType(e))!==-1 && e.status!=="draft"; }
+  var APPROVAL_LABEL = {
+    not_submitted:    ["Not sent",        "chip-grey"],
+    pending:          ["Awaiting sign-off","chip-amber"],
+    changes_requested:["Changes asked",   "chip-red"],
+    approved:         ["Approved",        "chip-green"]
+  };
+  function approvalChip(e){
+    if(!isApprovable(e)) return '<span class="muted" style="font-size:11.5px;">—</span>';
+    var st = e.approvalState || "not_submitted";
+    var d = APPROVAL_LABEL[st] || APPROVAL_LABEL.not_submitted;
+    return '<span class="chip '+d[1]+'">'+esc(d[0])+'</span>';
+  }
+  function isLocked(e){ return isApprovable(e) && e.approvalState==="approved"; }
+  function approverOptions(){
+    // Only active consultants. The free-text "consultant" on the entry stays
+    // the record of who supervised; this is who signs it off, which is not
+    // always the same person.
+    return (state.consultantsList||[]).filter(function(c){ return c.role==="consultant"; });
+  }
+
   function icon(key, extraClass){
     var body = ICONS[key];
     if(!body) return "";
@@ -512,6 +545,19 @@
   async function dGetEntryHistory(id){ return (await api("GET","/entries/"+id+"/history")).edits; }
   async function dGetConfig(){ return (await api("GET","/config")).config; }
   async function dGetUnitOrphans(){ return await api("GET","/units/orphans"); }
+
+  /* ---------------- approvals ---------------- */
+  async function aSummary(){ return await api("GET","/approvals/summary"); }
+  async function aQueue(){ return await api("GET","/approvals/queue"); }
+  async function aSubmit(id, approver, comment){ return await api("POST","/entries/"+id+"/submit",{approverUsername:approver, comment:comment}); }
+  async function aBulkSubmit(ids, approver){ return await api("POST","/entries/bulk-submit",{ids:ids, approverUsername:approver}); }
+  async function aWithdraw(id){ return await api("POST","/entries/"+id+"/withdraw",{}); }
+  async function aApprove(id, comment){ return await api("POST","/entries/"+id+"/approve",{comment:comment}); }
+  async function aBulkApprove(ids){ return await api("POST","/entries/bulk-approve",{ids:ids}); }
+  async function aRequestChanges(id, comment){ return await api("POST","/entries/"+id+"/request-changes",{comment:comment}); }
+  async function aRelease(id){ return await api("POST","/entries/"+id+"/release",{}); }
+  async function aRequestUnlock(id, comment){ return await api("POST","/entries/"+id+"/request-unlock",{comment:comment}); }
+  async function aHistory(id){ return (await api("GET","/entries/"+id+"/approvals")).approvals; }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
   async function dAddRoleAssignment(data){ return (await api("POST","/role-assignments",{
@@ -685,14 +731,18 @@
     state.manageUsersLoaded = true;
   }
 
+  async function refreshApprovalSummary(){
+    try{ state.approvalSummary = await aSummary(); }catch(e){ state.approvalSummary = null; }
+  }
   async function loadForView(){
     if(!state.user) return;
     var v = state.view, role = state.user.role, caps = state.capabilities || {};
     if(v==="dashboard"){
       state.loading = true; render();
-      if(isTraineeRole(role)){ await loadMyEntries(); await loadReminders(); }
+      if(isTraineeRole(role)){ await loadMyEntries(); await loadReminders(); await refreshApprovalSummary(); }
       else if(role==="consultant"){
         await loadRoster();
+        await refreshApprovalSummary();
         if(caps.canApprove){ await loadSignupRequests(); }
       }
       else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); await loadSignupRequests(); }
@@ -703,6 +753,13 @@
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
     if(v==="developer-users"){ await loadDevUsers(); render(); return; }
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
+    if(v==="approval-queue"){
+      state.loading=true; render();
+      await loadConsultants();
+      try{ state.approvalQueue = await aQueue(); }catch(e){ state.approvalQueue = null; }
+      try{ state.approvalSummary = await aSummary(); }catch(e){}
+      state.loading=false; render(); return;
+    }
     if(v==="developer-data"){
       state.loading=true; render(); await loadDevUsers(); await loadDevEntries();
       // Rows pointing at a unit the department no longer has. Best-effort:
@@ -1806,6 +1863,10 @@
   /* ============================================================
      RENDER: SHELL
   ============================================================ */
+  function approvalBadgeCount(){
+    var q = (state.approvalSummary||{}).queue;
+    return q ? (q.pending||0) : 0;
+  }
   function pendingPasswordRequestCount(){
     return state.passwordResets.filter(function(r){ return r.status==="pending"; }).length;
   }
@@ -1814,6 +1875,9 @@
     if(isTraineeRole(state.user.role)) return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["account","My Account"],["about","About / Roadmap"]];
     if(state.user.role==="consultant"){
       var items = [["dashboard","Dashboard"],["consultant-roster","Roster"]];
+      // "Approvals" already means account sign-ups in this app, so the case
+      // sign-off queue gets its own name rather than a second Approvals.
+      items.push(["approval-queue","Case Sign-off"]);
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
       items.push(["account","My Account"],["about","About / Roadmap"]);
@@ -1838,6 +1902,7 @@
         var badge = "";
         if(item[0]==="developer-password-requests" && pendingCount>0) badge = '<span class="alert-count">'+pendingCount+'</span>';
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
+        if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
@@ -1924,6 +1989,14 @@
     '</div>';
   }
 
+  function consultantApprovalTiles(){
+    var q = (state.approvalSummary||{}).queue; if(!q) return "";
+    return '<div class="stat-grid">'+
+      statTile(q.pending||0,"Awaiting your sign-off","approvals")+
+      statTile(q.overdue||0,"Past "+((state.approvalSummary||{}).escalationDays||7)+" days","close")+
+      statTile(q.oldestDays||0,"Oldest, in days","password")+
+    '</div>';
+  }
   function renderDashboardConsultant(){
     if(state.loading) return skeletonDash();
     var caps = state.capabilities || {};
@@ -1932,6 +2005,14 @@
     var s = computeStats(allEntries);
     return ''+
     renderScopeBanner()+
+    consultantApprovalTiles()+
+    ((state.approvalSummary||{}).queue && state.approvalSummary.queue.pending ?
+      '<div class="card"><div class="dash-grid">'+
+        dashCard("approval-queue","Case Sign-off",
+          state.approvalSummary.queue.pending+" record"+(state.approvalSummary.queue.pending===1?"":"s")+" waiting for you.",
+          null,"approvals","var(--teal)")+
+      '</div></div>' : '')+
+    overduePanel()+
     '<div class="stat-grid">'+
       statTile(state.roster.length,"Trainees visible")+statTile(s.total,"Total entries")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other","other")+statTile(s["case"],"Cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars","seminar")+
     '</div>'+
@@ -2593,6 +2674,9 @@
           '<span class="entry-card-main">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</span>'+
           '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
           (opts.showStatusBadge && isDraft ? ' <span class="chip chip-amber">Draft</span>' : '')+
+          (opts.showApproval && !isDraft ? '<span class="entry-card-approval">'+approvalChip(e)+'</span>' : '')+
+          (opts.selectable && isApprovable(e) && (e.approvalState==="not_submitted"||e.approvalState==="changes_requested")
+            ? '<label class="row-pick" title="Select for bulk send"><input type="checkbox" data-pick="'+esc(idStr)+'"'+(state.approvalPick[idStr]?" checked":"")+'></label>' : '')+
           '<span class="entry-card-chevron" aria-hidden="true">▼</span>'+
           (menuItems ? (
             '<span class="entry-menu-wrap">'+
@@ -2614,25 +2698,180 @@
 
   function residentEntryMenuItems(e, rows){
     var items = [];
-    items.push('<button type="button" data-view-history="'+e.id+'">History</button>');
-    items.push('<button type="button" data-edit-entry="'+e.id+'">'+(e.status==="draft"?"Continue editing":"Edit")+'</button>');
-    items.push('<button type="button" class="entry-menu-danger" data-del="'+e.id+'">Delete</button>');
+    var st = e.approvalState || "not_submitted";
+    if(isApprovable(e)){
+      if(st==="not_submitted" || st==="changes_requested")
+        items.push('<button type="button" data-send-approval="'+e.id+'">Send for sign-off</button>');
+      if(st==="pending")
+        items.push('<button type="button" data-withdraw="'+e.id+'">Withdraw from sign-off</button>');
+      if(st==="approved")
+        items.push('<button type="button" data-request-unlock="'+e.id+'">Ask to unlock</button>');
+      items.push('<button type="button" data-approval-history="'+e.id+'">Sign-off history</button>');
+    }
+    items.push('<button type="button" data-view-history="'+e.id+'">Edit history</button>');
+    // An approved record is locked: the consultant attested to this exact
+    // version. Edit and Delete are not offered at all rather than offered
+    // and then refused by the server.
+    if(!isLocked(e)){
+      items.push('<button type="button" data-edit-entry="'+e.id+'">'+(e.status==="draft"?"Continue editing":"Edit")+'</button>');
+      items.push('<button type="button" class="entry-menu-danger" data-del="'+e.id+'">Delete</button>');
+    }
     return items.join("");
+  }
+
+  /* ============================================================
+     APPROVAL — dialogs
+  ============================================================ */
+  function renderSubmitDialog(){
+    var d = state.submitDialog; if(!d) return "";
+    var opts = approverOptions();
+    var many = d.ids.length > 1;
+    return '<div class="modal-overlay" data-submit-overlay><div class="modal-card" style="max-width:440px;">'+
+      '<button class="modal-close" data-submit-cancel aria-label="Close">&times;</button>'+
+      '<h2>Send '+(many ? d.ids.length+' records' : 'this record')+' for sign-off</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 16px;">'+
+        'The consultant you pick will be asked to sign '+(many?'these off':'this off')+'. '+
+        'Once signed, the record is locked and you will need them to release it before you can edit it again.</p>'+
+      (opts.length ?
+        '<div class="field"><label for="submit-approver">Send to</label>'+
+          '<select id="submit-approver">'+
+            '<option value="">Choose a consultant…</option>'+
+            opts.map(function(c){
+              return '<option value="'+esc(c.username)+'"'+(c.username===d.approver?" selected":"")+'>'+esc(c.displayName)+'</option>';
+            }).join("")+
+          '</select></div>'+
+        '<div class="field"><label for="submit-note">Note (optional)</label>'+
+          '<textarea id="submit-note" placeholder="Anything the consultant should know"></textarea></div>'
+        : '<div class="notice-banner"><span>No active consultant accounts to send to yet. Ask your Developer admin to add one.</span></div>')+
+      '<div class="btn-row"><button class="btn" data-submit-cancel>Cancel</button>'+
+        '<button class="btn btn-primary" data-submit-go '+(opts.length?"":"disabled")+'>Send</button></div>'+
+    '</div></div>';
+  }
+
+  function renderDecideDialog(){
+    var d = state.decideDialog; if(!d) return "";
+    var asking = d.action === "changes";
+    return '<div class="modal-overlay" data-decide-overlay><div class="modal-card" style="max-width:440px;">'+
+      '<button class="modal-close" data-decide-cancel aria-label="Close">&times;</button>'+
+      '<h2>'+(asking ? "Ask for changes" : "Sign this off")+'</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">'+
+        (asking ? 'The trainee sees your note at the top of the record. Say what needs changing — "changes requested" with no reason usually comes back unchanged.'
+                : 'You are confirming this record as an accurate account of the case. It will be locked to further editing until you release it.')+'</p>'+
+      '<div class="field"><label for="decide-note">'+(asking?"What needs changing":"Note (optional)")+'</label>'+
+        '<textarea id="decide-note" placeholder="'+(asking?"e.g. Laterality is recorded as right; this was a left ear.":"")+'"></textarea></div>'+
+      '<div class="btn-row"><button class="btn" data-decide-cancel>Cancel</button>'+
+        '<button class="btn '+(asking?"":"btn-primary")+'" data-decide-go>'+(asking?"Send back":"Sign off")+'</button></div>'+
+    '</div></div>';
+  }
+
+  /* ============================================================
+     APPROVAL — consultant queue
+  ============================================================ */
+  function queueRow(e, delegated){
+    var over = e.overdue;
+    return '<div class="q-row'+(over?' q-overdue':'')+'">'+
+      '<label class="row-pick"><input type="checkbox" data-qpick="'+e.id+'"'+(state.approvalPick[String(e.id)]?" checked":"")+'></label>'+
+      '<div class="q-main">'+
+        '<div class="q-top">'+entryTypeChip(e)+
+          '<b>'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</b>'+
+          '<span class="muted">'+esc(summarizeEntry(e)||"")+'</span></div>'+
+        '<div class="q-meta muted">'+esc(e.authorDisplayName||userDisplay(e.authorUsername))+' &middot; '+fmtDate(e.date)+
+          ' &middot; '+unitShortHtml(e.unit)+
+          ' &middot; <span class="'+(over?"q-age-over":"")+'">waiting '+e.waitingDays+'d</span>'+
+          (delegated ? ' &middot; <span class="chip chip-violet">for '+esc(e.approverDisplayName||userDisplay(e.onBehalfOf))+'</span>' : '')+
+          (e.unlockRequested ? ' &middot; <span class="chip chip-amber">unlock asked</span>' : '')+
+        '</div></div>'+
+      '<div class="q-act">'+
+        '<button class="btn btn-sm" data-open-entry="'+e.id+'">Open</button>'+
+        '<button class="btn btn-sm" data-ask-changes="'+e.id+'">Changes</button>'+
+        '<button class="btn btn-sm btn-primary" data-sign-off="'+e.id+'">Sign off</button>'+
+      '</div></div>';
+  }
+
+  function renderApprovalQueue(){
+    if(state.loading) return skeletonDash();
+    var q = state.approvalQueue || { queue:[], delegated:[], escalationDays:7 };
+    var picked = Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; });
+    var bar = picked.length ? '<div class="bulk-bar"><span>'+picked.length+' selected</span>'+
+      '<button class="btn btn-sm" data-pick-clear>Clear</button>'+
+      '<button class="btn btn-sm btn-primary" data-bulk-approve>Sign off '+picked.length+'</button></div>' : '';
+    function section(title, rows, delegated, note){
+      if(!rows.length) return "";
+      return '<div class="card"><div class="section-head"><h2>'+title+' ('+rows.length+')</h2></div>'+
+        (note ? '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+note+'</p>' : '')+
+        '<div class="q-list">'+rows.map(function(e){ return queueRow(e, delegated); }).join("")+'</div></div>';
+    }
+    if(!q.queue.length && !q.delegated.length){
+      return '<div class="card"><div class="empty-state">'+artPlate("ossicles","es-plate")+
+        'Nothing waiting for your sign-off.</div></div>';
+    }
+    return bar+
+      section("Waiting for you", q.queue, false, "Oldest first. Anything past "+q.escalationDays+" days is flagged.")+
+      section("You can also sign these off", q.delegated, true,
+        "Sent to another consultant, but you can act on them as Head of Unit / Coordinator / HOD — useful when they are away. Your name is recorded as acting on their behalf.");
+  }
+
+  function approvalCounters(){
+    var m = (state.approvalSummary||{}).mine; if(!m) return "";
+    return '<div class="stat-grid">'+
+      statTile(m.approved||0,"Signed off","approvals")+
+      statTile(m.pending||0,"Awaiting sign-off","password")+
+      statTile(m.changes_requested||0,"Changes asked","close")+
+      statTile(m.not_submitted||0,"Not sent","export")+
+    '</div>';
+  }
+
+  function overduePanel(){
+    var sum = state.approvalSummary || {};
+    var list = sum.unitOverdue || [];
+    if(!list.length) return "";
+    return '<div class="card"><div class="section-head"><h2>Waiting more than '+(sum.escalationDays||7)+' days</h2>'+
+      '<span class="chip chip-red">'+(sum.unitOverdueTotal||list.length)+'</span></div>'+
+      '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">Records sitting unsigned in units you oversee. '+
+        'In-app notice only reaches a consultant when they log in, so this is what stops one person being away from stalling a trainee\u2019s logbook.</p>'+
+      '<div class="table-wrap"><table><thead><tr><th>Trainee</th><th>Unit</th><th>Sent to</th><th>Date</th><th>Waiting</th></tr></thead><tbody>'+
+      list.map(function(o){
+        return '<tr><td>'+esc(o.author)+'</td><td>'+unitShortHtml(o.unit)+'</td>'+
+          '<td>'+esc(o.approver||"\u2014")+'</td><td class="tabular">'+fmtDate(o.date)+'</td>'+
+          '<td class="tabular"><b>'+o.waitingDays+'d</b></td></tr>';
+      }).join("")+'</tbody></table></div></div>';
+  }
+
+  function userDisplay(username){
+    if(!username) return "\u2014";
+    var all = (state.consultantsList||[]).concat(state.devUsers||[]).concat(state.roster||[]);
+    var m = all.filter(function(u){ return u.username===username; })[0];
+    return m ? (m.displayName||username) : username;
   }
 
   function renderResidentEntries(){
     if(state.loading) return skeletonDash();
     var rows = state.myEntries;
+    var picked = Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; });
+    var bulkBar = picked.length ? '<div class="bulk-bar"><span>'+picked.length+' selected</span>'+
+      '<button class="btn btn-sm" data-pick-clear>Clear</button>'+
+      '<button class="btn btn-sm btn-primary" data-bulk-send>Send '+picked.length+' for sign-off</button></div>' : '';
     return ''+
+    approvalCounters()+
+    bulkBar+
     '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="export-my-entries">Export my entries (CSV)</button></div>'+
     renderEntriesList({
       uiKey: "my-entries",
       entries: rows,
       showStatusBadge: true,
+      showApproval: true,
+      selectable: true,
       emptyText: "Nothing logged yet.",
       actions: function(e){ return residentEntryMenuItems(e, rows); },
       detail: function(e){
         var extra = '';
+        if(isApprovable(e)){
+          extra += '<div class="detail-row"><div class="k">Sign-off</div><div>'+approvalChip(e)+
+            (e.approverUsername ? ' <span class="muted" style="font-size:12px;">'+
+              (e.approvalState==="approved"?"by ":"with ")+esc(userDisplay(e.approverUsername))+'</span>' : '')+
+            (isLocked(e) ? ' <span class="muted" style="font-size:12px;">\u00b7 locked</span>' : '')+
+            '</div></div>';
+        }
         if(e.paperStatus!=null) extra += '<div class="detail-row"><div class="k">Write-up</div><div>'+paperStatusCell(e)+'</div></div>';
         extra += '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, rows)+'</div></div>';
         return extra;
@@ -3288,8 +3527,11 @@
     else if(state.view==="signup-approvals") inner = renderSignupApprovals();
     else if(state.view==="manage-users") inner = renderManageUsers();
     else if(state.view==="account") inner = renderMyAccount();
+    else if(state.view==="approval-queue") inner = renderApprovalQueue();
     else if(state.view==="about") inner = renderAbout();
-    app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "") + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "");
+    app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
+      + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
+      + renderSubmitDialog() + renderDecideDialog();
     // THE GATE. render() runs on every state change -- every keystroke in a
     // filter, every checkbox -- and replaces the entire DOM, so an entry
     // animation attached to these elements would re-fire constantly and the
@@ -3405,6 +3647,146 @@
     });
     var navToggle = el("btn-nav-toggle");
     if(navToggle) navToggle.onclick = function(){ state.mobileNavOpen = !state.mobileNavOpen; render(); };
+    /* ---------------- approvals ---------------- */
+    function pickIds(){ return Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; }); }
+    async function openSubmit(ids){
+      // consultantsList is normally only fetched on the way into Log Entry;
+      // the submit dialog can be opened straight from My Entries.
+      await loadConsultants();
+      var d = approverOptions();
+      state.submitDialog = { ids: ids, approver: d.length===1 ? d[0].username : "" };
+      render();
+    }
+    document.querySelectorAll("[data-send-approval]").forEach(function(b){
+      b.onclick = function(){ state.openEntryMenu=null; openSubmit([b.getAttribute("data-send-approval")]); };
+    });
+    document.querySelectorAll("[data-withdraw]").forEach(function(b){
+      b.onclick = async function(){
+        state.openEntryMenu=null;
+        try{ await aWithdraw(b.getAttribute("data-withdraw")); await loadMyEntries(); await refreshApprovalSummary();
+             toast("Withdrawn from sign-off."); render(); }
+        catch(e){ toast(e.message||"Could not withdraw."); }
+      };
+    });
+    document.querySelectorAll("[data-request-unlock]").forEach(function(b){
+      b.onclick = async function(){
+        state.openEntryMenu=null;
+        var why = window.prompt("What needs changing? Your consultant sees this.");
+        if(why===null) return;
+        try{ await aRequestUnlock(b.getAttribute("data-request-unlock"), why);
+             toast("Unlock requested — it will show in their sign-off queue."); render(); }
+        catch(e){ toast(e.message||"Could not send that."); }
+      };
+    });
+    // The select-for-bulk checkbox lives INSIDE .entry-card-summary, which is
+    // itself a button that expands the row. Without this, ticking a box also
+    // expands the record and the resulting re-render races the change event,
+    // so the tick appears to do nothing.
+    document.querySelectorAll(".row-pick").forEach(function(lbl){
+      lbl.onclick = function(ev){ ev.stopPropagation(); };
+    });
+    document.querySelectorAll("[data-pick],[data-qpick]").forEach(function(cb){
+      cb.onclick = function(ev){ ev.stopPropagation(); };
+      cb.onchange = function(){
+        var id = cb.getAttribute("data-pick") || cb.getAttribute("data-qpick");
+        var wasAny = pickIds().length > 0;
+        if(cb.checked) state.approvalPick[id]=true; else delete state.approvalPick[id];
+        var nowAny = pickIds().length > 0;
+        // render() rebuilds the whole DOM, which on a 200-row list is a
+        // visible stutter on every tick -- and it would also blow away the
+        // checkbox the user just clicked. Only re-render when the bar has to
+        // appear or disappear; otherwise update it in place.
+        if(wasAny !== nowAny){ render(); return; }
+        updateBulkBar();
+      };
+    });
+    function updateBulkBar(){
+      var count = pickIds().length;
+      var bar = document.querySelector(".bulk-bar");
+      if(!bar) return;
+      var label = bar.querySelector("span");
+      if(label) label.textContent = count + " selected";
+      var send = bar.querySelector("[data-bulk-send]");
+      if(send) send.textContent = "Send " + count + " for sign-off";
+      var appr = bar.querySelector("[data-bulk-approve]");
+      if(appr) appr.textContent = "Sign off " + count;
+    }
+    var pickClear = document.querySelector("[data-pick-clear]");
+    if(pickClear) pickClear.onclick = function(){ state.approvalPick = {}; render(); };
+    var bulkSend = document.querySelector("[data-bulk-send]");
+    if(bulkSend) bulkSend.onclick = function(){ openSubmit(pickIds()); };
+    var bulkApprove = document.querySelector("[data-bulk-approve]");
+    if(bulkApprove) bulkApprove.onclick = async function(){
+      var ids = pickIds();
+      if(!window.confirm("Sign off "+ids.length+" record"+(ids.length===1?"":"s")+"? They will be locked to further editing.")) return;
+      try{
+        var r = await aBulkApprove(ids);
+        state.approvalPick = {};
+        state.approvalQueue = await aQueue(); await refreshApprovalSummary();
+        toast("Signed off "+r.approved.length+(r.skipped.length?" — "+r.skipped.length+" skipped":"")+".");
+        render();
+      }catch(e){ toast(e.message||"Could not sign those off."); }
+    };
+    document.querySelectorAll("[data-sign-off]").forEach(function(b){
+      b.onclick = function(){ state.decideDialog = { id: b.getAttribute("data-sign-off"), action:"approve" }; render(); };
+    });
+    document.querySelectorAll("[data-ask-changes]").forEach(function(b){
+      b.onclick = function(){ state.decideDialog = { id: b.getAttribute("data-ask-changes"), action:"changes" }; render(); };
+    });
+    document.querySelectorAll("[data-open-entry]").forEach(function(b){
+      b.onclick = function(){ state.viewingEntryId = b.getAttribute("data-open-entry"); render(); };
+    });
+    document.querySelectorAll("[data-approval-history]").forEach(function(b){
+      b.onclick = async function(){
+        state.openEntryMenu=null;
+        try{
+          var h = await aHistory(b.getAttribute("data-approval-history"));
+          toast(h.length ? h.map(function(r){ return r.action.replace(/_/g," ")+" by "+r.actor_username; }).join(" \u2192 ") : "No sign-off activity yet.");
+        }catch(e){ toast(e.message||"Could not load that."); }
+      };
+    });
+    // submit dialog
+    document.querySelectorAll("[data-submit-cancel]").forEach(function(b){
+      b.onclick = function(){ state.submitDialog=null; render(); };
+    });
+    var subOv = document.querySelector("[data-submit-overlay]");
+    if(subOv) subOv.onclick = function(ev){ if(ev.target===subOv){ state.submitDialog=null; render(); } };
+    var subGo = document.querySelector("[data-submit-go]");
+    if(subGo) subGo.onclick = async function(){
+      var who = (el("submit-approver")||{}).value || "";
+      var note = (el("submit-note")||{}).value || "";
+      if(!who){ toast("Pick a consultant to send this to."); return; }
+      var ids = state.submitDialog.ids;
+      subGo.disabled = true; subGo.innerHTML = '<span class="spin"></span>Sending…';
+      try{
+        if(ids.length===1) await aSubmit(ids[0], who, note);
+        else await aBulkSubmit(ids, who);
+        state.submitDialog=null; state.approvalPick={};
+        await loadMyEntries(); await refreshApprovalSummary();
+        toast(ids.length===1 ? "Sent for sign-off." : "Sent "+ids.length+" records for sign-off.");
+        render();
+      }catch(e){ subGo.disabled=false; subGo.textContent="Send"; toast(e.message||"Could not send that."); }
+    };
+    // decide dialog
+    document.querySelectorAll("[data-decide-cancel]").forEach(function(b){
+      b.onclick = function(){ state.decideDialog=null; render(); };
+    });
+    var decOv = document.querySelector("[data-decide-overlay]");
+    if(decOv) decOv.onclick = function(ev){ if(ev.target===decOv){ state.decideDialog=null; render(); } };
+    var decGo = document.querySelector("[data-decide-go]");
+    if(decGo) decGo.onclick = async function(){
+      var d = state.decideDialog, note = (el("decide-note")||{}).value || "";
+      if(d.action==="changes" && !note.trim()){ toast("Say what needs changing."); return; }
+      decGo.disabled = true; decGo.innerHTML = '<span class="spin"></span>Saving…';
+      try{
+        if(d.action==="approve") await aApprove(d.id, note); else await aRequestChanges(d.id, note);
+        state.decideDialog=null;
+        state.approvalQueue = await aQueue(); await refreshApprovalSummary();
+        toast(d.action==="approve" ? "Signed off." : "Sent back with your note.");
+        render();
+      }catch(e){ decGo.disabled=false; decGo.textContent="Save"; toast(e.message||"Could not save that."); }
+    };
+
     var themeBtn = el("btn-theme"); if(themeBtn) themeBtn.onclick = cycleTheme;
     // role="button" is a promise that Enter and Space work; keep it.
     document.querySelectorAll('[role="button"][tabindex="0"]').forEach(function(nd){
