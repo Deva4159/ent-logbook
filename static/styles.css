@@ -193,6 +193,41 @@
     main{padding:16px;}
   }
 
+  /* ------------------------------------------------------------------
+     Phone: the topbar was pushing the whole page sideways.
+
+     .user-chip is the role badge + display name + theme toggle + Log out.
+     At 390px that came to 213px starting at x=196, so it ran 19px past the
+     viewport -- 37px for a consultant ("CONSULTANT") and 41px for a
+     developer -- and EVERY screen in the app scrolled horizontally as a
+     result. It was the topbar the whole time, not any of the content.
+
+     The role badge goes (the navigation already differs per role), the
+     name truncates rather than pushing, and the brand subtitle goes with
+     them. Nothing shrinks below a usable size; things are simply dropped
+     in order of how little they carry.
+  ------------------------------------------------------------------ */
+  @media (max-width:560px){
+    .topbar{padding:10px 12px; gap:10px;}
+    /* Four things competed for 390px: hamburger, mark, title + subtitle,
+       role badge, name, theme toggle, Log out. Dropped in order of how
+       little each carries on a phone -- the subtitle and the wordmark go
+       (the "EL" mark still identifies the app), the role badge goes (the
+       navigation already differs per role), and the name stays, because
+       "am I logged in as the right person" is the one thing a shared
+       ward computer makes you ask. */
+    .brand-text{display:none;}
+    .role-badge{display:none;}
+    .brand{min-width:0; flex:none;}
+    .user-chip{gap:8px; min-width:0; flex:1; justify-content:flex-end;}
+    .user-chip > span{
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
+    }
+    /* Never let the action wrap to two lines. */
+    .user-chip .btn{white-space:nowrap; flex:none;}
+  }
+
+
   label{display:block; font-size:12.5px; font-weight:600; color:var(--ink-soft); margin-bottom:5px;}
   .field{margin-bottom:14px;}
   input[type=text], input[type=password], input[type=number], input[type=date], input[type=datetime-local], select, textarea{
@@ -796,4 +831,63 @@
   @media (max-width:560px){
     .fb-row{flex-direction:column;}
     .fb-side{flex-direction:row; align-items:center; align-self:stretch; justify-content:space-between;}
+  }
+
+  /* ============================================================
+     MY ACCOUNT / ACCOUNT LIFECYCLE
+  ============================================================ */
+  /* auto-fit rather than a fixed column count: the same grid carries six
+     items on a laptop and two on a phone without a separate rule. */
+  .acct-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:14px 20px;}
+  .acct-kv .k{font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-soft); margin-bottom:3px;}
+  /* A unit's full name runs to eight words, and left unclamped it pushed
+     the two cells after it onto a second row with a hole beside them. */
+  .acct-kv .v{font-size:14px; overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+  .member-list{display:flex; flex-direction:column; gap:2px;}
+  .member{display:flex; align-items:baseline; justify-content:space-between; gap:12px;
+    font-size:13.5px; padding:5px 8px; border-radius:7px;}
+  .member:nth-child(odd){background:var(--surface-2);}
+  .member.me{outline:1px solid var(--teal);}
+  .member-name{min-width:0; overflow-wrap:anywhere;}
+  .member .muted{font-size:12px; flex:none; text-align:right;}
+
+  /* The closing-an-account card is bordered rather than filled: a red block
+     the size of a card reads as an error that has already happened, which
+     is not what this is until someone chooses it. */
+  .danger-card{border-color:var(--red);}
+  .acct-actions{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:4px;}
+  .acct-panel{margin-top:14px; padding-top:14px; border-top:1px dashed var(--line);}
+  .holder-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(210px,1fr)); gap:18px;}
+  .holder-col .exp-sub{margin-top:0;}
+  .bulk-preview{margin-top:10px; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+    background:var(--surface-2); font-size:13px;}
+  .bulk-chips{display:flex; flex-wrap:wrap; gap:5px; margin-top:8px;}
+  .bulk-chips .chip{font-size:11.5px;}
+  @media (max-width:560px){
+    .member{flex-direction:column; gap:2px;}
+    .member .muted{text-align:left;}
+    .acct-actions .btn{width:100%;}
+  }
+
+  /* ------------------------------------------------------------------
+     Touch targets.
+
+     A 27px-high button is fine under a mouse and awkward under a thumb.
+     Scoped to (pointer:coarse) so the desktop density the wide tables
+     depend on is untouched, and placed at the END of the file because
+     .theme-btn and the rest are defined further down than the mobile
+     block -- an identical-specificity rule written earlier simply lost.
+  ------------------------------------------------------------------ */
+  @media (pointer:coarse){
+    .btn{min-height:40px;}
+    .btn-sm{min-height:36px; padding:7px 12px;}
+    .nav-toggle, .theme-btn{width:40px; height:40px;}
+    .theme-btn .icon{width:19px; height:19px;}
+    .entry-menu-btn, .row-menu-btn, [data-entry-menu]{min-width:40px; min-height:36px;}
+    .sidenav button{min-height:42px;}
+    select, input[type="text"], input[type="date"], input[type="password"],
+    input[type="search"], input[type="number"]{min-height:40px;}
+    input[type="checkbox"]{width:20px; height:20px;}
+    .pick-chip{min-height:36px;}
   }

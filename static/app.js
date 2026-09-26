@@ -41,6 +41,13 @@
     feedbackOpenId: null,
     feedbackNotes: {},         // id -> notes[]
     feedbackOpenCount: 0,
+    account: null,
+    accountAction: null,        // "deactivate" | "delete" | null
+    accountRequests: null,
+    accountArchives: null,
+    accountReqCount: 0,
+    bulkList: null,             // { key, preview }
+    entryLock: null,            // { id, rowVersion } while an edit form is open
     submitDialog: null,        // { ids:[], approver:"" }
     decideDialog: null,        // { id, action }
 
@@ -494,6 +501,29 @@
   ============================================================ */
   function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; }); }
   function el(id){ return document.getElementById(id); }
+
+  /* ============================================================
+     RE-ENTRANCY GUARD
+
+     Every action that writes to the server goes through this. Disabling
+     the button is not enough on its own: render() replaces the whole DOM,
+     so the disabled button is a NEW element, while the clicks still
+     arriving in that same frame land on the OLD one, which is detached but
+     very much alive and still carrying its handler. Three fast clicks on
+     "Send" therefore produced three records.
+
+     A lock held outside the DOM is checked before any work happens, so the
+     duplicate clicks return immediately whichever element they hit.
+  ============================================================ */
+  var __entlogBusy = {};
+  function once(key, fn){
+    return async function(){
+      if(__entlogBusy[key]) return;
+      __entlogBusy[key] = true;
+      try { return await fn.apply(this, arguments); }
+      finally { __entlogBusy[key] = false; }
+    };
+  }
   function todayISO(){ var d=new Date(); return d.toISOString().slice(0,10); }
   function fmtDate(s){ if(!s) return "—"; try{ var d=new Date(s+"T00:00:00"); return d.toLocaleDateString(undefined,{day:"2-digit",month:"short",year:"numeric"}); }catch(e){ return s; } }
   function fmtDateTime(s){ if(!s) return "—"; try{ var d=new Date(s); return d.toLocaleString(undefined,{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}); }catch(e){ return s; } }
@@ -526,7 +556,16 @@
     var res = await fetch("/api"+path, opts);
     var data = null;
     try{ data = await res.json(); }catch(e){ data = null; }
-    if(!res.ok){ throw new Error((data && data.error) || ("Request failed ("+res.status+")")); }
+    if(!res.ok){
+      // Carry the status and the server's own explanation through, instead
+      // of flattening everything to a bare code. "entry_locked" on its own
+      // is not something to show a person; the `detail` beside it is.
+      var err = new Error((data && (data.detail || data.error)) || ("Request failed ("+res.status+")"));
+      err.status = res.status;
+      err.code = data && data.error;
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
@@ -544,7 +583,25 @@
   async function dApproveSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/approve"); }
   async function dRejectSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/reject"); }
   async function dAddEntry(data){ return (await api("POST","/entries", data)).entry.id; }
-  async function dUpdateEntry(id, data){ return (await api("PATCH","/entries/"+id, data)).entry; }
+  async function dUpdateEntry(id, data){
+    // Attach the version this edit was composed against, whenever we are
+    // the ones holding the record open. The server refuses the save if the
+    // row has moved since, which is what stops two people silently
+    // discarding each other's work. Every save path goes through here, so
+    // attaching it here covers all of them.
+    var payload = data;
+    if(state.entryLock && String(state.entryLock.id) === String(id)
+       && data && typeof data === "object" && !("rowVersion" in data)){
+      payload = Object.assign({}, data, { rowVersion: state.entryLock.rowVersion });
+    }
+    var entry = (await api("PATCH","/entries/"+id, payload)).entry;
+    // Keep our copy of the version current, so a second save in the same
+    // sitting is not rejected against the version we ourselves replaced.
+    if(state.entryLock && String(state.entryLock.id) === String(id) && entry && entry.rowVersion){
+      state.entryLock.rowVersion = entry.rowVersion;
+    }
+    return entry;
+  }
   async function dDeleteEntry(id){ await api("DELETE","/entries/"+id); }
   async function dListEntriesByAuthor(username){
     var path = username===state.user.username ? "/entries/mine" : "/entries/by-author/"+encodeURIComponent(username);
@@ -585,6 +642,25 @@
   async function fbSetStatus(id, status){ return await api("PATCH","/feedback/"+id, {status:status}); }
   async function fbAddNote(id, note){ return (await api("POST","/feedback/"+id+"/notes", {note:note})).notes; }
   async function fbSummary(){ return await api("GET","/feedback/summary"); }
+
+  /* ---------------- account lifecycle ---------------- */
+  async function acctOverview(){ return await api("GET","/account/overview"); }
+  async function acctDeactivate(reason, note){ return await api("POST","/account/deactivate",{reason:reason, note:note}); }
+  async function acctRequestDeletion(reason, username){ return await api("POST","/account/request-deletion",{reason:reason, username:username}); }
+  async function acctCancelDeletion(username){ return await api("POST","/account/cancel-deletion",{username:username}); }
+  async function acctRequests(){ return await api("GET","/account/requests"); }
+  async function acctDecide(id, decision, note){ return await api("POST","/account/requests/"+id+"/decide",{decision:decision, note:note}); }
+  async function acctRestore(username, password){ return await api("POST","/account/restore/"+encodeURIComponent(username),{password:password}); }
+  async function acctArchives(){ return (await api("GET","/account/archives")).archives; }
+
+  /* ---------------- edit locks ---------------- */
+  async function lockEntry(id){ return await api("POST","/entries/"+id+"/lock",{}); }
+  async function unlockEntry(id){ try{ return await api("POST","/entries/"+id+"/unlock",{}); }catch(e){ return null; } }
+
+  /* ---------------- bulk list add ---------------- */
+  async function bulkAddList(key, text, preview){
+    return await api("POST","/config/bulk-add",{list:key, text:text, preview:!!preview});
+  }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
@@ -759,6 +835,12 @@
     state.manageUsersLoaded = true;
   }
 
+  async function refreshAccountBadge(){
+    var caps = state.capabilities || {};
+    if(!(caps.isHod || caps.isCoordinator || caps.isDeveloper)){ state.accountReqCount = 0; return; }
+    try{ state.accountReqCount = ((await acctRequests()).pending || []).length; }
+    catch(e){ state.accountReqCount = 0; }
+  }
   async function refreshFeedbackBadge(){
     if(!canReadFeedback()){ state.feedbackOpenCount = 0; return; }
     try{ state.feedbackOpenCount = (await fbSummary()).open || 0; }catch(e){ state.feedbackOpenCount = 0; }
@@ -776,9 +858,10 @@
         await loadRoster();
         await refreshApprovalSummary();
         await refreshFeedbackBadge();
+        await refreshAccountBadge();
         if(caps.canApprove){ await loadSignupRequests(); }
       }
-      else if(role==="developer"){ await refreshFeedbackBadge(); }
+      else if(role==="developer"){ await refreshFeedbackBadge(); await refreshAccountBadge(); }
       else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); await loadSignupRequests(); }
       state.loading=false; render(); return;
     }
@@ -787,6 +870,20 @@
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
     if(v==="developer-users"){ await loadDevUsers(); render(); return; }
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
+    if(v==="account"){
+      state.loading=true; state.accountAction=null; render();
+      try{ state.account = await acctOverview(); }catch(e){ state.account = null; }
+      state.loading=false; render(); return;
+    }
+    if(v==="account-requests"){
+      state.loading=true; render();
+      try{ state.accountRequests = await acctRequests(); }catch(e){ state.accountRequests = null; }
+      if((state.capabilities||{}).isDeveloper){
+        try{ state.accountArchives = await acctArchives(); }catch(e){ state.accountArchives = null; }
+      }
+      state.accountReqCount = (state.accountRequests && state.accountRequests.pending || []).length;
+      state.loading=false; render(); return;
+    }
     if(v==="feedback"){
       state.loading=true; render();
       try{ state.feedbackMine = await fbMine(); }catch(e){ state.feedbackMine = []; }
@@ -923,7 +1020,12 @@
   function wizPeopleDisplayNames(){
     return (state.wiz.peopleList||[]).map(function(p){ return p.displayName; });
   }
-  function cancelWizard(){ state.wiz=null; render(); }
+  function cancelWizard(){
+    // Hand the record straight back rather than making the next person wait
+    // out the lease.
+    releaseEntryLock();
+    state.wiz=null; render();
+  }
 
   // Re-opens the wizard pre-filled from an existing entry, in edit mode
   // (state.wiz.editingId set) so the submitX() functions PATCH instead of
@@ -936,9 +1038,54 @@
   // edits into it) and (b) a snapshot of the fields that case entry actually
   // shares with this one, so that offer only fires when something shared
   // really changed.
+  /* ------------------------------------------------------------
+     EDIT LEASE
+
+     Claimed when the form opens, refreshed while it stays open, released
+     on save or cancel, and expiring by itself if neither happens -- a
+     browser gives no dependable signal when a tab closes or a laptop
+     shuts, so a lease that waited for an explicit release would strand
+     records.
+  ------------------------------------------------------------ */
+  var __lockTimer = null;
+  function stopLockHeartbeat(){
+    if(__lockTimer){ clearInterval(__lockTimer); __lockTimer = null; }
+  }
+  async function releaseEntryLock(){
+    stopLockHeartbeat();
+    var held = state.entryLock;
+    state.entryLock = null;
+    if(held) await unlockEntry(held.id);
+  }
+  async function claimEntryLock(id){
+    var r = await lockEntry(id);            // throws 423 if someone else holds it
+    state.entryLock = { id: id, rowVersion: r.rowVersion };
+    stopLockHeartbeat();
+    // Refreshed at a third of the lease, so an open form never lapses
+    // while somebody is actually in front of it.
+    __lockTimer = setInterval(function(){
+      if(!state.entryLock){ stopLockHeartbeat(); return; }
+      lockEntry(state.entryLock.id).catch(function(){});
+    }, Math.max(60, Math.round((r.lockMinutes||10) * 60 / 3)) * 1000);
+    return r;
+  }
+
   async function editEntry(id){
     var e = findEntryById(id);
     if(!e) return;
+    try{
+      await claimEntryLock(id);
+    }catch(err){
+      if(err && err.status === 423){
+        var who = (err.data && err.data.lock) || {};
+        toast((who.displayName || "Someone else") + " has this record open" +
+              (who.since ? " (since " + who.since.slice(11,16) + ")" : "") +
+              " — it will free up on its own if they have left it.");
+        return;
+      }
+      toast(err && err.message || "Could not open that for editing.");
+      return;
+    }
     await loadConsultants(); // normally loaded on the way into "Log Entry"; edit jumps straight to the form
     var type = normType(e);
     var fields = Object.assign({}, e);
@@ -1218,7 +1365,7 @@
         var linkedCaseId = state.wiz.linkedCaseId || null;
         var origSnapshot = state.wiz.origSnapshot || null;
         await dUpdateEntry(editingId, data);
-        state.wiz = null; state.myEntriesLoaded = false;
+        finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
         toast("Entry updated.");
         state.view = "resident-entries";
         render();
@@ -1249,7 +1396,7 @@
         startWizard("case", { hospitalNumber:data.hospitalNumber, age:data.age, sex:data.sex, diagnoses:data.diagnoses.slice(), diagnosesSecondary:data.diagnosesSecondary.slice(), comorbidities:data.comorbidities.slice(), procedures:data.procedures.slice(), linkedFromId:newId });
         return;
       }
-      state.wiz = null;
+      finishEditing(); state.wiz = null;
       toast("Entry logged.");
       state.view = "resident-entries";
       render();
@@ -1288,7 +1435,7 @@
     var otherEditingId = state.wiz.editingId;
     try{
       if(otherEditingId){ await dUpdateEntry(otherEditingId, data); } else { await dAddEntry(data); }
-      state.wiz = null; state.myEntriesLoaded = false;
+      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
       toast(otherEditingId ? "Entry updated." : "Entry logged.");
       state.view = "resident-entries";
       render();
@@ -1302,6 +1449,9 @@
   // procedure-block validation the same way when status is "draft". Only
   // ever called for Surgical/Other Procedure (the only two entry types
   // wizDraftButtons() shows a "Save as draft" button for).
+  // Called at the end of every successful save, whichever form it came from.
+  function finishEditing(){ releaseEntryLock(); }
+
   async function wizSaveDraft(){
     syncWizFieldsFromDom();
     state.wiz.fieldErrors = {};
@@ -1330,7 +1480,7 @@
     var editingId = state.wiz.editingId;
     try{
       if(editingId){ await dUpdateEntry(editingId, data); } else { await dAddEntry(data); }
-      state.wiz = null; state.myEntriesLoaded = false;
+      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
       toast("Draft saved — you can continue it later from My Entries.");
       state.view = "resident-entries";
       render();
@@ -1360,7 +1510,7 @@
     var caseEditingId = state.wiz.editingId;
     try{
       if(caseEditingId){ await dUpdateEntry(caseEditingId, data); } else { await dAddEntry(data); }
-      state.wiz = null; state.myEntriesLoaded = false;
+      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
       toast(caseEditingId ? "Case updated." : "Case logged.");
       state.view = "resident-entries";
       render();
@@ -1387,7 +1537,7 @@
     var seminarEditingId = state.wiz.editingId;
     try{
       if(seminarEditingId){ await dUpdateEntry(seminarEditingId, data); } else { await dAddEntry(data); }
-      state.wiz = null; state.myEntriesLoaded = false;
+      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
       toast(seminarEditingId ? "Entry updated." : "Seminar/presentation logged.");
       state.view = "resident-entries";
       render();
@@ -1413,7 +1563,7 @@
     var academicEditingId = state.wiz.editingId;
     try{
       if(academicEditingId){ await dUpdateEntry(academicEditingId, data); } else { await dAddEntry(data); }
-      state.wiz = null; state.myEntriesLoaded = false;
+      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
       toast(academicEditingId ? "Entry updated." : "Academic activity logged.");
       state.view = "resident-entries";
       render();
@@ -2122,10 +2272,11 @@
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
       items.push(["feedback","Feedback"]);
+      if(caps.isHod || caps.isCoordinator) items.push(["account-requests","Account Requests"]);
       items.push(["account","My Account"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -2144,6 +2295,7 @@
         var badge = "";
         if(item[0]==="developer-password-requests" && pendingCount>0) badge = '<span class="alert-count">'+pendingCount+'</span>';
         if(item[0]==="feedback" && state.feedbackOpenCount>0) badge = '<span class="alert-count">'+state.feedbackOpenCount+'</span>';
+        if(item[0]==="account-requests" && state.accountReqCount>0) badge = '<span class="alert-count">'+state.accountReqCount+'</span>';
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
         if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
@@ -3319,18 +3471,266 @@
     '</div>';
   }
 
+  /* ============================================================
+     MY ACCOUNT
+  ============================================================ */
+  var ROLE_ASSIGNMENT_LABEL = {
+    hod: "Head of Department", coordinator: "Course Coordinator", head_of_unit: "Head of Unit",
+  };
+  var ACCOUNT_STATE_CHIP = {
+    active:      null,
+    deactivated: ["Deactivated", "chip-amber"],
+    closing:     ["Closing",     "chip-red"],
+    deleted:     ["Account closed", "chip-grey"],
+    unknown:     ["No longer on the system", "chip-grey"],
+  };
+  // Shown beside a name wherever it appears. A closed account's name stays
+  // on the records it is part of -- they are somebody else's evidence -- so
+  // it is flagged rather than removed.
+  function accountStateChip(state_){
+    var d = ACCOUNT_STATE_CHIP[state_ || "active"];
+    return d ? ' <span class="chip '+d[1]+'" style="font-size:10.5px;">'+esc(d[0])+'</span>' : "";
+  }
+
+  function kv(k, v){
+    return '<div class="acct-kv"><div class="k">'+esc(k)+'</div><div class="v">'+(v||'<span class="muted">—</span>')+'</div></div>';
+  }
+
   function renderMyAccount(){
-    return ''+
-    '<div class="card"><h2>Change password</h2>'+
-      '<div class="field"><label for="pw-old">Current password</label><input id="pw-old" type="password"></div>'+
-      '<div class="row2">'+
-        '<div class="field"><label for="pw-new">New password</label><input id="pw-new" type="password"></div>'+
-        '<div class="field"><label for="pw-confirm">Confirm new password</label><input id="pw-confirm" type="password"></div>'+
+    var a = state.account;
+    if(!a) return skeletonDash();
+    var p = a.profile;
+    var isTrainee = isTraineeRole(p.role);
+
+    var identity = '<div class="card"><div class="section-head"><h2>'+esc(p.displayName)+'</h2>'+
+        '<span class="chip chip-teal">'+esc(roleLabel(p.role))+'</span></div>'+
+      '<div class="acct-grid">'+
+        kv("Username", '<span class="tabular">'+esc(p.username)+'</span>')+
+        kv("Role", esc(roleLabel(p.role)))+
+        kv(isTrainee ? "Batch" : "Designation", esc((isTrainee ? p.pgYear : p.designation) || ""))+
+        kv(isTrainee ? "Current posting" : "Unit", p.unit ? unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>' : "")+
+        kv("Account opened", fmtDate((p.createdAt||"").slice(0,10)))+
+        kv("Last signed in", p.lastSeenAt ? fmtDateTime(p.lastSeenAt) : "")+
+      '</div></div>';
+
+    // Appointments, with how long each has actually run.
+    var appts = "";
+    if(!isTrainee){
+      var rows = (a.assignments||[]).map(function(x){
+        var served = x.startAt ? daysBetween(x.startAt, x.endAt && x.endAt < todayISO() ? x.endAt : todayISO()) : null;
+        return '<tr><td>'+esc(ROLE_ASSIGNMENT_LABEL[x.role]||x.role)+'</td>'+
+          '<td>'+(x.unit ? unitShortHtml(x.unit) : '<span class="muted">All units</span>')+'</td>'+
+          '<td class="tabular">'+fmtDate(x.startAt)+'</td>'+
+          '<td class="tabular">'+(x.endAt ? fmtDate(x.endAt) : '<span class="muted">open</span>')+'</td>'+
+          '<td class="tabular">'+(served!=null && served>0 ? humanSpan(served) : "—")+'</td>'+
+          '<td><span class="chip '+(x.active?"chip-green":"chip-grey")+'">'+(x.active?"In force":"Lapsed")+'</span></td></tr>';
+      }).join("");
+      appts = '<div class="card"><h2 style="font-size:15px;">Appointments</h2>'+
+        (rows ? '<div class="table-wrap"><table><thead><tr><th>Role</th><th>Unit</th><th>From</th><th>To</th><th>Served</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+              : '<p class="muted" style="font-size:13px;">No Head of Unit, Course Coordinator or Head of Department appointment on file.</p>')+
+      '</div>';
+    }
+
+    // Postings, for a trainee.
+    var postings = "";
+    if(isTrainee){
+      var b = postingBlocks(a.postings||[]);
+      var prow = b.all.slice().reverse().map(function(x){
+        var st = x.startDate>b.today ? ["Upcoming","chip-teal"]
+          : (!x.endDate || x.endDate>=b.today) ? ["Current","chip-green"] : ["Completed","chip-grey"];
+        var end = (!x.endDate || x.endDate>b.today) ? b.today : x.endDate;
+        return '<tr><td>'+unitShortHtml(x.unit)+'</td><td class="tabular">'+fmtDate(x.startDate)+'</td>'+
+          '<td class="tabular">'+(x.endDate?fmtDate(x.endDate):'<span class="muted">open</span>')+'</td>'+
+          '<td class="tabular">'+(x.startDate>b.today ? "—" : humanSpan(daysBetween(x.startDate,end)))+'</td>'+
+          '<td><span class="chip '+st[1]+'">'+st[0]+'</span></td></tr>';
+      }).join("");
+      postings = '<div class="card"><div class="section-head"><h2 style="font-size:15px;">My postings</h2>'+
+          '<span class="muted" style="font-size:12.5px;">'+humanSpan(b.servedDays)+' served</span></div>'+
+        (prow ? '<div class="table-wrap"><table><thead><tr><th>Unit</th><th>From</th><th>To</th><th>Served</th><th></th></tr></thead><tbody>'+prow+'</tbody></table></div>'
+              : '<p class="muted" style="font-size:13px;">None yet — add them under My Postings.</p>')+
+      '</div>';
+    }
+
+    // Who else is in this unit.
+    var m = a.members || {consultants:[], trainees:[]};
+    function memberList(list, empty){
+      if(!list.length) return '<p class="muted" style="font-size:13px;">'+empty+'</p>';
+      return '<div class="member-list">'+list.map(function(x){
+        return '<div class="member'+(x.username===p.username?" me":"")+'">'+
+          '<span class="member-name">'+esc(x.displayName)+accountStateChip(x.status)+
+            (x.username===p.username?' <span class="chip chip-teal" style="font-size:10.5px;">You</span>':'')+'</span>'+
+          '<span class="muted">'+esc(x.designation || x.pgYear || roleLabel(x.role))+'</span>'+
+        '</div>';
+      }).join("")+'</div>';
+    }
+    var unitCard = '<div class="card"><h2 style="font-size:15px;">'+
+        (p.unit ? esc(unitShort(p.unit))+' — who else is here' : 'Your unit')+'</h2>'+
+      (p.unit ? '<div class="row2">'+
+          '<div><div class="exp-sub">Consultants</div>'+memberList(m.consultants, "None on file for this unit.")+'</div>'+
+          '<div><div class="exp-sub">Trainees</div>'+memberList(m.trainees, "Nobody posted here at the moment.")+'</div>'+
+        '</div>'
+        : '<p class="muted" style="font-size:13px;">'+(isTrainee
+            ? 'No posting covers today, so there is no unit to show. Add one under My Postings.'
+            : 'No home unit is set on your account. Your Developer admin can set one.')+'</p>')+
+    '</div>';
+
+    // Password, condensed to one row.
+    var password = '<div class="card"><h2 style="font-size:15px;">Password</h2>'+
+      '<div class="row3">'+
+        '<div class="field"><label for="pw-old">Current</label><input id="pw-old" type="password" autocomplete="current-password"></div>'+
+        '<div class="field"><label for="pw-new">New</label><input id="pw-new" type="password" autocomplete="new-password"></div>'+
+        '<div class="field"><label for="pw-confirm">Confirm new</label><input id="pw-confirm" type="password" autocomplete="new-password"></div>'+
       '</div>'+
-      '<button class="btn btn-primary" id="btn-change-password">Update password</button>'+
-    '</div>'+
-    '<div class="card"><h2 style="font-size:15px;">Forgot it entirely?</h2>'+
-      '<p class="muted">If you’re locked out, sign out and use “Forgot your password?” on the sign-in screen — your Developer admin will set a new one for you.</p>'+
+      '<div class="btn-row"><span class="muted" style="font-size:12.5px; align-self:center;">Locked out instead? Sign out and use “Forgot your password?”.</span>'+
+        '<button class="btn btn-primary" id="btn-change-password">Update password</button></div>'+
+    '</div>';
+
+    return identity + appts + postings + unitCard + password + renderAccountClosure(a);
+  }
+
+  /* ------------------------------------------------------------
+     Closing an account: deactivate (reversible by signing in) or
+     delete (approved, then a buffer, then a tombstone).
+  ------------------------------------------------------------ */
+  function renderAccountClosure(a){
+    var req = a.request;
+    var days = a.deletionBufferDays || 14;
+
+    if(req && req.kind === "delete"){
+      var pending = req.status === "pending";
+      return '<div class="card danger-card">'+
+        '<div class="section-head"><h2 style="font-size:15px;">Account closure</h2>'+
+          '<span class="chip '+(pending?"chip-amber":"chip-red")+'">'+
+            (pending ? "Awaiting approval" : "Closing in "+(req.daysRemaining==null?days:req.daysRemaining)+" days")+'</span></div>'+
+        '<p style="font-size:13.5px;">'+(pending
+          ? 'Your request to close this account is with '+esc(req.requestedBy===state.user.username?"the Head of Department":"whoever can approve it")+'. Nothing has changed yet.'
+          : 'This account is scheduled to close on <b>'+fmtDate((req.scheduledFor||"").slice(0,10))+'</b>. '+
+            'Until then it can still be stopped.')+'</p>'+
+        '<p class="muted" style="font-size:12.5px;">Reason given: '+esc(req.reason||"—")+'</p>'+
+        '<div class="btn-row"><span></span>'+
+          '<button class="btn" id="cancel-deletion">Stop the closure</button></div>'+
+      '</div>';
+    }
+
+    var reasons = a.deactivationReasons || [];
+    var mode = state.accountAction;
+    return '<div class="card danger-card">'+
+      '<h2 style="font-size:15px;">Taking a break, or leaving</h2>'+
+      '<div class="acct-actions">'+
+        '<button class="btn'+(mode==="deactivate"?" btn-primary":"")+'" data-acct-action="deactivate">Deactivate my account</button>'+
+        '<button class="btn btn-danger'+(mode==="delete"?" btn-primary":"")+'" data-acct-action="delete">Close my account permanently</button>'+
+      '</div>'+
+      (mode==="deactivate" ?
+        '<div class="acct-panel">'+
+          '<p style="font-size:13.5px;">Takes effect immediately and signs you out. '+
+            '<b>You bring it back simply by signing in again</b> — nobody has to do anything for you. '+
+            'Your entries, sign-offs and everything else stay exactly as they are.</p>'+
+          '<div class="field"><label for="deact-reason">Reason</label><select id="deact-reason">'+
+            reasons.map(function(r){ return '<option>'+esc(r)+'</option>'; }).join("")+'</select></div>'+
+          '<div class="field"><label for="deact-note">Anything to add (optional)</label>'+
+            '<textarea id="deact-note" rows="2" placeholder="Your unit sees this, so they know when to expect you back."></textarea></div>'+
+          '<div class="btn-row"><button class="btn" data-acct-action="">Cancel</button>'+
+            '<button class="btn btn-primary" id="do-deactivate">Deactivate and sign out</button></div>'+
+        '</div>' : '')+
+      (mode==="delete" ?
+        '<div class="acct-panel">'+
+          '<div class="notice-banner"><span>This is not reversible after '+days+' days. '+
+            (isTraineeRole(a.profile.role)
+              ? 'Your logbook is the evidence for your certification — the entries themselves are kept and stay visible to your consultants, but <b>you will lose access to them</b>.'
+              : 'Your name stays on every operation record and sign-off you are part of, flagged as closed, because those records belong to the trainees who logged them.')+
+          '</span></div>'+
+          '<p style="font-size:13.5px;">What happens: your request goes to '+
+            (isTraineeRole(a.profile.role) ? 'the <b>Head of Department</b>' : 'the <b>Head of Department or a Developer admin</b>')+
+            '. If they agree, the account is suspended and a <b>'+days+'-day</b> countdown starts. '+
+            'You or they can stop it at any point in those '+days+' days. After that the sign-in is destroyed '+
+            'and the profile cleared, while everything you logged stays on the system.</p>'+
+          '<div class="field"><label for="del-reason">Why are you closing it?</label>'+
+            '<textarea id="del-reason" rows="3" placeholder="This is recorded and shown to whoever decides."></textarea></div>'+
+          '<div class="btn-row"><button class="btn" data-acct-action="">Cancel</button>'+
+            '<button class="btn btn-danger" id="do-request-deletion">Request closure</button></div>'+
+        '</div>' : '')+
+    '</div>';
+  }
+
+  /* ============================================================
+     ACCOUNT REQUESTS  (Head of Department / Developer)
+  ============================================================ */
+  function renderAccountRequests(){
+    if(state.loading) return skeletonDash();
+    var d = state.accountRequests;
+    if(!d) return '<div class="card"><div class="empty-state">Loading…</div></div>';
+    var days = d.bufferDays || 14;
+
+    function reqRow(r, inBuffer){
+      var trainee = isTraineeRole((r.roleOfUser||""));
+      return '<div class="q-row'+(inBuffer?" q-overdue":"")+'">'+
+        '<div class="q-main">'+
+          '<div class="q-top"><b>'+esc(r.displayName||r.username)+'</b>'+
+            '<span class="chip '+(inBuffer?"chip-red":"chip-amber")+'">'+
+              (inBuffer ? (r.daysRemaining==null?days:r.daysRemaining)+" days left" : "Awaiting decision")+'</span></div>'+
+          '<div class="fb-body">'+esc(r.reason||"No reason given.")+'</div>'+
+          '<div class="q-meta muted">Asked by '+esc(r.requestedByName||r.requestedBy)+
+            ' · '+fmtDateTime(r.requestedAt)+
+            (inBuffer && r.scheduledFor ? ' · closes '+fmtDate((r.scheduledFor||"").slice(0,10)) : '')+
+            (r.decidedBy ? ' · approved by '+esc(r.decidedBy) : '')+'</div>'+
+        '</div>'+
+        '<div class="q-act">'+
+          (inBuffer
+            ? '<button class="btn btn-sm" data-acct-cancel="'+esc(r.username)+'">Stop closure</button>'
+            : '<button class="btn btn-sm" data-acct-decide="'+r.id+'" data-decision="reject">Refuse</button>'+
+              '<button class="btn btn-sm btn-danger" data-acct-decide="'+r.id+'" data-decision="approve">Approve closure</button>')+
+        '</div></div>';
+    }
+
+    var pending = d.pending || [], buffer = d.inBuffer || [], off = d.deactivated || [];
+    return ''+
+      '<div class="stat-grid">'+
+        statTile(pending.length, "Awaiting your decision", "approvals")+
+        statTile(buffer.length, "Closing within "+days+" days", "close")+
+        statTile(off.length, "Currently deactivated", "password")+
+      '</div>'+
+      '<div class="card"><h2>Closure requests</h2>'+
+        '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+
+          'Approving one suspends the account and starts a '+days+'-day countdown. Nothing is destroyed '+
+          'until it runs out, and it can be stopped at any point. Entries, sign-offs and names on '+
+          'operation records are kept whatever happens.'+
+          (d.canDecideTrainees ? '' : ' Trainee accounts can only be decided by the Head of Department.')+'</p>'+
+        (pending.length ? '<div class="q-list">'+pending.map(function(r){ return reqRow(r,false); }).join("")+'</div>'
+                        : '<p class="muted" style="font-size:13px;">Nothing waiting.</p>')+
+      '</div>'+
+      (buffer.length ? '<div class="card"><h2 style="font-size:15px;">Closing soon</h2>'+
+        '<div class="q-list">'+buffer.map(function(r){ return reqRow(r,true); }).join("")+'</div></div>' : '')+
+      '<div class="card"><h2 style="font-size:15px;">Deactivated accounts</h2>'+
+        '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+
+          'Someone who switched their own account off comes back the moment they sign in. '+
+          'One an admin switched off stays off until an admin turns it back on.</p>'+
+        (off.length ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Why</th><th>Since</th><th>Switched off by</th></tr></thead><tbody>'+
+          off.map(function(u){
+            return '<tr><td>'+esc(u.displayName)+'</td><td>'+esc(roleLabel(u.role))+'</td>'+
+              '<td>'+esc(u.reason||"—")+'</td><td class="tabular">'+fmtDate((u.since||"").slice(0,10))+'</td>'+
+              '<td>'+(u.lifecycle==="self_deactivated"
+                 ? '<span class="chip chip-teal">Themselves</span>'
+                 : '<span class="chip chip-amber">An admin</span>')+'</td></tr>';
+          }).join("")+'</tbody></table></div>'
+          : '<p class="muted" style="font-size:13px;">None.</p>')+
+      '</div>'+
+      (state.accountArchives ? renderAccountArchives() : '');
+  }
+
+  function renderAccountArchives(){
+    var rows = state.accountArchives || [];
+    return '<div class="card"><h2 style="font-size:15px;">Archived accounts</h2>'+
+      '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+
+        'A full copy of the account and everything it logged, taken the moment closure was approved. '+
+        'Developer-only. Downloading one gives you a JSON file you can keep or hand back.</p>'+
+      (rows.length ? '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Username</th><th>Archived</th><th>By</th><th></th></tr></thead><tbody>'+
+        rows.map(function(r){
+          return '<tr><td>'+esc(r.display_name||"—")+'</td><td class="tabular">'+esc(r.username)+'</td>'+
+            '<td class="tabular">'+fmtDate((r.archived_at||"").slice(0,10))+'</td><td>'+esc(r.archived_by||"—")+'</td>'+
+            '<td><button class="btn btn-sm" data-archive-dl="'+r.id+'">Download</button>'+
+              '<button class="btn btn-sm" data-archive-restore="'+esc(r.username)+'">Restore login</button></td></tr>';
+        }).join("")+'</tbody></table></div>'
+        : '<p class="muted" style="font-size:13px;">None yet.</p>')+
     '</div>';
   }
 
@@ -3748,6 +4148,38 @@
   /* ============================================================
      RENDER: DEVELOPER - MANAGE LISTS
   ============================================================ */
+  // Adding a department's diagnosis list one box-and-button at a time is
+  // forty round trips. Paste the block, see exactly what will happen, then
+  // commit -- the preview matters more than the paste, because a silent
+  // merge into a list everyone selects from is hard to unpick afterwards.
+  function bulkAddPanel(title){
+    var p = state.bulkList.preview;
+    return '<div class="acct-panel">'+
+      '<div class="exp-sub">Bulk add to “'+esc(title)+'”</div>'+
+      '<p class="muted" style="font-size:12.5px; margin:-2px 0 8px;">'+
+        'One per line, or separated by commas or semicolons. Anything already in the list is skipped.</p>'+
+      '<textarea id="bulk-text" rows="6" placeholder="Tympanoplasty – Type 1&#10;Tympanoplasty – Type 2&#10;Cortical mastoidectomy">'+
+        esc((state.bulkList.text)||"")+'</textarea>'+
+      (p ? '<div class="bulk-preview">'+
+          '<div><b>'+p.added.length+'</b> to add'+
+            (p.alreadyPresent.length ? ' · <span class="muted">'+p.alreadyPresent.length+' already in the list</span>' : '')+
+            (p.repeatedInPaste.length ? ' · <span class="muted">'+p.repeatedInPaste.length+' repeated in the paste</span>' : '')+
+            ' · list becomes <b>'+p.total+'</b></div>'+
+          (p.added.length ? '<div class="bulk-chips">'+p.added.slice(0,40).map(function(x){
+              return '<span class="chip chip-green">'+esc(x)+'</span>'; }).join("")+
+              (p.added.length>40 ? '<span class="muted"> +'+(p.added.length-40)+' more</span>' : '')+'</div>' : '')+
+          (p.alreadyPresent.length ? '<div class="bulk-chips">'+p.alreadyPresent.slice(0,20).map(function(x){
+              return '<span class="chip chip-grey">'+esc(x)+'</span>'; }).join("")+'</div>' : '')+
+        '</div>' : '')+
+      '<div class="btn-row"><button class="btn btn-sm" id="bulk-close">Cancel</button>'+
+        '<span style="display:flex; gap:8px;">'+
+          '<button class="btn btn-sm" id="bulk-preview">Check</button>'+
+          '<button class="btn btn-sm btn-primary" id="bulk-apply"'+(p && p.added.length?'':' disabled')+'>'+
+            (p && p.added.length ? 'Add '+p.added.length : 'Add')+'</button>'+
+        '</span></div>'+
+    '</div>';
+  }
+
   function renderDeveloperLists(){
     var cats = state.config.categories;
     if(!state.devListDraft.selectedCat && cats.length) state.devListDraft.selectedCat = cats[0].key;
@@ -3787,7 +4219,9 @@
         '<div style="display:flex; gap:8px;">'+
           '<input type="text" id="newitem-'+spec.key+'" placeholder="Add an option…" style="flex:1;">'+
           '<button class="btn btn-sm btn-primary" data-simple-add="'+spec.key+'">Add</button>'+
+          '<button class="btn btn-sm" data-bulk-open="'+spec.key+'">Bulk add…</button>'+
         '</div>'+
+        (state.bulkList && state.bulkList.key===spec.key ? bulkAddPanel(spec.title) : '')+
       '</div>';
     }).join("");
 
@@ -3857,7 +4291,28 @@
       return '<tr><td>'+esc(a.consultantDisplayName||a.consultantUsername)+'</td><td>'+esc(roleTypeLabel[a.role]||a.role)+'</td><td>'+(a.unit?unitShortHtml(a.unit):"All units")+'</td><td class="tabular">'+fmtDateTime(a.startAt)+'</td><td class="tabular">'+fmtDateTime(a.endAt)+'</td><td>'+statusChip+'</td><td><button class="btn btn-sm btn-danger" data-remove-assignment="'+a.id+'">End now</button></td></tr>';
     }).join("");
 
+    // Who currently holds each appointment, side by side. There is no limit
+    // of one per role -- several people can be Course Coordinator at the
+    // same time, and always could -- but reading that off a date-sorted
+    // history was work.
+    var holders = ["hod","coordinator","head_of_unit"].map(function(r){
+      var live = state.roleAssignments.filter(function(a){ return a.role===r && isAssignmentActive(a); });
+      return '<div class="holder-col"><div class="exp-sub">'+esc(roleTypeLabel[r])+'</div>'+
+        (live.length ? live.map(function(a){
+            return '<div class="member"><span class="member-name">'+esc(a.consultantDisplayName||a.consultantUsername)+'</span>'+
+              '<span class="muted">'+(a.unit?esc(unitShort(a.unit)):"All units")+
+              (a.endAt?' · to '+fmtDate(String(a.endAt).slice(0,10)):'')+'</span></div>';
+          }).join("")
+          : '<p class="muted" style="font-size:13px;">Nobody appointed.</p>')+
+      '</div>';
+    }).join("");
+
     return ''+
+    '<div class="card"><h2 style="font-size:15px;">Who holds what today</h2>'+
+      '<p class="muted" style="font-size:12.5px; margin-top:-8px; margin-bottom:12px;">'+
+        'Appointments in force right now. More than one person can hold the same role at once.</p>'+
+      '<div class="holder-grid">'+holders+'</div>'+
+    '</div>'+
     '<div class="card"><h2>Units</h2>'+
       '<p class="muted" style="margin-bottom:12px; font-size:12.5px;">The master list of units residents rotate through and consultants belong to. Full name shows at entry time; short form (bold) shows in tables and exports.</p>'+
       unitSections+
@@ -3907,6 +4362,47 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.0", date: "2026-09-26", title: "Accounts, edit locking and bulk lists",
+      note: "Records can no longer be edited by two people at once, and leaving the department is now something the app handles properly.",
+      changes: [
+        ["added", "<b>A record being edited is locked to everyone else.</b> Open one and it is yours; anyone else is told who has it and since when. The lock lapses on its own after 10 minutes, so a closed laptop never strands a record."],
+        ["fixed", "<b>Two people editing the same record no longer lose each other’s work.</b> A save is refused if the record moved while you were typing, and you are told to reopen it. Previously the second save silently overwrote the first — and the edit history then claimed a change that had not been kept."],
+        ["added", "<b>The department can never be left without a Developer.</b> The last one cannot be deleted, deactivated or moved to another role, by themselves or anyone else."],
+        ["added", "<b>Deactivate your own account</b> from My Account — immediate, for long leave or a sabbatical, and <b>reversed simply by signing in again</b>. An account an admin switched off still needs an admin to switch it back on. Reasons are a list the Developer can edit."],
+        ["added", "<b>Closing an account properly.</b> You ask, with a reason; the Head of Department decides for a trainee, either they or a Developer for anyone else; then a <b>14-day countdown</b> that you or they can stop at any point. Nothing is destroyed before it runs out."],
+        ["added", "<b>Closing an account never removes the work.</b> Entries, sign-offs and a consultant’s name on an operation record all stay exactly where they are, flagged as a closed account. Those records are somebody else’s evidence."],
+        ["added", "<b>A full copy of a closed account</b> — profile, entries, postings, sign-offs given, the lot — is taken the moment closure is approved and can be downloaded by the Developer. They can also restore the login afterwards."],
+        ["added", "<b>An Account Requests screen</b> for the Head of Department, Course Coordinator and Developer: what is waiting, what is counting down and how long is left, and who is currently deactivated and whether they switched themselves off."],
+        ["added", "<b>Bulk add to any list.</b> Paste a block of options, see exactly what is new, what is already there and what you repeated, then commit."],
+        ["changed", "<b>My Account rebuilt</b>: your details, your appointments with how long each has run, your postings, everyone else in your unit, and a password change condensed to one row."],
+        ["added", "<b>Units & Roles shows who holds what today</b>, side by side. More than one person can be Course Coordinator at the same time — that has always been true and is now visible."],
+        ["added", "Every account change — who asked, who decided, when and why — is recorded permanently, so it stays answerable after the account itself is gone."],
+      ],
+    },
+    {
+      version: "6.1", date: "2026-09-26", title: "Pre-presentation bug audit",
+      note: "A full pass over the code before showing it to the department: authorisation, malformed input, the approval clock, and how it behaves on a phone.",
+      changes: [
+        ["fixed", "<b>One malformed request could stop every save in the whole app.</b> When a write failed part-way, the database connection was left holding a lock and handed back to the next request still holding it. Reads kept working, so the app looked fine while refusing to save anything — and under the production server it would not have recovered on its own. Now every request releases its connection whether it succeeded or not."],
+        ["fixed", "<b>About thirty ways to make the server error out</b> — an unexpected value in almost any field, including on the sign-in and sign-up screens, which need no account at all. Every field is now checked before it reaches the database, and an unexpected error shows a plain message instead of a page of code."],
+        ["fixed", "<b>A Head of Department could give any consultant sight of a unit’s records</b> by setting their designation to Professor, bypassing the audited appointment screen. Designation is now Developer-only, because it decides what someone can see. Batch changes stay with the Head of Department."],
+        ["fixed", "<b>A Head of Department could deactivate or delete the Developer account</b>, locking out the only role that can manage accounts, units and lists."],
+        ["fixed", "<b>A consultant with no unit access could still look up any account by name</b>, including the Developer’s. Now scoped like everything else."],
+        ["fixed", "<b>A developer could read a trainee’s unfinished draft</b> through the edit route, which the view route has always refused."],
+        ["fixed", "<b>An invalid date saved on an existing entry broke that trainee’s dashboard permanently</b>, with no way back to the entry to fix it. Invalid dates are now refused."],
+        ["fixed", "<b>A record reopened by an edit arrived already flagged overdue</b> and escalated to the Head of Unit on day one, because the waiting clock still ran from the original submission. It now restarts whenever a record lands back in a consultant’s queue."],
+        ["fixed", "<b>A withdrawn record still named the consultant it had been sent to</b>, in the list and in exports."],
+        ["fixed", "<b>An already-signed record could be signed a second time</b>, putting a duplicate signature in its history."],
+        ["fixed", "<b>A case write-up could be linked to another trainee’s operation.</b> It can now only be linked to one of your own."],
+        ["fixed", "<b>Three fast clicks on a Send button created three records.</b> Every action that saves is now guarded against firing twice."],
+        ["fixed", "<b>Every screen scrolled sideways on a phone.</b> The culprit was the top bar, not the content — it now drops the wordmark and role badge on a narrow screen and fits."],
+        ["fixed", "Escape closed two of the five dialogs; it now closes all of them. Buttons, menus and form fields are bigger on touch screens."],
+        ["fixed", "Appointment start and end dates were compared against UTC rather than local time, so a Head of Unit appointed today had no access until the small hours, and an appointment ending today expired a day early."],
+        ["fixed", "An unapproved sign-up appeared in everyone’s “send for sign-off” list. Invalid settings could be saved and then break sign-up and account creation; they are now refused."],
+        ["changed", "Long text is capped at a sensible length per field, a record can cover at most twelve sites, and the approval screens have database indexes so they stay fast as the department’s history grows."],
+      ],
+    },
     {
       version: "6.0", date: "2026-09-26", title: "Roster, export builder and feedback",
       note: "Three additions asked for by the department, plus two roster faults found while building them \u2014 one of them a consultant seeing more than their unit.",
@@ -4237,6 +4733,7 @@
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
     else if(state.view==="feedback") inner = renderFeedback();
+    else if(state.view==="account-requests") inner = renderAccountRequests();
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
       + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
@@ -4359,7 +4856,7 @@
           return;
         }
         state.view = target;
-        state.wiz = null;
+        finishEditing(); state.wiz = null;
         render();
         loadForView();
       };
@@ -4435,7 +4932,7 @@
     var bulkSend = document.querySelector("[data-bulk-send]");
     if(bulkSend) bulkSend.onclick = function(){ openSubmit(pickIds()); };
     var bulkApprove = document.querySelector("[data-bulk-approve]");
-    if(bulkApprove) bulkApprove.onclick = async function(){
+    if(bulkApprove) bulkApprove.onclick = once("bulk-approve", async function(){
       var ids = pickIds();
       if(!window.confirm("Sign off "+ids.length+" record"+(ids.length===1?"":"s")+"? They will be locked to further editing.")) return;
       try{
@@ -4445,7 +4942,7 @@
         toast("Signed off "+r.approved.length+(r.skipped.length?" — "+r.skipped.length+" skipped":"")+".");
         render();
       }catch(e){ toast(e.message||"Could not sign those off."); }
-    };
+    });
     document.querySelectorAll("[data-sign-off]").forEach(function(b){
       b.onclick = function(){ state.decideDialog = { id: b.getAttribute("data-sign-off"), action:"approve" }; render(); };
     });
@@ -4471,7 +4968,7 @@
     var subOv = document.querySelector("[data-submit-overlay]");
     if(subOv) subOv.onclick = function(ev){ if(ev.target===subOv){ state.submitDialog=null; render(); } };
     var subGo = document.querySelector("[data-submit-go]");
-    if(subGo) subGo.onclick = async function(){
+    if(subGo) subGo.onclick = once("submit-approval", async function(){
       var who = (el("submit-approver")||{}).value || "";
       var note = (el("submit-note")||{}).value || "";
       if(!who){ toast("Pick a consultant to send this to."); return; }
@@ -4485,7 +4982,7 @@
         toast(ids.length===1 ? "Sent for sign-off." : "Sent "+ids.length+" records for sign-off.");
         render();
       }catch(e){ subGo.disabled=false; subGo.textContent="Send"; toast(e.message||"Could not send that."); }
-    };
+    });
     // decide dialog
     document.querySelectorAll("[data-decide-cancel]").forEach(function(b){
       b.onclick = function(){ state.decideDialog=null; render(); };
@@ -4493,7 +4990,7 @@
     var decOv = document.querySelector("[data-decide-overlay]");
     if(decOv) decOv.onclick = function(ev){ if(ev.target===decOv){ state.decideDialog=null; render(); } };
     var decGo = document.querySelector("[data-decide-go]");
-    if(decGo) decGo.onclick = async function(){
+    if(decGo) decGo.onclick = once("decide-approval", async function(){
       var d = state.decideDialog, note = (el("decide-note")||{}).value || "";
       if(d.action==="changes" && !note.trim()){ toast("Say what needs changing."); return; }
       decGo.disabled = true; decGo.innerHTML = '<span class="spin"></span>Saving…';
@@ -4504,7 +5001,115 @@
         toast(d.action==="approve" ? "Signed off." : "Sent back with your note.");
         render();
       }catch(e){ decGo.disabled=false; decGo.textContent="Save"; toast(e.message||"Could not save that."); }
-    };
+    });
+
+    /* ---------------- account lifecycle ---------------- */
+    document.querySelectorAll("[data-acct-action]").forEach(function(b){
+      b.onclick = function(){ state.accountAction = b.getAttribute("data-acct-action") || null; render(); };
+    });
+    var doDeact = el("do-deactivate");
+    if(doDeact) doDeact.onclick = once("deactivate", async function(){
+      var reason = (el("deact-reason")||{}).value || "";
+      var note = (el("deact-note")||{}).value || "";
+      if(!window.confirm("Deactivate your account now? You will be signed out, and signing in again brings it straight back.")) return;
+      try{
+        await acctDeactivate(reason, note);
+        toast("Deactivated. Sign in again whenever you are back.");
+        setTimeout(function(){ doLogout(); }, 900);
+      }catch(e){ toast(e.message || "Could not deactivate."); }
+    });
+    var doDel = el("do-request-deletion");
+    if(doDel) doDel.onclick = once("request-deletion", async function(){
+      var reason = (el("del-reason")||{}).value || "";
+      if(!reason.trim()){ toast("Say why you are closing the account."); return; }
+      if(!window.confirm("Send this for approval? Nothing is destroyed yet — you will still have 14 days to stop it after it is approved.")) return;
+      try{
+        var r = await acctRequestDeletion(reason);
+        toast("Sent to "+r.needsApprovalFrom+"."+(r.entriesRetained?" Your "+r.entriesRetained+" logged entries stay on the system.":""));
+        state.account = await acctOverview(); state.accountAction=null; render();
+      }catch(e){ toast(e.message || "Could not send that."); }
+    });
+    var cancelDel = el("cancel-deletion");
+    if(cancelDel) cancelDel.onclick = once("cancel-deletion", async function(){
+      try{
+        await acctCancelDeletion();
+        toast("Closure stopped. Your account stays as it is.");
+        state.account = await acctOverview(); render();
+      }catch(e){ toast(e.message || "Could not stop it."); }
+    });
+
+    document.querySelectorAll("[data-acct-decide]").forEach(function(b){
+      b.onclick = once("acct-decide", async function(){
+        var id = b.getAttribute("data-acct-decide"), decision = b.getAttribute("data-decision");
+        var note = "";
+        if(decision === "approve"){
+          if(!window.confirm("Approve this closure? The account is suspended immediately and destroyed after the buffer, unless somebody stops it. Their entries and sign-offs are kept either way.")) return;
+        } else {
+          note = window.prompt("Why are you refusing it? They will see this.") || "";
+          if(!note.trim()) return;
+        }
+        try{
+          await acctDecide(id, decision, note);
+          state.accountRequests = await acctRequests();
+          state.accountReqCount = (state.accountRequests.pending||[]).length;
+          if((state.capabilities||{}).isDeveloper){ try{ state.accountArchives = await acctArchives(); }catch(e){} }
+          toast(decision === "approve" ? "Approved — the countdown has started." : "Refused.");
+          render();
+        }catch(e){ toast(e.message || "Could not record that."); }
+      });
+    });
+    document.querySelectorAll("[data-acct-cancel]").forEach(function(b){
+      b.onclick = once("acct-cancel", async function(){
+        try{
+          await acctCancelDeletion(b.getAttribute("data-acct-cancel"));
+          state.accountRequests = await acctRequests();
+          state.accountReqCount = (state.accountRequests.pending||[]).length;
+          toast("Closure stopped and the account is back.");
+          render();
+        }catch(e){ toast(e.message || "Could not stop it."); }
+      });
+    });
+    document.querySelectorAll("[data-archive-dl]").forEach(function(b){
+      b.onclick = function(){ window.location.href = "/api/account/archives/"+b.getAttribute("data-archive-dl")+".json"; };
+    });
+    document.querySelectorAll("[data-archive-restore]").forEach(function(b){
+      b.onclick = once("acct-restore", async function(){
+        var u = b.getAttribute("data-archive-restore");
+        var pw = window.prompt("Set a new password for "+u+" (at least 8 characters). Their sign-in no longer exists, so restoring means giving them a new one.");
+        if(pw === null) return;
+        try{
+          await acctRestore(u, pw);
+          toast(u+" can sign in again.");
+          state.accountRequests = await acctRequests(); render();
+        }catch(e){ toast(e.message || "Could not restore that account."); }
+      });
+    });
+
+    /* ---------------- bulk add to a list ---------------- */
+    document.querySelectorAll("[data-bulk-open]").forEach(function(b){
+      b.onclick = function(){ state.bulkList = { key: b.getAttribute("data-bulk-open"), preview: null }; render(); };
+    });
+    var bulkClose = el("bulk-close"); if(bulkClose) bulkClose.onclick = function(){ state.bulkList = null; render(); };
+    var bulkPreview = el("bulk-preview");
+    if(bulkPreview) bulkPreview.onclick = once("bulk-preview", async function(){
+      var text = (el("bulk-text")||{}).value || "";
+      if(!text.trim()){ toast("Paste the options first."); return; }
+      try{
+        state.bulkList.text = text;
+        state.bulkList.preview = await bulkAddList(state.bulkList.key, text, true);
+        render();
+      }catch(e){ toast(e.message || "Could not read that."); }
+    });
+    var bulkApply = el("bulk-apply");
+    if(bulkApply) bulkApply.onclick = once("bulk-apply", async function(){
+      try{
+        var r = await bulkAddList(state.bulkList.key, state.bulkList.text || (el("bulk-text")||{}).value || "", false);
+        if(r.config) state.config = r.config;
+        toast("Added "+r.added.length+" option"+(r.added.length===1?"":"s")+
+              (r.alreadyPresent.length? " — "+r.alreadyPresent.length+" were already there" : "")+".");
+        state.bulkList = null; render();
+      }catch(e){ toast(e.message || "Could not add those."); }
+    });
 
     var themeBtn = el("btn-theme"); if(themeBtn) themeBtn.onclick = cycleTheme;
     // role="button" is a promise that Enter and Space work; keep it.
@@ -4518,7 +5123,14 @@
       window.__entlogEscBound = true;
       document.addEventListener("keydown", function(ev){
         if(ev.key !== "Escape") return;
-        if(state.viewingHistoryEntryId != null){ state.viewingHistoryEntryId = null; render(); }
+        // Topmost first. This list has to name every modal in the app --
+        // it was written when there were two and the dialogs added since
+        // (export, send-for-sign-off, sign-off decision) were never added
+        // to it, so Escape silently did nothing on three of the five.
+        if(state.exportDialog){ state.exportDialog = null; render(); }
+        else if(state.decideDialog){ state.decideDialog = null; render(); }
+        else if(state.submitDialog){ state.submitDialog = null; render(); }
+        else if(state.viewingHistoryEntryId != null){ state.viewingHistoryEntryId = null; render(); }
         else if(state.viewingEntryId){ state.viewingEntryId = null; render(); }
       });
     }
@@ -4837,7 +5449,7 @@
       if(s1) state.feedbackDraft.subject = s1.value;
       if(b1) state.feedbackDraft.body = b1.value;
     }
-    var fbSend = el("fb-send"); if(fbSend) fbSend.onclick = async function(){
+    var fbSend = el("fb-send"); if(fbSend) fbSend.onclick = once("fb-send", async function(){
       syncFeedbackDraft();
       var d = state.feedbackDraft;
       if(!(d.subject||"").trim()){ toast("Give it a one-line subject."); return; }
@@ -4855,7 +5467,7 @@
                       : "Sent. You can follow it under “What I have raised”.");
         render();
       }catch(e){ state.feedbackBusy=false; toast(e.message||"Could not send that."); render(); }
-    };
+    });
     document.querySelectorAll("[data-fb-filter]").forEach(function(b){
       b.onclick = async function(){
         syncFeedbackDraft();
@@ -4973,7 +5585,7 @@
     var addCat = el("add-category"); if(addCat) addCat.onclick = function(){
       addCategory(el("newcat-name").value, el("newcat-color").value);
     };
-    var restoreProcs = el("restore-procs"); if(restoreProcs) restoreProcs.onclick = async function(){
+    var restoreProcs = el("restore-procs"); if(restoreProcs) restoreProcs.onclick = once("restore-procs", async function(){
       restoreProcs.disabled = true; restoreProcs.innerHTML = '<span class="spin"></span>Restoring…';
       try{
         var r = await dRestoreProcedureDefaults();
@@ -4987,7 +5599,7 @@
         restoreProcs.disabled = false; restoreProcs.textContent = "Restore default procedure lists";
         toast(e.message || "Could not restore those.");
       }
-    };
+    });
     document.querySelectorAll("[data-add-proc]").forEach(function(b){
       b.onclick = function(){
         var catKey = b.getAttribute("data-add-proc");
