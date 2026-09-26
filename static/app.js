@@ -861,8 +861,22 @@
         await refreshAccountBadge();
         if(caps.canApprove){ await loadSignupRequests(); }
       }
-      else if(role==="developer"){ await refreshFeedbackBadge(); await refreshAccountBadge(); }
-      else { await loadDevUsers(); await loadDevEntries(); await loadPasswordRequests(); await loadSignupRequests(); }
+      else if(role==="developer"){
+        // These four are what the developer dashboard is BUILT from: the
+        // trainee/consultant/entry tiles, the "N password resets waiting on
+        // you" banner, and the Approvals badge. They used to load in a
+        // trailing `else`, which adding this `else if` for the feedback
+        // badge quietly made unreachable -- there is no fourth role. The
+        // symptom was a developer signing in to 0 trainees, 0 consultants
+        // and 0 entries, with the real figures appearing only after they
+        // happened to visit Users or Data & Export.
+        await loadDevUsers();
+        await loadDevEntries();
+        await loadPasswordRequests();
+        await loadSignupRequests();
+        await refreshFeedbackBadge();
+        await refreshAccountBadge();
+      }
       state.loading=false; render(); return;
     }
     if(v==="resident-log"){ await loadConsultants(); render(); return; }
@@ -4362,6 +4376,14 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.1", date: "2026-09-26", title: "Live-site check",
+      note: "Tested against the deployed site. Two fixes.",
+      changes: [
+        ["fixed", "<b>A Developer signing in saw zero trainees, zero consultants and zero entries on their dashboard.</b> The real figures only appeared after visiting Users or Data & Export. The dashboard's data was being loaded in a branch that an earlier change had made unreachable, so it never ran. The password-reset banner and the Approvals count on that screen were blank for the same reason."],
+        ["fixed", "The three links on the sign-in screen — “Create one”, “Request a reset”, “Developer sign-in” — were too small to tap comfortably on a phone. Same size on screen, bigger target."],
+      ],
+    },
     {
       version: "7.0", date: "2026-09-26", title: "Accounts, edit locking and bulk lists",
       note: "Records can no longer be edited by two people at once, and leaving the department is now something the app handles properly.",

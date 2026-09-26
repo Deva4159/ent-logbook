@@ -890,4 +890,10 @@
     input[type="search"], input[type="number"]{min-height:40px;}
     input[type="checkbox"]{width:20px; height:20px;}
     .pick-chip{min-height:36px;}
+    /* The three inline links on the sign-in screen -- "Create one",
+       "Request a reset", "Developer sign-in" -- sit inside sentences, so
+       they cannot become 40px boxes without looking wrong. Padding plus a
+       matching negative margin grows the hit area to a thumb's size while
+       leaving the text exactly where it was. */
+    .link-btn{display:inline-block; padding:11px 6px; margin:-11px -6px;}
   }
