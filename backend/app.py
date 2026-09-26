@@ -38,6 +38,56 @@ def set_security_headers(resp):
     return resp
 
 
+@app.teardown_request
+def release_db_transaction(exc):
+    """Roll back anything a failed request left open, and hand back a clean
+    connection to the next one.
+
+    This is the single most important line of defence in this file. The
+    connection is cached per thread (db.get_db), so when a handler raises
+    between its first write and its commit -- a bad type bound to a
+    parameter, a foreign-key violation, anything at all -- that connection
+    is left inside an open transaction holding SQLite's write lock, and
+    every later request on the same thread gets it back still poisoned.
+    The symptom is brutal and not obviously connected to the cause: reads
+    keep working (WAL), so the app looks alive, while every write in the
+    whole application blocks for the full 10s busy-timeout and then fails
+    with "database is locked". Under gunicorn, whose sync workers reuse
+    threads for the life of the process, it does not recover on its own.
+
+    A teardown hook covers every handler that exists and every one anyone
+    adds later, which per-handler try/except never manages to do.
+    """
+    try:
+        from db import get_db
+        conn = get_db()
+        if getattr(conn, "in_transaction", False):
+            conn.rollback()
+    except Exception:
+        # Teardown must never raise: it would replace the real error with
+        # this one and hide what actually went wrong.
+        pass
+
+
+@app.errorhandler(Exception)
+def json_error(exc):
+    """Never show a user an HTML traceback.
+
+    Flask's default 500 page is a debug artefact: it leaks file paths and
+    source lines, and to anyone watching a demo it reads as the whole
+    application falling over. Real HTTP errors (404, 403, 405 ...) keep
+    their own status; everything else becomes a plain JSON 500 while the
+    traceback goes to the server log where it belongs.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return jsonify({"error": exc.name.lower().replace(" ", "_"),
+                        "detail": exc.description}), exc.code
+    app.logger.exception("Unhandled error on %s %s", request.method, request.path)
+    return jsonify({"error": "server_error",
+                    "detail": "Something went wrong at our end. Nothing was saved."}), 500
+
+
 @app.before_request
 def csrf_origin_check():
     """Same-origin check for state-changing requests. Session cookies are

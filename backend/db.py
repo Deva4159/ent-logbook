@@ -66,6 +66,12 @@ DEFAULT_CONFIG = {
     "procedures": DEFAULT_PROCEDURES,
     "roleLevels": ["Observed only", "Assisted (2nd assistant)", "Assisted (1st assistant)", "Performed under direct supervision", "Performed under indirect supervision", "Performed independently"],
     "settings": ["Elective", "Emergency"],
+    # Why someone is away, offered when they deactivate their own account.
+    # Editable by the Developer under Manage Lists like any other list.
+    "deactivationReasons": [
+        "Long leave", "Sabbatical", "Maternity / paternity leave",
+        "Secondment to another department", "Completed the programme", "Other",
+    ],
     "laterality": ["Right", "Left", "Bilateral", "Not required"],
     "pgYears": ["JR-1", "JR-2", "JR-3"],
     "units": DEFAULT_UNITS,
@@ -228,12 +234,66 @@ def migrate_entries_table(conn):
         cols.add("approver_username")
 
 
+def migrate_account_lifecycle(conn):
+    """Per-column ADD COLUMN, same pattern as migrate_entries_table.
+
+    Deliberately NOT a table rebuild: `users` is referenced by six foreign
+    keys, and the existing rebuild in migrate_users_table only survives
+    because it turns foreign_keys off and checks afterwards. Plain nullable
+    columns with defaults need none of that.
+    """
+    if "users" not in _existing_tables(conn):
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    for name, decl in (
+        ("lifecycle", "TEXT NOT NULL DEFAULT 'active'"),
+        ("lifecycle_reason", "TEXT"),
+        ("lifecycle_at", "TEXT"),
+        ("lifecycle_by", "TEXT"),
+        ("last_seen_at", "TEXT"),
+    ):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+    # An account already switched off before this existed is treated as
+    # admin-deactivated: it was an admin who switched it off, and it must not
+    # silently come back the next time that person tries to sign in.
+    conn.execute(
+        "UPDATE users SET lifecycle = 'admin_deactivated' WHERE active = 0 AND lifecycle = 'active'"
+    )
+    conn.commit()
+
+
+def migrate_entry_locks(conn):
+    """Edit lease + row version on `entries`."""
+    if "entries" not in _existing_tables(conn):
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    for name, decl in (
+        ("locked_by", "TEXT"),
+        ("locked_at", "TEXT"),
+        # Bumped on every successful write. A save carrying a stale version
+        # is refused rather than silently overwriting, which is what made
+        # two simultaneous edits lose each other's work.
+        ("row_version", "INTEGER NOT NULL DEFAULT 1"),
+    ):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE entries ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
     migrate_entries_table(conn)
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
+    # AFTER the schema script, not before: on a brand-new database the
+    # tables these add columns to do not exist yet when the migrations above
+    # run. Running them here means a fresh database and a migrated one end
+    # up with exactly the same shape, which is the property worth having --
+    # both are idempotent, so running them on every boot costs nothing.
+    migrate_account_lifecycle(conn)
+    migrate_entry_locks(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))

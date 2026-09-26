@@ -7,6 +7,7 @@ import csv
 import datetime
 import io
 import json
+import re
 
 from flask import Blueprint, g, jsonify, request, Response
 
@@ -24,7 +25,13 @@ def known_unit_keys():
     """The unit keys the department actually has, from the config list."""
     cfg = get_config()
     out = set()
-    for u in (cfg.get("units") or []):
+    units = cfg.get("units")
+    # A malformed config row must not take out signup, postings, account
+    # creation and role assignments -- every one of which calls this, and
+    # all of which 500'd together when `units` was not a list.
+    if not isinstance(units, list):
+        return out
+    for u in units:
         if isinstance(u, dict) and isinstance(u.get("key"), str) and u["key"]:
             out.add(u["key"])
     return out
@@ -72,7 +79,89 @@ def _text(v, limit=20000):
         return None
     if isinstance(v, (dict, list)):
         return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and abs(v) > 2 ** 62:
+        # sqlite3 raises OverflowError binding an int this large.
+        return None
     return str(v)[:limit]
+
+
+def _str_list(v, limit=500, max_items=200):
+    """A list of plain strings, or an empty list. Anything else -- a bare
+    string, a dict, nested lists, 10,000 items -- is not what these fields
+    are, and json.dumps would happily store the nonsense for every later
+    reader to trip over."""
+    if not isinstance(v, list):
+        return []
+    out = []
+    for item in v[:max_items]:
+        s = _text(item, limit)
+        if s is not None and s.strip():
+            out.append(s.strip())
+    return out
+
+
+# Every free-text column on `entries`. All of these were bound straight from
+# the request body, so a JSON object or array in any one of them raised
+# sqlite3.ProgrammingError mid-INSERT -- a 500 to the caller and, before the
+# teardown rollback in app.py, a poisoned connection that blocked every
+# write in the application.
+ENTRY_TEXT_FIELDS = (
+    "site", "setting", "otherSettingType", "hospitalNumber", "age", "sex",
+    "laterality", "role", "consultant", "consultantUsername", "assistants",
+    "comments", "caseReport", "history", "examination", "academicType",
+    "academicTypeOther", "seminarType", "seminarTypeOther", "topic", "venue",
+    "details",
+)
+# Short identifiers get a short cap; the narrative fields get a generous one.
+# Nothing here should ever hold a pasted PDF, and a 2MB "topic" is a row the
+# entries table then has to carry into every list, export and drill-down.
+ENTRY_FIELD_LIMITS = {
+    "site": 60, "setting": 60, "otherSettingType": 120, "hospitalNumber": 60,
+    "age": 20, "sex": 30, "laterality": 30, "role": 120, "consultant": 120,
+    "consultantUsername": 100, "assistants": 500, "academicType": 120,
+    "academicTypeOther": 120, "seminarType": 120, "seminarTypeOther": 120,
+    "topic": 300, "venue": 200,
+    "comments": 8000, "caseReport": 20000, "history": 8000,
+    "examination": 8000, "details": 8000,
+}
+ENTRY_LIST_FIELDS = ("procedures", "diagnoses", "diagnosesSecondary", "comorbidities")
+
+
+def _sanitise_entry_body(body):
+    """Normalise an entry payload in place, so every later use of it binds
+    cleanly. Coerces rather than rejects: a trainee mid-list should not lose
+    a case because one field arrived in an odd shape."""
+    if not isinstance(body, dict):
+        return {}
+    for k in ENTRY_TEXT_FIELDS:
+        if k in body:
+            body[k] = _text(body[k], ENTRY_FIELD_LIMITS.get(k, 20000))
+    for k in ENTRY_LIST_FIELDS:
+        if k in body:
+            body[k] = _str_list(body[k])
+    return body
+
+
+def _linked_entry_id(db, raw, author):
+    """A case may be linked to one of the author's OWN operative records.
+
+    Previously bound straight through, so a non-existent id raised a
+    FOREIGN KEY violation (a 500), and any existing id was accepted --
+    including another trainee's, which would have attached one person's
+    case write-up to another person's operation.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        eid = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    row = db.execute("SELECT author_username FROM entries WHERE id = ?", (eid,)).fetchone()
+    if not row or row["author_username"] != author:
+        return None
+    return eid
 
 
 ENTRY_TYPES = {"surgical", "other", "case", "academic", "seminar"}
@@ -124,6 +213,9 @@ def unit_for_date(postings, date_str):
 
 
 PROCEDURE_BLOCK_TYPES = {"surgical", "other"}
+# A combined case is two or three sites. Anything near this is a mistake or
+# a script, and each block is rendered as its own card in the wizard.
+MAX_PROCEDURE_BLOCKS = 12
 
 
 def _valid_procedure_block(b):
@@ -215,6 +307,8 @@ def entry_row_to_dict(row):
         "unit": d["unit"],
         "date": d["entry_date"],
         "createdAt": d["created_at"],
+        # The version the client must send back when it saves.
+        "rowVersion": d.get("row_version") or 1,
         "procedureBlocks": procedure_blocks,
         "site": derived["site"] if derived else d["site"],
         "procedures": derived["procedures"] if derived else d["procedures"],
@@ -252,7 +346,9 @@ def entry_row_to_dict(row):
 
 # Fields excluded from the edit-history diff: identity/authorship never
 # changes, and createdAt is set once at insert and never touched by an edit.
-ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt"}
+# rowVersion and the lock columns are transport, not content -- without
+# this every save would log "rowVersion changed 3 -> 4" as an edit.
+ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt", "rowVersion", "lock"}
 
 # ---------------------------------------------------------- approvals
 # Only operative records and case write-ups are signed off. Academic and
@@ -268,6 +364,9 @@ APPROVAL_STATES = {"not_submitted", "pending", "changes_requested", "approved"}
 # from a dropdown in the entries list -- if *any* edit reopened approval, a
 # case would bounce back to the consultant every time a PG ticked off their
 # write-up, and the queue would become noise within a week.
+# Never content: these are transport, not part of the record.
+NON_CONTENT_FIELDS = {"rowVersion"}
+
 MATERIAL_FIELDS = {
     "procedureBlocks",          # site, procedures, laterality, entrustment level
     "date", "unit",
@@ -346,8 +445,19 @@ def _valid_approver(db, username):
     ).fetchone()
 
 
+# Sentinel for "clear the approver", distinct from approver=None meaning
+# "leave it as it is". Without it, withdraw asked for the column to be
+# cleared and silently changed nothing, so a withdrawn record went on naming
+# a consultant in the entries list and in every export -- "with Dr X" for a
+# record that is with nobody.
+CLEAR_APPROVER = "__clear__"
+
+
 def _set_approval(db, entry_id, state, approver=None):
-    if approver is None:
+    if approver is CLEAR_APPROVER:
+        db.execute("UPDATE entries SET approval_state = ?, approver_username = NULL WHERE id = ?",
+                   (state, entry_id))
+    elif approver is None:
         db.execute("UPDATE entries SET approval_state = ? WHERE id = ?", (state, entry_id))
     else:
         db.execute("UPDATE entries SET approval_state = ?, approver_username = ? WHERE id = ?",
@@ -368,11 +478,56 @@ def _entry_can_set_paper_status(user, entry_row):
     )
 
 
+def _consultant_may_see_user(db, consultant, target):
+    """The same rule the roster uses: full scope sees everyone; a
+    unit-scoped consultant sees a trainee posted to (or logging in) one of
+    their units, and a consultant whose home unit is one of theirs."""
+    scope = consultant_scope(consultant)
+    if scope["full"]:
+        return True
+    units = set(scope["units"])
+    if not units:
+        return False
+    row = db.execute("SELECT role, unit FROM users WHERE username = ?", (target,)).fetchone()
+    if not row:
+        return False
+    if row["role"] in ("consultant", "developer"):
+        return bool(row["unit"] and row["unit"] in units)
+    seen = {r["unit"] for r in db.execute(
+        "SELECT DISTINCT unit FROM postings WHERE username = ?", (target,))}
+    seen |= {r["unit"] for r in db.execute(
+        "SELECT DISTINCT unit FROM entries WHERE author_username = ?", (target,))}
+    return bool(seen & units)
+
+
 def is_assignment_active(a):
-    now = datetime.datetime.utcnow().isoformat() + "Z"
-    start = a["start_at"] or ""
-    end = a["end_at"] or "9999"
-    return (not start or start <= now) and (not end or now <= end)
+    """Is this appointment in force today?
+
+    Compared by DATE, in the server's local timezone, with the end date
+    inclusive. Two bugs sat in the old string comparison of the full
+    timestamp against datetime.utcnow():
+
+    1. The frontend sends a <input type="datetime-local"> value, which is
+       the admin's own wall clock with no timezone on it. Comparing that to
+       UTC put every appointment out by the local offset -- in IST, a Head
+       of Unit appointed "from now" had no scope at all for five and a half
+       hours, and kept it for five and a half hours after it lapsed.
+    2. A date-only end of "2026-09-25" lost to "2026-09-25T04:11:07Z" from
+       one minute past midnight, so an appointment ending today expired a
+       day early.
+
+    Taking the first 10 characters handles both the date-only and the
+    datetime-local shapes, and an appointment measured in whole days is
+    what these actually are -- nobody appoints a Head of Unit until 4pm.
+    """
+    today = datetime.date.today().isoformat()
+    start = (a.get("start_at") or "")[:10]
+    end = (a.get("end_at") or "")[:10]
+    if start and start > today:
+        return False
+    if end and end < today:
+        return False
+    return True
 
 
 def _active_role_assignments(username):
@@ -441,11 +596,15 @@ def user_capabilities(username):
 @api.post("/auth/signup")
 def signup():
     body = request.get_json(force=True, silent=True) or {}
-    username = clean_username(body.get("username"))
-    password = body.get("password") or ""
-    confirm = body.get("confirm") or ""
-    display_name = (body.get("displayName") or username).strip()
-    role = body.get("role") if body.get("role") in (TRAINEE_ROLES | {"consultant"}) else "resident"
+    # Every one of these was taken on trust, so a number where a string
+    # belonged raised TypeError/AttributeError -- a 500 on an endpoint
+    # anyone who can load the sign-in page can reach.
+    username = clean_username(_text(body.get("username"), 100))
+    password = _text(body.get("password"), 200) or ""
+    confirm = _text(body.get("confirm"), 200) or ""
+    display_name = (_text(body.get("displayName"), 120) or username).strip()
+    raw_role = _text(body.get("role"), 40)
+    role = raw_role if raw_role in (TRAINEE_ROLES | {"consultant"}) else "resident"
 
     if len(username) < 3:
         return jsonify({"error": "Username must be at least 3 characters (letters, numbers, . _ -)."}), 400
@@ -470,7 +629,7 @@ def signup():
     # other units) are still tracked separately via Postings, unaffected by
     # this. Required, unlike a consultant's unit, because it's how a Fellow
     # shows up in that unit's consultant/assistant picker from day one.
-    unit = body.get("unit") if final_role in ("consultant", "fellow") else None
+    unit = _text(body.get("unit"), 60) if final_role in ("consultant", "fellow") else None
     if final_role == "fellow" and not unit:
         return jsonify({"error": "Fellows must select a parent unit at sign-up."}), 400
     if unit and (not isinstance(unit, str) or unit not in known_unit_keys()):
@@ -522,18 +681,56 @@ def login():
         record_attempt(rl_key_ip)
         record_attempt(rl_key_account)
         return jsonify({"error": "No account with that username."}), 401
-    if not row["active"]:
-        return jsonify({"error": "This account has been deactivated. Ask your Developer admin to reactivate it."}), 403
-    if row["approval_status"] == "pending":
-        return jsonify({"error": "Your account is still awaiting approval from a Head of Department, Course Coordinator, Head of Unit, or Developer."}), 403
-    if require_role and row["role"] != require_role:
-        return jsonify({"error": f"This account is not a {require_role} account."}), 403
+    # A tombstoned account is checked FIRST, before the password. Its hash
+    # was destroyed, so no password can ever match it, and without this the
+    # person is told "Incorrect password" and left trying variations of a
+    # password that was correct -- when what they need to know is that the
+    # account was closed and that their records can be brought back. There
+    # is no secret being protected here: the login no longer exists.
+    if _lifecycle_of(row) == LIFECYCLE_DELETED:
+        return jsonify({
+            "error": "This account has been closed. If that was a mistake, ask your "
+                     "Developer admin -- their copy of your records can be restored.",
+        }), 403
+
+    # Every other state is decided only AFTER the password is verified, so
+    # the different messages below cannot tell someone which state an
+    # account is in without knowing its password.
     if not verify_password(row["password_hash"], password):
         record_attempt(rl_key_ip)
         record_attempt(rl_key_account)
         return jsonify({"error": "Incorrect password."}), 401
 
+    lifecycle = _lifecycle_of(row)
+    if lifecycle == LIFECYCLE_PENDING_DELETION:
+        req = _open_request(db, username, "delete")
+        when = (req["scheduled_for"] or "")[:10] if req else ""
+        return jsonify({
+            "error": "This account is scheduled to close%s. Ask the Head of Department or "
+                     "your Developer admin to cancel it if that is not what you want."
+                     % ((" on " + when) if when else ""),
+        }), 403
+    if not row["active"]:
+        if lifecycle == LIFECYCLE_SELF:
+            # Switched off by the person themselves -- signing in is how they
+            # switch it back on, which is the whole point of that option.
+            db.execute(
+                "UPDATE users SET active = 1, lifecycle = ?, lifecycle_reason = NULL,"
+                " lifecycle_at = ?, lifecycle_by = ? WHERE username = ?",
+                (LIFECYCLE_ACTIVE, _now_iso(), username, username))
+            _account_event(db, username, "self_reactivated", username, None)
+            db.commit()
+            row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        else:
+            return jsonify({"error": "This account has been deactivated. Ask your Developer admin to reactivate it."}), 403
+    if row["approval_status"] == "pending":
+        return jsonify({"error": "Your account is still awaiting approval from a Head of Department, Course Coordinator, Head of Unit, or Developer."}), 403
+    if require_role and row["role"] != require_role:
+        return jsonify({"error": f"This account is not a {require_role} account."}), 403
+
     token = create_session(username)
+    db.execute("UPDATE users SET last_seen_at = ? WHERE username = ?", (_now_iso(), username))
+    db.commit()
     resp = jsonify({"user": row_to_user(row), "capabilities": user_capabilities(username)})
     return set_session_cookie(resp, token)
 
@@ -561,9 +758,9 @@ def me():
 @login_required()
 def change_password():
     body = request.get_json(force=True, silent=True) or {}
-    old = body.get("oldPassword") or ""
-    new = body.get("newPassword") or ""
-    confirm = body.get("confirm") or ""
+    old = _text(body.get("oldPassword"), 200) or ""
+    new = _text(body.get("newPassword"), 200) or ""
+    confirm = _text(body.get("confirm"), 200) or ""
     if len(new) < 8:
         return jsonify({"error": "New password must be at least 8 characters."}), 400
     if new != confirm:
@@ -583,8 +780,8 @@ def change_password():
 @api.post("/auth/forgot-password")
 def forgot_password():
     body = request.get_json(force=True, silent=True) or {}
-    username = clean_username(body.get("username"))
-    note = (body.get("note") or "").strip()
+    username = clean_username(_text(body.get("username"), 100))
+    note = (_text(body.get("note"), 2000) or "").strip()
     db = get_db()
     if not db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": "No account with that username."}), 404
@@ -650,15 +847,16 @@ def _resolve_unit_for_entry(username, entry_date):
 @api.post("/entries")
 @login_required()
 def create_entry():
-    body = request.get_json(force=True, silent=True) or {}
+    body = _sanitise_entry_body(request.get_json(force=True, silent=True) or {})
     entry_type = body.get("entryType")
-    if entry_type not in ENTRY_TYPES:
+    if not isinstance(entry_type, str) or entry_type not in ENTRY_TYPES:
         return jsonify({"error": "Unknown entry type."}), 400
     entry_date = _iso_date_or_none(body.get("date")) or datetime.date.today().isoformat()
     unit = _resolve_unit_for_entry(g.user["username"], entry_date)
     now = datetime.datetime.utcnow().isoformat() + "Z"
 
-    linked_from_id = body.get("linkedFromId")
+    db = get_db()
+    linked_from_id = _linked_entry_id(db, body.get("linkedFromId"), g.user["username"])
     # A case entry linked to a surgical entry starts its PG paper-writeup
     # to-do at 'not_done'; every other entry (including an unlinked case,
     # or a case logged by a Senior Resident/Fellow) gets no tracker at all.
@@ -684,9 +882,10 @@ def create_entry():
         else:
             if not isinstance(blocks, list) or not blocks or not all(_valid_procedure_block(b) for b in blocks):
                 return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+            if len(blocks) > MAX_PROCEDURE_BLOCKS:
+                return jsonify({"error": "At most %d sites on one record." % MAX_PROCEDURE_BLOCKS}), 400
             procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks])
 
-    db = get_db()
     cur = db.execute(
         """INSERT INTO entries (
             author_username, entry_type, unit, entry_date, created_at, site, procedures,
@@ -704,10 +903,10 @@ def create_entry():
             # derives these same flat fields back out for any reader that
             # still wants them, e.g. the CSV export).
             None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("site"),
-            "[]" if entry_type in PROCEDURE_BLOCK_TYPES else json.dumps(body.get("procedures") or []),
+            "[]" if entry_type in PROCEDURE_BLOCK_TYPES else json.dumps(_str_list(body.get("procedures"))),
             body.get("setting"), body.get("otherSettingType"), body.get("hospitalNumber"),
-            body.get("age"), body.get("sex"), json.dumps(body.get("diagnoses") or []),
-            json.dumps(body.get("diagnosesSecondary") or []), json.dumps(body.get("comorbidities") or []),
+            body.get("age"), body.get("sex"), json.dumps(_str_list(body.get("diagnoses"))),
+            json.dumps(_str_list(body.get("diagnosesSecondary"))), json.dumps(_str_list(body.get("comorbidities"))),
             None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("laterality"),
             None if entry_type in PROCEDURE_BLOCK_TYPES else body.get("role"),
             body.get("consultant"),
@@ -854,7 +1053,47 @@ def update_entry(entry_id):
     if existing["author_username"] != g.user["username"] and g.user["role"] != "developer":
         return jsonify({"error": "forbidden"}), 403
 
-    body = request.get_json(force=True, silent=True) or {}
+    body = _sanitise_entry_body(request.get_json(force=True, silent=True) or {})
+    # A developer may fix a trainee's finalised entry, but a draft is the
+    # trainee's own unfinished workspace -- GET and the history endpoint
+    # both refuse it to everyone but the author, and PATCH has to agree.
+    # An empty-body PATCH returns the whole entry, so without this it was a
+    # read of someone's draft dressed up as a write.
+    if existing["status"] == "draft" and existing["author_username"] != g.user["username"]:
+        return jsonify({"error": "forbidden"}), 403
+
+    # Somebody else is in this record right now.
+    held = _lock_info(db, existing)
+    if held and held["username"] != g.user["username"]:
+        return jsonify({
+            "error": "entry_locked",
+            "lock": held,
+            "detail": "%s has had this record open since %s. Your changes were not saved."
+                      % (held["displayName"], held["since"][11:16]),
+        }), 423
+
+    # Optimistic concurrency. The client sends the version it loaded; if the
+    # row has moved since, the edit was composed against a copy that no
+    # longer exists and saving it would silently discard whatever happened in
+    # between -- and, worse, entry_edits would then record a change that the
+    # stored row does not have. Refuse and let the caller reload.
+    #
+    # Omitting rowVersion is still accepted, so an older client (or a
+    # scripted call) keeps working; it simply forfeits the protection.
+    if "rowVersion" in body:
+        try:
+            sent = int(body.get("rowVersion"))
+        except (TypeError, ValueError):
+            sent = None
+        current = existing["row_version"] if "row_version" in existing.keys() else 1
+        if sent is None or sent != current:
+            return jsonify({
+                "error": "stale_edit",
+                "rowVersion": current,
+                "detail": "This record changed while you were editing it. Reopen it to see "
+                          "the current version before saving again.",
+            }), 409
+        body.pop("rowVersion", None)
     # An approved record is locked. The consultant attested to a specific
     # version of it; letting the author rewrite it underneath that signature
     # is the whole reason the lock exists. Only the approver or a delegate
@@ -874,8 +1113,20 @@ def update_entry(entry_id):
                       "consultant to release it before editing.",
         }), 409
     entry_type = body.get("entryType") or existing["entry_type"]
-    if entry_type not in ENTRY_TYPES:
+    if not isinstance(entry_type, str) or entry_type not in ENTRY_TYPES:
         return jsonify({"error": "Unknown entry type."}), 400
+    # create_entry has always validated this; PATCH never did. A junk date
+    # stored here is not a cosmetic problem: /reminders takes
+    # MAX(entry_date), which is a STRING max, so "not-a-date" outranks every
+    # real date and date.fromisoformat() then raises on it -- the author's
+    # dashboard 500s on every load from that moment on, and they cannot get
+    # back to the entry to fix it. Reject rather than silently drop, so the
+    # caller knows the edit did not take.
+    if "date" in body and body.get("date") is not None:
+        cleaned_date = _iso_date_or_none(body.get("date"))
+        if not cleaned_date:
+            return jsonify({"error": "That date is not a real calendar date (use YYYY-MM-DD)."}), 400
+        body["date"] = cleaned_date
     entry_date = body.get("date") or existing["entry_date"]
     # Only re-resolve unit from postings when the caller is actually changing
     # the date -- recomputing it unconditionally on every PATCH (including a
@@ -949,6 +1200,8 @@ def update_entry(entry_id):
             # incomplete blocks just by omitting the field.
             if not isinstance(blocks_raw, list) or not blocks_raw or not all(_valid_procedure_block(b) for b in blocks_raw):
                 return jsonify({"error": "Each site logged needs at least one procedure and a role/entrustment level."}), 400
+            if len(blocks_raw) > MAX_PROCEDURE_BLOCKS:
+                return jsonify({"error": "At most %d sites on one record." % MAX_PROCEDURE_BLOCKS}), 400
             procedure_blocks_json = json.dumps([_clean_procedure_block(b) for b in blocks_raw])
     else:
         procedure_blocks_json = "[]"
@@ -965,19 +1218,21 @@ def update_entry(entry_id):
         (
             entry_type, unit, entry_date,
             None if is_block_type else body.get("site", existing["site"]),
-            "[]" if is_block_type else json.dumps(body.get("procedures", before["procedures"]) or []),
+            "[]" if is_block_type else json.dumps(_str_list(body.get("procedures", before["procedures"]))),
             body.get("setting", before["setting"]), body.get("otherSettingType", before["otherSettingType"]),
             body.get("hospitalNumber", before["hospitalNumber"]),
             body.get("age", before["age"]), body.get("sex", before["sex"]),
-            json.dumps(body.get("diagnoses", before["diagnoses"]) or []),
-            json.dumps(body.get("diagnosesSecondary", before["diagnosesSecondary"]) or []),
-            json.dumps(body.get("comorbidities", before["comorbidities"]) or []),
+            json.dumps(_str_list(body.get("diagnoses", before["diagnoses"]))),
+            json.dumps(_str_list(body.get("diagnosesSecondary", before["diagnosesSecondary"]))),
+            json.dumps(_str_list(body.get("comorbidities", before["comorbidities"]))),
             None if is_block_type else body.get("laterality", existing["laterality"]),
             None if is_block_type else body.get("role", existing["role_level"]),
             body.get("consultant", before["consultant"]),
             body.get("consultantUsername", before["consultantUsername"]),
             body.get("assistants", before["assistants"]), body.get("comments", before["comments"]),
-            body.get("caseReport", before["caseReport"]), body.get("linkedFromId", before["linkedFromId"]),
+            body.get("caseReport", before["caseReport"]),
+            (_linked_entry_id(db, body["linkedFromId"], existing["author_username"])
+             if "linkedFromId" in body else before["linkedFromId"]),
             body.get("history", before["history"]), body.get("examination", before["examination"]),
             body.get("academicType", before["academicType"]),
             body.get("academicTypeOther", before["academicTypeOther"]),
@@ -988,6 +1243,10 @@ def update_entry(entry_id):
             entry_id,
         ),
     )
+    # Bump the version on every successful write, so the next save composed
+    # against the copy this one just replaced is refused rather than
+    # silently overwriting it.
+    db.execute("UPDATE entries SET row_version = COALESCE(row_version, 1) + 1 WHERE id = ?", (entry_id,))
 
     row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     after = entry_row_to_dict(row)
@@ -1474,7 +1733,17 @@ def list_users():
 @api.get("/users/consultants")
 @login_required()
 def list_consultants():
-    rows = get_db().execute("SELECT * FROM users WHERE role = 'consultant' AND active = 1").fetchall()
+    # approval_status as well as active: an unapproved sign-up is not a
+    # consultant yet, and this list is what every trainee's "send for
+    # sign-off" picker is built from. Without it, anyone who can reach the
+    # public sign-up page could put a display name of their choosing in
+    # front of the whole department. _valid_approver refused the actual
+    # submit, so this was disclosure rather than a way in -- but it is the
+    # sort of thing that gets noticed in a demo.
+    rows = get_db().execute(
+        "SELECT * FROM users WHERE role = 'consultant' AND active = 1"
+        " AND approval_status = 'approved' ORDER BY display_name"
+    ).fetchall()
     return jsonify({"users": [row_to_user(r) for r in rows]})
 
 
@@ -1509,9 +1778,20 @@ def unit_people(unit):
 @api.get("/users/<username>")
 @login_required()
 def get_user(username):
-    if not (g.user["username"] == username or g.user["role"] in ("developer", "consultant")):
-        return jsonify({"error": "forbidden"}), 403
-    row = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    # The one consultant-facing read with no scope check: a consultant with
+    # no assignment and no Professor designation -- who gets an empty
+    # roster, 403 on every drill-down and a zero-row export -- could still
+    # read any account in the department by name, the developer's included.
+    # Scoped to match the roster it feeds.
+    db = get_db()
+    if g.user["username"] != username:
+        if g.user["role"] == "developer":
+            pass
+        elif g.user["role"] == "consultant" and _consultant_may_see_user(db, g.user["username"], username):
+            pass
+        else:
+            return jsonify({"error": "forbidden"}), 403
+    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row:
         return jsonify({"error": "not_found"}), 404
     return jsonify({"user": row_to_user(row)})
@@ -1560,24 +1840,60 @@ def update_user(username):
         return jsonify({"error": "forbidden"}), 403
     body = request.get_json(force=True, silent=True) or {}
     db = get_db()
-    if not db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+    target = db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+    if not target:
         return jsonify({"error": "not_found"}), 404
+    # Only a developer may touch a developer account. Without this an HOD
+    # -- who has canManageProfiles -- could set active=false on the
+    # developer and lock out the one role that can manage config, accounts
+    # and role assignments. The role-change and password branches below
+    # were already fenced this way; the profile branches above them were
+    # not, and `active` is the one that locks someone out.
+    if target["role"] == "developer" and not caps["isDeveloper"]:
+        return jsonify({
+            "error": "forbidden",
+            "detail": "Only a Developer admin can change a Developer account.",
+        }), 403
     if "active" in body:
-        db.execute("UPDATE users SET active = ? WHERE username = ?", (1 if body["active"] else 0, username))
+        if not body["active"]:
+            blocked = _last_developer_block(db, username, "Deactivating")
+            if blocked:
+                db.rollback()
+                return blocked
+        db.execute("UPDATE users SET active = ?, lifecycle = ?, lifecycle_at = ?, lifecycle_by = ?"
+                   " WHERE username = ?",
+                   (1 if body["active"] else 0,
+                    LIFECYCLE_ACTIVE if body["active"] else LIFECYCLE_ADMIN,
+                    _now_iso(), g.user["username"], username))
+        _account_event(db, username, "activated" if body["active"] else "admin_deactivated",
+                       g.user["username"], _text(body.get("reason"), 500))
         if not body["active"]:
             destroy_all_sessions_for(username)
     # Batch (PG Year) and designation -- the "dynamic profile changes" both
     # Developer and HOD were given (a resident moving up a batch, a
     # consultant getting promoted from Assistant to Associate Professor).
     if "pgYear" in body:
-        db.execute("UPDATE users SET pg_year = ? WHERE username = ?", (body.get("pgYear"), username))
+        db.execute("UPDATE users SET pg_year = ? WHERE username = ?", (_text(body.get("pgYear"), 80), username))
+    # Designation is not merely descriptive: consultant_scope() grants a
+    # Professor their home unit's entire roster and case records. That makes
+    # writing it an access grant, and access grants in this app are
+    # developer-only and recorded (POST /role-assignments carries assigned_by,
+    # assigned_at and an end date). Leaving it open to an HOD gave the same
+    # power through an unaudited, permanent side channel.
     if "designation" in body:
-        db.execute("UPDATE users SET designation = ? WHERE username = ?", (body.get("designation"), username))
+        if not caps["isDeveloper"]:
+            db.rollback()
+            return jsonify({
+                "error": "forbidden",
+                "detail": "Designation decides which units a consultant can see, so only "
+                          "a Developer admin can change it.",
+            }), 403
+        db.execute("UPDATE users SET designation = ? WHERE username = ?", (_text(body.get("designation"), 80), username))
     # A Fellow's parent unit, or a consultant's home unit, can change too
     # (a Fellow reassigned, a consultant transferred) -- same gate as batch/
     # designation.
     if "unit" in body:
-        new_unit = body.get("unit") or None
+        new_unit = _text(body.get("unit"), 60) or None
         if new_unit is not None and (not isinstance(new_unit, str) or new_unit not in known_unit_keys()):
             db.rollback()
             return bad_unit_response(new_unit)
@@ -1585,16 +1901,23 @@ def update_user(username):
     # Role changes and password resets stay Developer-only -- broader than
     # the specific batch/designation/delete powers HOD was given.
     if caps["isDeveloper"]:
-        if "role" in body and body["role"] in (TRAINEE_ROLES | {"consultant", "developer"}):
-            db.execute("UPDATE users SET role = ? WHERE username = ?", (body["role"], username))
+        if "role" in body and _text(body["role"], 40) in (TRAINEE_ROLES | {"consultant", "developer"}):
+            # Demoting the last developer empties the role just as surely as
+            # deleting the account does.
+            if _text(body["role"], 40) != "developer":
+                blocked = _last_developer_block(db, username, "Changing the role of")
+                if blocked:
+                    db.rollback()
+                    return blocked
+            db.execute("UPDATE users SET role = ? WHERE username = ?", (_text(body["role"], 40), username))
         if "password" in body and body["password"]:
-            if len(str(body["password"])) < 8:
+            if len(_text(body["password"], 200) or "") < 8:
                 # Roll back first: the role/active/profile UPDATEs above have
                 # already run on this thread-local connection, and without
                 # this they are committed by whatever request lands next.
                 db.rollback()
                 return jsonify({"error": "New password must be at least 8 characters."}), 400
-            db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(body["password"]), username))
+            db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(_text(body["password"], 200)), username))
             destroy_all_sessions_for(username)
     db.commit()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -1613,6 +1936,15 @@ def delete_user(username):
         return jsonify({"error": "not_found"}), 404
     if username == g.user["username"]:
         return jsonify({"error": "You can't delete your own account."}), 400
+    # Same reasoning as update_user: an HOD has canManageProfiles, and
+    # without this could delete the Developer account outright.
+    if row["role"] == "developer" and not caps["isDeveloper"]:
+        return jsonify({
+            "error": "Only a Developer admin can remove a Developer account.",
+        }), 403
+    blocked = _last_developer_block(db, username, "Deleting")
+    if blocked:
+        return blocked
     # Deleting a user cascades to their postings, sessions and role
     # assignments -- fine, those are throwaway. It would ALSO cascade to
     # every entry they've ever logged, which is the one training record this
@@ -1775,10 +2107,45 @@ def _prune_orphan_procedures(cfg):
     return cfg
 
 
+CONFIG_LIST_KEYS = {
+    "categories", "units", "diagnoses", "comorbidities", "roleLevels", "settings",
+    "laterality", "pgYears", "academicTypes", "seminarTypes", "sexOptions",
+    "otherProcedureSettings", "consultantDesignations", "deactivationReasons",
+}
+
+
+def _config_shape_error(body):
+    """The config row is read by signup, postings, account creation, role
+    assignments and the orphan report. A value of the wrong shape saved here
+    took all of them down together, survived a restart, and could only be
+    undone by another PATCH or a direct database edit -- so it is checked on
+    the way in rather than defended against at every reader."""
+    for key in CONFIG_LIST_KEYS:
+        if key in body and not isinstance(body[key], list):
+            return "%s must be a list." % key
+    for key in ("units", "categories"):
+        if key in body:
+            for item in body[key]:
+                if not isinstance(item, dict) or not isinstance(item.get("key"), str) or not item["key"]:
+                    return "Every %s needs a key." % key[:-1]
+    if "procedures" in body and not isinstance(body["procedures"], dict):
+        return "procedures must be a map of site to list."
+    if "approvalEscalationDays" in body:
+        v = body["approvalEscalationDays"]
+        if isinstance(v, bool) or not isinstance(v, int) or not (1 <= v <= 365):
+            return "Escalation days must be a whole number between 1 and 365."
+    return None
+
+
 @api.patch("/config")
 @login_required(role="developer")
 def update_config():
     body = request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Malformed configuration."}), 400
+    shape_error = _config_shape_error(body)
+    if shape_error:
+        return jsonify({"error": shape_error}), 400
     db = get_db()
     cfg = _prune_orphan_procedures(_merge_config(get_config(), body))
     db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
@@ -1901,6 +2268,44 @@ def _display_name(db, username):
     return (r["display_name"] if r else None) or username
 
 
+def _account_state(db, username):
+    """Shown next to a name wherever it appears -- on an operation record,
+    in a sign-off history, on a roster. A closed or deactivated account's
+    name has to keep appearing on the records it is part of (they are
+    somebody else's evidence), so it is flagged instead of removed, and a
+    name that is no longer in the users table at all is 'unknown' rather
+    than silently ordinary."""
+    if not username:
+        return None
+    r = db.execute("SELECT active, lifecycle FROM users WHERE username = ?", (username,)).fetchone()
+    if not r:
+        return "unknown"
+    state = _lifecycle_of(r)
+    if state == LIFECYCLE_DELETED:
+        return "deleted"
+    if state == LIFECYCLE_PENDING_DELETION:
+        return "closing"
+    if not r["active"]:
+        return "deactivated"
+    return "active"
+
+
+# Every action that puts a record (back) in front of a consultant. The
+# clock on "waiting N days" restarts at the latest of these, not at the
+# original submission: a record submitted a month ago, approved, then
+# reopened by an edit today has been with the consultant for a day, not
+# thirty, and flagging it overdue on arrival is the one number a Head of
+# Unit will look at first.
+ARRIVES_IN_QUEUE = ("submitted", "reassigned", "reopened_by_edit", "released", "changes_requested")
+
+
+def _waiting_since(history, fallback):
+    for h in reversed(history):
+        if h["action"] in ARRIVES_IN_QUEUE:
+            return h["created_at"]
+    return fallback
+
+
 def _approval_history(db, entry_id):
     rows = db.execute(
         "SELECT action, actor_username, actor_role, approver_username, on_behalf_of,"
@@ -1979,6 +2384,24 @@ def submit_for_approval(entry_id):
         db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone())})
 
 
+def _entry_ids(raw_ids):
+    """Only real, in-range integer ids. int(float('inf')) raises
+    OverflowError and int(True) is 1, so a batch containing Infinity took
+    the request down mid-loop and a batch containing `true` silently acted
+    on entry 1."""
+    out = []
+    for raw in raw_ids:
+        if isinstance(raw, bool) or isinstance(raw, float):
+            continue
+        try:
+            eid = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if 0 < eid < 2 ** 62:
+            out.append(eid)
+    return out
+
+
 @api.post("/entries/bulk-submit")
 @login_required()
 def bulk_submit_for_approval():
@@ -1997,11 +2420,7 @@ def bulk_submit_for_approval():
     if not approver:
         return jsonify({"error": "Pick an active consultant to send these to."}), 400
     done, skipped = [], []
-    for raw in ids:
-        try:
-            eid = int(raw)
-        except (TypeError, ValueError):
-            continue
+    for eid in _entry_ids(ids):
         ok, err, _ = _submit_one(db, eid, approver["username"], body.get("comment"))
         (done if ok else skipped).append(
             eid if ok else {"id": eid, "reason": (err or {}).get("error")})
@@ -2021,7 +2440,7 @@ def withdraw_from_approval(entry_id):
     if row["approval_state"] not in ("pending", "changes_requested"):
         return jsonify({"error": "Nothing to withdraw."}), 409
     _log_approval(db, entry_id, "withdrawn", g.user)
-    _set_approval(db, entry_id, "not_submitted", None)
+    _set_approval(db, entry_id, "not_submitted", CLEAR_APPROVER)
     db.commit()
     return jsonify({"ok": True})
 
@@ -2038,6 +2457,10 @@ def _decide(entry_id, action, require_comment):
     allowed, on_behalf = _can_decide(g.user, row)
     if not allowed:
         return jsonify({"error": "forbidden"}), 403
+    if row["approval_state"] == "approved" and action == "approved":
+        # A second 'approved' row is a duplicate signature in the audit log
+        # for a version nothing has changed about.
+        return jsonify({"error": "This record is already signed off."}), 409
     if row["approval_state"] not in ("pending", "approved"):
         return jsonify({"error": "This record is not awaiting a decision."}), 409
     if action == "approved":
@@ -2079,11 +2502,7 @@ def bulk_approve():
         return jsonify({"error": "Approve at most 200 records at a time."}), 400
     db = get_db()
     done, skipped = [], []
-    for raw in ids:
-        try:
-            eid = int(raw)
-        except (TypeError, ValueError):
-            continue
+    for eid in _entry_ids(ids):
         row = db.execute("SELECT * FROM entries WHERE id = ?", (eid,)).fetchone()
         if not row:
             skipped.append({"id": eid, "reason": "not_found"}); continue
@@ -2237,7 +2656,7 @@ def approval_summary():
         ages = []
         for r in mine:
             hist = _approval_history(db, r["id"])
-            sub = next((h["created_at"] for h in reversed(hist) if h["action"] == "submitted"), r["created_at"])
+            sub = _waiting_since(hist, r["created_at"])
             ages.append(_days_since(sub))
         out["queue"] = {
             "pending": len(mine),
@@ -2265,7 +2684,7 @@ def approval_summary():
                 if not in_reach:
                     continue
                 hist = _approval_history(db, r["id"])
-                sub = next((h["created_at"] for h in reversed(hist) if h["action"] == "submitted"), r["created_at"])
+                sub = _waiting_since(hist, r["created_at"])
                 days = _days_since(sub)
                 if days >= limit:
                     overdue.append({
@@ -2285,23 +2704,31 @@ def approval_summary():
 def add_role_assignment():
     body = request.get_json(force=True, silent=True) or {}
     db = get_db()
-    consultant = db.execute("SELECT display_name FROM users WHERE username = ?", (body.get("consultantUsername"),)).fetchone()
+    target_username = clean_username(_text(body.get("consultantUsername"), 100))
+    consultant = db.execute(
+        "SELECT display_name, role FROM users WHERE username = ?", (target_username,)
+    ).fetchone()
     if not consultant:
         return jsonify({"error": "No such consultant."}), 404
-    assignment_role = body.get("role")
+    # These appointments confer consultant-level oversight; giving one to a
+    # trainee account would hand them their own cohort's records.
+    if consultant["role"] != "consultant":
+        return jsonify({"error": "Head of Unit, Coordinator and HOD appointments are for consultant accounts."}), 400
+    assignment_role = _text(body.get("role"), 40)
     if assignment_role not in ("head_of_unit", "coordinator", "hod"):
         return jsonify({"error": "Role must be head_of_unit, coordinator or hod."}), 400
     # A Head of Unit assignment IS a unit scope, so an unrecognised key here
     # silently grants sight of nothing.
-    assign_unit = body.get("unit") or None
-    if assign_unit is not None and (not isinstance(assign_unit, str) or assign_unit not in known_unit_keys()):
+    assign_unit = _text(body.get("unit"), 60) or None
+    if assign_unit is not None and assign_unit not in known_unit_keys():
         return bad_unit_response(assign_unit)
     if assignment_role == "head_of_unit" and not assign_unit:
         return jsonify({"error": "A Head of Unit assignment needs a unit."}), 400
     now = datetime.datetime.utcnow().isoformat() + "Z"
     cur = db.execute(
         "INSERT INTO role_assignments (consultant_username, consultant_display_name, assignment_role, unit, start_at, end_at, assigned_by, assigned_at) VALUES (?,?,?,?,?,?,?,?)",
-        (body.get("consultantUsername"), consultant["display_name"], assignment_role, assign_unit, body.get("startAt"), body.get("endAt"), g.user["username"], now),
+        (target_username, consultant["display_name"], assignment_role, assign_unit,
+         _text(body.get("startAt"), 40), _text(body.get("endAt"), 40), g.user["username"], now),
     )
     db.commit()
     row = db.execute("SELECT * FROM role_assignments WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -2376,11 +2803,11 @@ def _feedback_notes(db, feedback_id):
 @login_required()
 def create_feedback():
     body = request.get_json(force=True, silent=True) or {}
-    kind = (body.get("kind") or "feedback").strip()
+    kind = (_text(body.get("kind"), 40) or "feedback").strip()
     if kind not in FEEDBACK_KINDS:
         return jsonify({"error": "Pick what kind of message this is."}), 400
-    subject = str(body.get("subject") or "").strip()
-    text = str(body.get("body") or "").strip()
+    subject = (_text(body.get("subject"), FEEDBACK_MAX_SUBJECT + 1) or "").strip()
+    text = (_text(body.get("body"), FEEDBACK_MAX_BODY + 1) or "").strip()
     if not subject:
         return jsonify({"error": "Give it a one-line subject."}), 400
     if not text:
@@ -2462,7 +2889,7 @@ def update_feedback(feedback_id):
     if not _can_read_feedback(g.user["username"]):
         return jsonify({"error": "forbidden"}), 403
     body = request.get_json(force=True, silent=True) or {}
-    status = (body.get("status") or "").strip()
+    status = (_text(body.get("status"), 40) or "").strip()
     if status not in FEEDBACK_STATUSES:
         return jsonify({"error": "Unknown status."}), 400
     db = get_db()
@@ -2489,7 +2916,7 @@ def add_feedback_note(feedback_id):
     if not _can_read_feedback(g.user["username"]):
         return jsonify({"error": "forbidden"}), 403
     body = request.get_json(force=True, silent=True) or {}
-    note = str(body.get("note") or "").strip()
+    note = (_text(body.get("note"), FEEDBACK_MAX_BODY + 1) or "").strip()
     if not note:
         return jsonify({"error": "Write the note first."}), 400
     if len(note) > FEEDBACK_MAX_BODY:
@@ -2517,3 +2944,704 @@ def feedback_summary():
         return jsonify({"open": 0, "canRead": False})
     r = get_db().execute("SELECT COUNT(*) c FROM feedback WHERE status = 'open'").fetchone()
     return jsonify({"open": r["c"], "canRead": True})
+
+
+# =====================================================================
+#  EDIT LOCKS  +  OPTIMISTIC CONCURRENCY
+#
+#  Two separate mechanisms, deliberately:
+#
+#  * The LOCK is a courtesy. It stops two people opening the same record
+#    at once and tells the second who has it. It is a lease with a short
+#    life, because a browser gives no reliable signal when someone closes
+#    a tab or shuts a laptop -- a lock that waits for an explicit release
+#    would strand records permanently.
+#
+#  * The VERSION CHECK is the guarantee. Every save carries the version it
+#    was based on and is refused if the row moved underneath it. This is
+#    what actually stops the lost update, and it holds even for a caller
+#    that never took a lock or whose lease lapsed mid-edit.
+# =====================================================================
+
+LOCK_MINUTES = 10
+
+
+def _now_iso():
+    return datetime.datetime.utcnow().isoformat() + "Z"
+
+
+def _lock_is_live(row):
+    at = row["locked_at"] if "locked_at" in row.keys() else None
+    if not row["locked_by"] or not at:
+        return False
+    try:
+        held = datetime.datetime.fromisoformat(str(at).replace("Z", ""))
+    except (ValueError, TypeError):
+        return False
+    age = (datetime.datetime.utcnow() - held).total_seconds()
+    return age < LOCK_MINUTES * 60
+
+
+def _lock_info(db, row):
+    if not _lock_is_live(row):
+        return None
+    return {
+        "username": row["locked_by"],
+        "displayName": _display_name(db, row["locked_by"]),
+        "since": row["locked_at"],
+        "expiresInSeconds": max(
+            0,
+            int(LOCK_MINUTES * 60 - (datetime.datetime.utcnow()
+                - datetime.datetime.fromisoformat(str(row["locked_at"]).replace("Z", ""))).total_seconds()),
+        ),
+    }
+
+
+def _may_edit_entry(user, row):
+    return row["author_username"] == user["username"] or user["role"] == "developer"
+
+
+@api.post("/entries/<int:entry_id>/lock")
+@login_required()
+def take_entry_lock(entry_id):
+    """Claim, or refresh, the edit lease. Called when the form opens and
+    again every few minutes while it stays open."""
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if not _may_edit_entry(g.user, row):
+        return jsonify({"error": "forbidden"}), 403
+    held = _lock_info(db, row)
+    if held and held["username"] != g.user["username"]:
+        return jsonify({"error": "locked", "lock": held}), 423
+    db.execute("UPDATE entries SET locked_by = ?, locked_at = ? WHERE id = ?",
+               (g.user["username"], _now_iso(), entry_id))
+    db.commit()
+    return jsonify({"ok": True, "rowVersion": row["row_version"], "lockMinutes": LOCK_MINUTES})
+
+
+@api.post("/entries/<int:entry_id>/unlock")
+@login_required()
+def release_entry_lock(entry_id):
+    """Released on save or cancel. A developer may also break someone
+    else's lease -- a lease that has to be waited out is a lease that
+    stops work in a department where people share machines."""
+    db = get_db()
+    row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if row["locked_by"] and row["locked_by"] != g.user["username"] and g.user["role"] != "developer":
+        return jsonify({"error": "forbidden"}), 403
+    if row["locked_by"] and row["locked_by"] != g.user["username"]:
+        _account_event(db, row["locked_by"], "edit_lock_broken", g.user["username"],
+                       "Entry %d" % entry_id)
+    db.execute("UPDATE entries SET locked_by = NULL, locked_at = NULL WHERE id = ?", (entry_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# =====================================================================
+#  ACCOUNT LIFECYCLE
+# =====================================================================
+
+DELETION_BUFFER_DAYS = 14
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_SELF = "self_deactivated"
+LIFECYCLE_ADMIN = "admin_deactivated"
+LIFECYCLE_PENDING_DELETION = "pending_deletion"
+LIFECYCLE_DELETED = "deleted"
+
+DEFAULT_DEACTIVATION_REASONS = [
+    "Long leave", "Sabbatical", "Maternity / paternity leave",
+    "Secondment to another department", "Completed the programme", "Other",
+]
+
+
+def _account_event(db, username, action, actor, detail=None):
+    db.execute(
+        "INSERT INTO account_events (username, action, actor_username, detail, created_at)"
+        " VALUES (?,?,?,?,?)",
+        (username, action, actor, _text(detail, 2000), _now_iso()),
+    )
+
+
+def _lifecycle_of(row):
+    keys = row.keys()
+    return (row["lifecycle"] if "lifecycle" in keys and row["lifecycle"] else LIFECYCLE_ACTIVE)
+
+
+def _developer_count(db, exclude=None):
+    """Live developers, not counting a named one. Used to refuse the last."""
+    sql = ("SELECT COUNT(*) c FROM users WHERE role = 'developer' AND active = 1"
+           " AND lifecycle NOT IN (?, ?)")
+    args = [LIFECYCLE_DELETED, LIFECYCLE_PENDING_DELETION]
+    if exclude:
+        sql += " AND username != ?"
+        args.append(exclude)
+    return db.execute(sql, tuple(args)).fetchone()["c"]
+
+
+def _last_developer_block(db, username, what):
+    """The department must never end up with no developer: it is the only
+    role that can manage accounts, units, lists and appointments, so losing
+    the last one is unrecoverable from inside the app.
+
+    Checked on deactivation, deletion AND role change -- guarding only
+    deletion leaves the other two doors open to exactly the same outcome.
+    """
+    row = db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+    if not row or row["role"] != "developer":
+        return None
+    if _developer_count(db, exclude=username) > 0:
+        return None
+    return jsonify({
+        "error": "last_developer",
+        "detail": "This is the only Developer account. %s it would leave the department "
+                  "with nobody able to manage accounts, units or lists. Appoint another "
+                  "Developer first." % what,
+    }), 409
+
+
+def _may_decide_account(db, target_username, actor_username):
+    """Who may approve a deactivation or deletion.
+
+    A trainee's logbook is the evidence for their certification, so deleting
+    one is a training decision rather than an administrative one: the Head of
+    Department signs those off, not the Developer. For everyone else either
+    will do.
+    """
+    caps = user_capabilities(actor_username)
+    target = db.execute("SELECT role FROM users WHERE username = ?", (target_username,)).fetchone()
+    if not target:
+        return False, "No such account."
+    if target["role"] in TRAINEE_ROLES:
+        if not caps["isHod"]:
+            return False, ("Deleting a trainee account removes access to their training "
+                           "record, so only the Head of Department can approve it.")
+        return True, None
+    if not (caps["isHod"] or caps["isDeveloper"]):
+        return False, "Only the Head of Department or a Developer admin can decide this."
+    return True, None
+
+
+def _open_request(db, username, kind=None):
+    sql = "SELECT * FROM account_requests WHERE username = ? AND status IN ('pending','approved')"
+    args = [username]
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    return db.execute(sql + " ORDER BY id DESC", tuple(args)).fetchone()
+
+
+def _request_to_dict(db, row):
+    d = dict(row)
+    return {
+        "id": d["id"], "username": d["username"],
+        "displayName": _display_name(db, d["username"]),
+        "kind": d["kind"], "reason": d["reason"], "status": d["status"],
+        "requestedBy": d["requested_by"],
+        "requestedByName": _display_name(db, d["requested_by"]),
+        "requestedAt": d["requested_at"],
+        "decidedBy": d["decided_by"], "decidedAt": d["decided_at"],
+        "decisionNote": d["decision_note"],
+        "scheduledFor": d["scheduled_for"], "executedAt": d["executed_at"],
+        "daysRemaining": _days_until(d["scheduled_for"]) if d["scheduled_for"] else None,
+    }
+
+
+def _days_until(iso):
+    try:
+        when = datetime.datetime.fromisoformat(str(iso).replace("Z", ""))
+    except (ValueError, TypeError):
+        return None
+    return max(0, (when - datetime.datetime.utcnow()).days + (1 if (when - datetime.datetime.utcnow()).seconds else 0))
+
+
+def _build_archive(db, username):
+    """Everything the account authored, in one self-describing JSON blob.
+
+    A blob rather than a pointer at live rows, because the whole point is
+    that it still reads correctly after the profile is gone.
+    """
+    user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    entries = [entry_row_to_dict(r) for r in db.execute(
+        "SELECT * FROM entries WHERE author_username = ? ORDER BY id", (username,))]
+    return {
+        "schema": 1,
+        "archivedAt": _now_iso(),
+        "user": {k: user[k] for k in user.keys() if k != "password_hash"} if user else None,
+        "entries": entries,
+        "postings": get_postings(username),
+        "approvalsGiven": [dict(r) for r in db.execute(
+            "SELECT * FROM entry_approvals WHERE actor_username = ? ORDER BY id", (username,))],
+        "roleAssignments": [dict(r) for r in db.execute(
+            "SELECT * FROM role_assignments WHERE consultant_username = ? ORDER BY id", (username,))],
+        "accountEvents": [dict(r) for r in db.execute(
+            "SELECT * FROM account_events WHERE username = ? ORDER BY id", (username,))],
+    }
+
+
+def _tombstone(db, username, actor):
+    """Execute the deletion.
+
+    NOT `DELETE FROM users`. Every entry, sign-off signature and consultant
+    attribution the account touched is evidence somebody else may still need
+    -- a trainee's logbook for their certification, a consultant's name on an
+    operation record for the trainee who logged it. The row stays, so the
+    foreign keys stay satisfied and nothing cascades; the login is destroyed
+    and the identifying profile is cleared.
+    """
+    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return False
+    db.execute(
+        """UPDATE users SET
+             password_hash = '!deleted',
+             active = 0,
+             pg_year = NULL, designation = NULL,
+             lifecycle = ?, lifecycle_at = ?, lifecycle_by = ?
+           WHERE username = ?""",
+        (LIFECYCLE_DELETED, _now_iso(), actor, username),
+    )
+    destroy_all_sessions_for(username)
+    _account_event(db, username, "deleted", actor,
+                   "Tombstoned; %d entries retained" % db.execute(
+                       "SELECT COUNT(*) c FROM entries WHERE author_username = ?",
+                       (username,)).fetchone()["c"])
+    return True
+
+
+def run_due_deletions(db):
+    """Apply any approved deletion whose buffer has run out.
+
+    There is no scheduler here: Render has no cron and the free tier sleeps,
+    so this is swept on request instead. It is cheap -- one indexed query --
+    and in practice fires within moments of anyone using the app. If nobody
+    opens the app for a week, nothing happens for a week, and the Developer's
+    screen shows anything overdue. Said plainly rather than pretended
+    otherwise.
+    """
+    now = _now_iso()
+    due = db.execute(
+        "SELECT * FROM account_requests WHERE kind = 'delete' AND status = 'approved'"
+        " AND scheduled_for IS NOT NULL AND scheduled_for <= ?", (now,)
+    ).fetchall()
+    done = 0
+    for r in due:
+        if _tombstone(db, r["username"], r["decided_by"] or "system"):
+            db.execute("UPDATE account_requests SET status = 'executed', executed_at = ? WHERE id = ?",
+                       (now, r["id"]))
+            done += 1
+    if done:
+        db.commit()
+    return done
+
+
+@api.get("/account/overview")
+@login_required()
+def account_overview():
+    """Everything My Account shows, in one call."""
+    db = get_db()
+    run_due_deletions(db)
+    me = db.execute("SELECT * FROM users WHERE username = ?", (g.user["username"],)).fetchone()
+    scope = consultant_scope(g.user["username"]) if me["role"] == "consultant" else {"full": False, "units": [], "activeAssignments": []}
+
+    assignments = []
+    for a in db.execute(
+        "SELECT * FROM role_assignments WHERE consultant_username = ? ORDER BY start_at DESC",
+        (g.user["username"],)
+    ):
+        d = dict(a)
+        started = (d["start_at"] or "")[:10]
+        ended = (d["end_at"] or "")[:10]
+        assignments.append({
+            "role": d["assignment_role"], "unit": d["unit"],
+            "startAt": started, "endAt": ended or None,
+            "active": is_assignment_active(d),
+            "assignedBy": d["assigned_by"], "assignedAt": d["assigned_at"],
+        })
+
+    postings = get_postings(g.user["username"])
+    # "Which unit am I in" differs by role: a trainee rotates and their unit
+    # comes from today's posting; a consultant has a home unit on the account.
+    today = datetime.date.today().isoformat()
+    current_unit = (unit_for_date(postings, today) if me["role"] in TRAINEE_ROLES else me["unit"]) or ""
+
+    members = {"consultants": [], "trainees": []}
+    if current_unit:
+        for r in db.execute(
+            "SELECT username, display_name, role, designation, pg_year, active, lifecycle"
+            " FROM users WHERE unit = ? AND approval_status = 'approved' ORDER BY display_name",
+            (current_unit,)
+        ):
+            bucket = "consultants" if r["role"] == "consultant" else "trainees"
+            if r["role"] == "developer":
+                continue
+            members[bucket].append({
+                "username": r["username"], "displayName": r["display_name"],
+                "role": r["role"], "designation": r["designation"], "pgYear": r["pg_year"],
+                "status": _lifecycle_of(r),
+            })
+        # Trainees posted here now, who may have a different home unit.
+        posted = db.execute(
+            "SELECT DISTINCT u.username, u.display_name, u.role, u.pg_year, u.active, u.lifecycle"
+            " FROM postings p JOIN users u ON u.username = p.username"
+            " WHERE p.unit = ? AND p.start_date <= ? AND (p.end_date IS NULL OR p.end_date >= ?)"
+            " AND u.role IN ('resident','senior_resident','fellow')", (current_unit, today, today)
+        ).fetchall()
+        have = {m["username"] for m in members["trainees"]}
+        for r in posted:
+            if r["username"] in have:
+                continue
+            members["trainees"].append({
+                "username": r["username"], "displayName": r["display_name"],
+                "role": r["role"], "designation": None, "pgYear": r["pg_year"],
+                "status": _lifecycle_of(r),
+            })
+        members["trainees"].sort(key=lambda m: (m["displayName"] or "").lower())
+
+    pending = _open_request(db, g.user["username"])
+    cfg = get_config()
+    return jsonify({
+        "profile": {
+            "username": me["username"], "displayName": me["display_name"],
+            "role": me["role"], "designation": me["designation"], "pgYear": me["pg_year"],
+            "unit": current_unit, "homeUnit": me["unit"],
+            "createdAt": me["created_at"], "lastSeenAt": me["last_seen_at"],
+            "lifecycle": _lifecycle_of(me),
+        },
+        "scope": scope,
+        "assignments": assignments,
+        "postings": postings,
+        "members": members,
+        "request": _request_to_dict(db, pending) if pending else None,
+        "deactivationReasons": cfg.get("deactivationReasons") or DEFAULT_DEACTIVATION_REASONS,
+        "deletionBufferDays": DELETION_BUFFER_DAYS,
+        "isLastDeveloper": me["role"] == "developer" and _developer_count(db, exclude=me["username"]) == 0,
+    })
+
+
+@api.post("/account/deactivate")
+@login_required()
+def self_deactivate():
+    """Immediate, and reversed by simply signing in again.
+
+    Distinct from an admin switching an account off: that one must NOT come
+    back on sign-in, or deactivating someone would be unenforceable. The
+    difference is carried in `lifecycle`, not in `active`.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    reason = (_text(body.get("reason"), 200) or "").strip()
+    note = (_text(body.get("note"), 2000) or "").strip()
+    if not reason:
+        return jsonify({"error": "Pick a reason so your unit knows why you are away."}), 400
+    db = get_db()
+    blocked = _last_developer_block(db, g.user["username"], "Deactivating")
+    if blocked:
+        return blocked
+    detail = reason + ((" — " + note) if note else "")
+    db.execute(
+        "UPDATE users SET active = 0, lifecycle = ?, lifecycle_reason = ?, lifecycle_at = ?,"
+        " lifecycle_by = ? WHERE username = ?",
+        (LIFECYCLE_SELF, detail, _now_iso(), g.user["username"], g.user["username"]),
+    )
+    _account_event(db, g.user["username"], "self_deactivated", g.user["username"], detail)
+    db.commit()
+    destroy_all_sessions_for(g.user["username"])
+    return jsonify({"ok": True, "reactivateBySigningIn": True})
+
+
+@api.post("/account/request-deletion")
+@login_required()
+def request_account_deletion():
+    body = request.get_json(force=True, silent=True) or {}
+    target = clean_username(_text(body.get("username"), 100)) or g.user["username"]
+    reason = (_text(body.get("reason"), 2000) or "").strip()
+    if not reason:
+        return jsonify({"error": "Say why this account should be closed."}), 400
+
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE username = ?", (target,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+
+    if target != g.user["username"]:
+        caps = user_capabilities(g.user["username"])
+        # Someone leaves without closing their own account -- the common
+        # case -- so an HOD or Developer can start it for them. It still
+        # goes through the same approval and the same buffer.
+        if not (caps["isHod"] or caps["isDeveloper"]):
+            return jsonify({"error": "forbidden"}), 403
+    if _lifecycle_of(row) == LIFECYCLE_DELETED:
+        return jsonify({"error": "This account has already been closed."}), 409
+    if _open_request(db, target, "delete"):
+        return jsonify({"error": "There is already a deletion request open for this account."}), 409
+    blocked = _last_developer_block(db, target, "Deleting")
+    if blocked:
+        return blocked
+
+    db.execute(
+        "INSERT INTO account_requests (username, kind, reason, status, requested_by, requested_at)"
+        " VALUES (?,'delete',?,'pending',?,?)",
+        (target, reason, g.user["username"], _now_iso()),
+    )
+    _account_event(db, target, "deletion_requested", g.user["username"], reason)
+    db.commit()
+    entry_count = db.execute("SELECT COUNT(*) c FROM entries WHERE author_username = ?",
+                             (target,)).fetchone()["c"]
+    return jsonify({
+        "ok": True,
+        "entriesRetained": entry_count,
+        "needsApprovalFrom": "the Head of Department" if row["role"] in TRAINEE_ROLES
+                             else "the Head of Department or a Developer admin",
+    })
+
+
+@api.post("/account/cancel-deletion")
+@login_required()
+def cancel_account_deletion():
+    """Withdrawable by the person themselves at any point in the buffer, and
+    by anyone who could have decided it."""
+    body = request.get_json(force=True, silent=True) or {}
+    target = clean_username(_text(body.get("username"), 100)) or g.user["username"]
+    db = get_db()
+    req = _open_request(db, target, "delete")
+    if not req:
+        return jsonify({"error": "Nothing to cancel."}), 404
+    if target != g.user["username"]:
+        allowed, why = _may_decide_account(db, target, g.user["username"])
+        if not allowed:
+            return jsonify({"error": "forbidden", "detail": why}), 403
+    db.execute("UPDATE account_requests SET status = 'cancelled', decided_by = ?, decided_at = ?"
+               " WHERE id = ?", (g.user["username"], _now_iso(), req["id"]))
+    # Restore the login only if the deletion had actually suspended it.
+    row = db.execute("SELECT * FROM users WHERE username = ?", (target,)).fetchone()
+    if row and _lifecycle_of(row) == LIFECYCLE_PENDING_DELETION:
+        db.execute("UPDATE users SET active = 1, lifecycle = ?, lifecycle_reason = NULL,"
+                   " lifecycle_at = ?, lifecycle_by = ? WHERE username = ?",
+                   (LIFECYCLE_ACTIVE, _now_iso(), g.user["username"], target))
+    _account_event(db, target, "deletion_cancelled", g.user["username"], None)
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@api.get("/account/requests")
+@login_required()
+def list_account_requests():
+    db = get_db()
+    caps = user_capabilities(g.user["username"])
+    if not (caps["isHod"] or caps["isDeveloper"] or caps["isCoordinator"]):
+        return jsonify({"error": "forbidden"}), 403
+    run_due_deletions(db)
+    rows = db.execute(
+        "SELECT * FROM account_requests WHERE status IN ('pending','approved') ORDER BY id DESC"
+    ).fetchall()
+    out = [_request_to_dict(db, r) for r in rows]
+    deactivated = [{
+        "username": r["username"], "displayName": r["display_name"], "role": r["role"],
+        "lifecycle": _lifecycle_of(r), "reason": r["lifecycle_reason"], "since": r["lifecycle_at"],
+    } for r in db.execute(
+        "SELECT * FROM users WHERE active = 0 AND lifecycle IN (?,?) ORDER BY display_name",
+        (LIFECYCLE_SELF, LIFECYCLE_ADMIN))]
+    return jsonify({
+        "requests": out,
+        "pending": [r for r in out if r["status"] == "pending"],
+        "inBuffer": [r for r in out if r["status"] == "approved"],
+        "deactivated": deactivated,
+        "bufferDays": DELETION_BUFFER_DAYS,
+        "canDecideTrainees": bool(caps["isHod"]),
+    })
+
+
+@api.post("/account/requests/<int:request_id>/decide")
+@login_required()
+def decide_account_request(request_id):
+    body = request.get_json(force=True, silent=True) or {}
+    decision = _text(body.get("decision"), 20)
+    if decision not in ("approve", "reject"):
+        return jsonify({"error": "Decision must be approve or reject."}), 400
+    db = get_db()
+    req = db.execute("SELECT * FROM account_requests WHERE id = ?", (request_id,)).fetchone()
+    if not req:
+        return jsonify({"error": "not_found"}), 404
+    if req["status"] != "pending":
+        return jsonify({"error": "This request has already been decided."}), 409
+    allowed, why = _may_decide_account(db, req["username"], g.user["username"])
+    if not allowed:
+        return jsonify({"error": "forbidden", "detail": why}), 403
+    now = _now_iso()
+    note = _text(body.get("note"), 2000)
+
+    if decision == "reject":
+        db.execute("UPDATE account_requests SET status='rejected', decided_by=?, decided_at=?,"
+                   " decision_note=? WHERE id = ?", (g.user["username"], now, note, request_id))
+        _account_event(db, req["username"], "deletion_rejected", g.user["username"], note)
+        db.commit()
+        return jsonify({"ok": True, "status": "rejected"})
+
+    blocked = _last_developer_block(db, req["username"], "Deleting")
+    if blocked:
+        return blocked
+
+    # The archive is taken NOW, at the decision, not at execution: it is the
+    # copy the Developer can restore from, and it should exist for the whole
+    # buffer rather than appearing at the moment the data goes.
+    payload = json.dumps(_build_archive(db, req["username"]))
+    target = db.execute("SELECT display_name FROM users WHERE username = ?", (req["username"],)).fetchone()
+    db.execute("INSERT INTO account_archives (username, display_name, archived_at, archived_by, payload)"
+               " VALUES (?,?,?,?,?)",
+               (req["username"], target["display_name"] if target else None, now, g.user["username"], payload))
+    scheduled = (datetime.datetime.utcnow()
+                 + datetime.timedelta(days=DELETION_BUFFER_DAYS)).isoformat() + "Z"
+    db.execute("UPDATE account_requests SET status='approved', decided_by=?, decided_at=?,"
+               " decision_note=?, scheduled_for=? WHERE id = ?",
+               (g.user["username"], now, note, scheduled, request_id))
+    # Suspended, not yet tombstoned: the buffer is there to be reversible.
+    db.execute("UPDATE users SET active = 0, lifecycle = ?, lifecycle_reason = ?, lifecycle_at = ?,"
+               " lifecycle_by = ? WHERE username = ?",
+               (LIFECYCLE_PENDING_DELETION, req["reason"], now, g.user["username"], req["username"]))
+    destroy_all_sessions_for(req["username"])
+    _account_event(db, req["username"], "deletion_approved", g.user["username"],
+                   "Scheduled for %s" % scheduled[:10])
+    db.commit()
+    return jsonify({"ok": True, "status": "approved", "scheduledFor": scheduled})
+
+
+@api.post("/account/restore/<username>")
+@login_required(role="developer")
+def restore_account(username):
+    """Developer-only, as asked. Works during the buffer and afterwards: a
+    tombstone still has its row and its archive, so bringing someone back is
+    a password reset rather than a rebuild."""
+    body = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    new_password = _text(body.get("password"), 200)
+    state = _lifecycle_of(row)
+    if state == LIFECYCLE_DELETED and not new_password:
+        return jsonify({
+            "error": "password_required",
+            "detail": "This account was closed, so its password no longer exists. "
+                      "Set a new one to bring it back.",
+        }), 400
+    if new_password is not None and len(new_password) < 8:
+        return jsonify({"error": "New password must be at least 8 characters."}), 400
+    if new_password:
+        db.execute("UPDATE users SET password_hash = ? WHERE username = ?",
+                   (hash_password(new_password), username))
+    db.execute("UPDATE users SET active = 1, lifecycle = ?, lifecycle_reason = NULL,"
+               " lifecycle_at = ?, lifecycle_by = ? WHERE username = ?",
+               (LIFECYCLE_ACTIVE, _now_iso(), g.user["username"], username))
+    db.execute("UPDATE account_requests SET status = 'cancelled', decided_by = ?, decided_at = ?"
+               " WHERE username = ? AND status IN ('pending','approved')",
+               (g.user["username"], _now_iso(), username))
+    _account_event(db, username, "restored", g.user["username"], None)
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@api.get("/account/archives")
+@login_required(role="developer")
+def list_account_archives():
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, username, display_name, archived_at, archived_by, LENGTH(payload) bytes"
+        " FROM account_archives ORDER BY id DESC").fetchall()
+    return jsonify({"archives": [dict(r) for r in rows]})
+
+
+@api.get("/account/archives/<int:archive_id>.json")
+@login_required(role="developer")
+def download_account_archive(archive_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM account_archives WHERE id = ?", (archive_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    return Response(
+        row["payload"], mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=account-%s-%s.json"
+                 % (row["username"], (row["archived_at"] or "")[:10])})
+
+
+@api.get("/account/events/<username>")
+@login_required()
+def account_events(username):
+    caps = user_capabilities(g.user["username"])
+    if not (caps["isHod"] or caps["isDeveloper"] or g.user["username"] == username):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM account_events WHERE username = ? ORDER BY id DESC LIMIT 100", (username,)
+    ).fetchall()
+    return jsonify({"events": [{
+        "action": r["action"], "actor": r["actor_username"],
+        "actorName": _display_name(db, r["actor_username"]) if r["actor_username"] else None,
+        "detail": r["detail"], "createdAt": r["created_at"],
+    } for r in rows]})
+
+
+@api.post("/config/bulk-add")
+@login_required(role="developer")
+def config_bulk_add():
+    """Paste a block of options into one list.
+
+    Adding a department's diagnosis list one box-and-button at a time is
+    forty round trips. Splits on newlines, commas and semicolons, trims,
+    drops blanks, de-duplicates against itself AND against what is already
+    there (case-insensitively), and reports exactly what it did rather than
+    silently merging.
+
+    `preview: true` runs the whole thing and changes nothing, so the count
+    can be shown before anyone commits to it.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    key = _text(body.get("list"), 60)
+    raw = _text(body.get("text"), 200000) or ""
+    preview = bool(body.get("preview"))
+
+    if key not in CONFIG_LIST_KEYS or key in ("units", "categories"):
+        # units and categories are objects with keys, not plain strings --
+        # they have their own editors and pasting names into them would
+        # produce entries nothing can reference.
+        return jsonify({"error": "That list cannot be bulk-filled here."}), 400
+
+    cfg = get_config()
+    existing = [x for x in (cfg.get(key) or []) if isinstance(x, str)]
+    lower = {x.strip().lower() for x in existing}
+
+    added, duplicates, already = [], [], []
+    seen = set()
+    for piece in re.split(r"[\n,;]+", raw):
+        item = piece.strip()
+        if not item:
+            continue
+        if len(item) > 300:
+            item = item[:300]
+        low = item.lower()
+        if low in lower:
+            already.append(item); continue
+        if low in seen:
+            duplicates.append(item); continue
+        seen.add(low)
+        added.append(item)
+
+    if len(existing) + len(added) > 2000:
+        return jsonify({"error": "That would take the list past 2000 options."}), 400
+
+    result = {
+        "list": key, "added": added, "alreadyPresent": already,
+        "repeatedInPaste": duplicates, "total": len(existing) + len(added),
+        "preview": preview,
+    }
+    if preview or not added:
+        return jsonify(result)
+
+    cfg[key] = existing + added
+    db = get_db()
+    db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
+    db.commit()
+    result["config"] = cfg
+    return jsonify(result)

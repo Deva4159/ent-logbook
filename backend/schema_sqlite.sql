@@ -18,7 +18,19 @@ CREATE TABLE IF NOT EXISTS users (
   unit            TEXT,
   active          INTEGER NOT NULL DEFAULT 1,
   approval_status TEXT NOT NULL DEFAULT 'approved' CHECK (approval_status IN ('pending','approved')),
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  -- `active` stays the single boolean every existing query filters on.
+  -- `lifecycle` records WHY it is what it is, which is the part that has to
+  -- differ: an account the user switched off themselves comes back the
+  -- moment they sign in, and an account an admin switched off must not --
+  -- otherwise deactivating someone is unenforceable, because they simply
+  -- log in again.
+  --   active | self_deactivated | admin_deactivated | pending_deletion | deleted
+  lifecycle       TEXT NOT NULL DEFAULT 'active',
+  lifecycle_reason TEXT,
+  lifecycle_at    TEXT,
+  lifecycle_by    TEXT,
+  last_seen_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS postings (
@@ -187,6 +199,16 @@ CREATE TABLE IF NOT EXISTS entry_approvals (
   created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entry_approvals_entry ON entry_approvals(entry_id);
+-- Both approval dashboards filter on approval_state alone before anything
+-- else, and idx_entries_approver leads with approver_username so it cannot
+-- serve them -- every consultant's dashboard load was a full scan of
+-- `entries`.
+CREATE INDEX IF NOT EXISTS idx_entries_approval_state ON entries(approval_state, status);
+-- Roster membership and the unit scope checks both start from postings.
+CREATE INDEX IF NOT EXISTS idx_postings_username ON postings(username);
+CREATE INDEX IF NOT EXISTS idx_postings_unit ON postings(unit);
+CREATE INDEX IF NOT EXISTS idx_entries_author ON entries(author_username);
+CREATE INDEX IF NOT EXISTS idx_entries_unit ON entries(unit);
 
 
 -- ---------------------------------------------------------------- feedback
@@ -233,3 +255,62 @@ CREATE TABLE IF NOT EXISTS feedback_notes (
   created_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_notes_fb ON feedback_notes(feedback_id);
+
+
+-- ===================================================================
+--  ACCOUNT LIFECYCLE
+-- ===================================================================
+
+-- A deactivation or deletion, from request to execution.
+--
+-- Deletion is never immediate and never destroys the work. After the buffer
+-- the account is TOMBSTONED: the login is destroyed and the profile cleared,
+-- while every entry, sign-off and consultant attribution stays exactly where
+-- it is, rendered against an account marked "deleted". A trainee's logbook is
+-- evidence for their certification and a consultant's name on an operation
+-- record is part of someone else's evidence; neither survives a cascade.
+CREATE TABLE IF NOT EXISTS account_requests (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  username       TEXT NOT NULL,
+  kind           TEXT NOT NULL,          -- deactivate | delete
+  reason         TEXT,
+  -- pending | approved | rejected | cancelled | executed
+  status         TEXT NOT NULL DEFAULT 'pending',
+  requested_by   TEXT NOT NULL,
+  requested_at   TEXT NOT NULL,
+  decided_by     TEXT,
+  decided_at     TEXT,
+  decision_note  TEXT,
+  -- The earliest moment the tombstone may be applied. Set when the request
+  -- is approved, never on request, so the clock starts from the decision.
+  scheduled_for  TEXT,
+  executed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_account_requests_status ON account_requests(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_account_requests_user ON account_requests(username);
+
+-- Append-only. "Who deleted Dr Menon's account, and when, and on whose
+-- authority" has to stay answerable after the account itself is gone, which
+-- is exactly when the users row can no longer answer it.
+CREATE TABLE IF NOT EXISTS account_events (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  username       TEXT NOT NULL,
+  action         TEXT NOT NULL,
+  actor_username TEXT,
+  detail         TEXT,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_events_user ON account_events(username, id DESC);
+
+-- The developer-only recoverable copy, taken when a deletion is approved.
+-- Deliberately a snapshot blob rather than a set of live rows: the point is
+-- that it still reads correctly after the account and its profile are gone.
+CREATE TABLE IF NOT EXISTS account_archives (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  username       TEXT NOT NULL,
+  display_name   TEXT,
+  archived_at    TEXT NOT NULL,
+  archived_by    TEXT,
+  payload        TEXT NOT NULL           -- JSON snapshot
+);
+CREATE INDEX IF NOT EXISTS idx_account_archives_user ON account_archives(username);
