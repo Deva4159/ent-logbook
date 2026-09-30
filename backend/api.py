@@ -800,6 +800,54 @@ def list_postings():
     return jsonify({"postings": get_postings(g.user["username"])})
 
 
+# Two postings overlap when each starts on or before the other ends. An
+# open-ended posting ("ongoing", end_date NULL) runs to the end of time, so
+# it overlaps everything that starts after it -- which is exactly why this
+# check matters: a trainee who never closed off last unit's posting and then
+# adds this unit's has two live postings, and unit_for_date() silently picks
+# the later-STARTING one for every entry logged from then on. Nothing in the
+# app was telling anybody that.
+#
+# Deliberately a warning, not a rule. Real rotations genuinely do overlap --
+# a peripheral posting inside a longer block, an on-paper start before the
+# previous unit formally releases you -- so this reports and then gets out of
+# the way once the person has said yes.
+FOREVER = "9999-12-31"
+
+
+def _overlapping_postings(db, username, start_date, end_date, ignore_id=None):
+    end = end_date or FOREVER
+    rows = db.execute(
+        "SELECT id, unit, start_date, end_date FROM postings WHERE username = ?"
+        " ORDER BY start_date", (username,)
+    ).fetchall()
+    out = []
+    for r in rows:
+        if ignore_id is not None and r["id"] == ignore_id:
+            continue
+        r_end = r["end_date"] or FOREVER
+        if r["start_date"] <= end and start_date <= r_end:
+            out.append({"id": r["id"], "unit": r["unit"],
+                        "startDate": r["start_date"], "endDate": r["end_date"]})
+    return out
+
+
+def _validate_posting_dates(unit, start_date, end_date):
+    """Returns an error message, or None. Shared by the single-add and the
+    bulk endpoint so the two can never disagree about what is valid."""
+    if not unit or not start_date:
+        return "Unit and start date are required."
+    if not isinstance(unit, str) or unit not in known_unit_keys():
+        return "BAD_UNIT"
+    if not _iso_date_or_none(start_date):
+        return "Start date must be a real date (YYYY-MM-DD)."
+    if end_date and not _iso_date_or_none(end_date):
+        return "End date must be a real date (YYYY-MM-DD)."
+    if end_date and end_date < start_date:
+        return "End date can't be before the start date."
+    return None
+
+
 @api.post("/postings")
 @login_required()
 def add_posting():
@@ -807,23 +855,165 @@ def add_posting():
     unit = body.get("unit")
     start_date = body.get("startDate")
     end_date = body.get("endDate") or None
-    if not unit or not start_date:
-        return jsonify({"error": "Unit and start date are required."}), 400
-    if not isinstance(unit, str) or unit not in known_unit_keys():
+    err = _validate_posting_dates(unit, start_date, end_date)
+    if err == "BAD_UNIT":
         return bad_unit_response(unit)
-    if not _iso_date_or_none(start_date):
-        return jsonify({"error": "Start date must be a real date (YYYY-MM-DD)."}), 400
-    if end_date and not _iso_date_or_none(end_date):
-        return jsonify({"error": "End date must be a real date (YYYY-MM-DD)."}), 400
-    if end_date and end_date < start_date:
-        return jsonify({"error": "End date can't be before the start date."}), 400
+    if err:
+        return jsonify({"error": err}), 400
     db = get_db()
+    if not body.get("allowOverlap"):
+        clash = _overlapping_postings(db, g.user["username"], start_date, end_date)
+        if clash:
+            # 409, not 400: the request is well-formed and will be accepted
+            # verbatim on the retry that carries allowOverlap.
+            return jsonify({
+                "error": "posting_overlap",
+                "detail": "This overlaps a posting you have already logged.",
+                "overlaps": clash,
+            }), 409
     db.execute(
         "INSERT INTO postings (username, unit, start_date, end_date) VALUES (?,?,?,?)",
         (g.user["username"], unit, start_date, end_date),
     )
     db.commit()
     return jsonify({"postings": get_postings(g.user["username"])})
+
+
+# ------------------------------------------------- postings, on behalf of
+# Until now a posting could only be logged by the person it belongs to, and
+# every entry they logged before they got round to it was filed with no unit
+# at all -- invisible to their Head of Unit's roster forever, because the
+# unit is stamped at write time and never recomputed. Asking forty trainees
+# to each remember is not a plan. The people who actually decide the rota
+# can now set it for them.
+#
+# Who: Head of Department, Course Coordinator, Developer. NOT a Head of Unit
+# -- their remit is one unit, and a rota entry is a claim about where
+# somebody is instead of somewhere else.
+BULK_POSTING_MAX = 120
+
+
+def _may_assign_postings(username):
+    caps = user_capabilities(username)
+    return bool(caps["isHod"] or caps["isCoordinator"] or caps["isDeveloper"])
+
+
+@api.post("/postings/bulk")
+@login_required()
+def bulk_add_postings():
+    """Two-phase, like bulk list-add: preview says exactly what would happen
+    and writes nothing; apply does it. Nobody should be committing a rota for
+    forty people from a form they cannot see the consequences of."""
+    if not _may_assign_postings(g.user["username"]):
+        return jsonify({"error": "forbidden",
+                        "detail": "Only the Head of Department, a Course Coordinator "
+                                  "or a Developer can set other people's postings."}), 403
+    body = request.get_json(force=True, silent=True) or {}
+    mode = body.get("mode")
+    if mode not in ("preview", "apply"):
+        return jsonify({"error": "mode must be 'preview' or 'apply'."}), 400
+    unit = body.get("unit")
+    start_date = body.get("startDate")
+    end_date = body.get("endDate") or None
+    err = _validate_posting_dates(unit, start_date, end_date)
+    if err == "BAD_UNIT":
+        return bad_unit_response(unit)
+    if err:
+        return jsonify({"error": err}), 400
+
+    raw = body.get("usernames")
+    if not isinstance(raw, list) or not raw:
+        return jsonify({"error": "Pick at least one trainee."}), 400
+    if len(raw) > BULK_POSTING_MAX:
+        return jsonify({"error": "That is more than %d people at once." % BULK_POSTING_MAX}), 400
+    names, seen = [], set()
+    for v in raw:
+        if not isinstance(v, str):
+            continue
+        u = clean_username(v)
+        if u and u not in seen:
+            seen.add(u)
+            names.append(u)
+    if not names:
+        return jsonify({"error": "Pick at least one trainee."}), 400
+
+    db = get_db()
+    allow_overlap = bool(body.get("allowOverlap"))
+    ready, skipped, overlapping = [], [], []
+    for u in names:
+        row = db.execute("SELECT username, display_name, role, approval_status, lifecycle"
+                         " FROM users WHERE username = ?", (u,)).fetchone()
+        if not row:
+            skipped.append({"username": u, "displayName": u, "reason": "No such account."})
+            continue
+        if row["role"] not in TRAINEE_ROLES:
+            skipped.append({"username": u, "displayName": row["display_name"],
+                            "reason": "Not a trainee — only trainees have postings."})
+            continue
+        if row["approval_status"] != "approved":
+            skipped.append({"username": u, "displayName": row["display_name"],
+                            "reason": "Sign-up not approved yet."})
+            continue
+        if _lifecycle_of(row) == "deleted":
+            skipped.append({"username": u, "displayName": row["display_name"],
+                            "reason": "Account closed."})
+            continue
+        clash = _overlapping_postings(db, u, start_date, end_date)
+        item = {"username": u, "displayName": row["display_name"],
+                "overlaps": clash}
+        if clash and not allow_overlap:
+            overlapping.append(item)
+        else:
+            ready.append(item)
+
+    if mode == "preview":
+        return jsonify({"wouldAdd": ready, "overlapping": overlapping,
+                        "skipped": skipped, "added": []})
+
+    added = []
+    for item in ready:
+        db.execute("INSERT INTO postings (username, unit, start_date, end_date) VALUES (?,?,?,?)",
+                   (item["username"], unit, start_date, end_date))
+        added.append(item)
+    db.commit()
+    # Recorded against each account, like every other change somebody else
+    # makes to it: "who put me in ENT 2 in March" has to stay answerable.
+    for item in added:
+        _account_event(db, item["username"], "posting_assigned", g.user["username"],
+                       detail="%s from %s%s" % (unit, start_date,
+                                                " to " + end_date if end_date else " (ongoing)"))
+    db.commit()
+    return jsonify({"added": added, "overlapping": overlapping, "skipped": skipped,
+                    "wouldAdd": []})
+
+
+@api.get("/postings/candidates")
+@login_required()
+def posting_candidates():
+    """Everyone a posting can be set for, with where they are today, so the
+    person assigning can see who already has cover for the dates."""
+    if not _may_assign_postings(g.user["username"]):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    today = datetime.date.today().isoformat()
+    out = []
+    rows = db.execute(
+        "SELECT username, display_name, role, pg_year, active, lifecycle FROM users"
+        " WHERE role IN ('resident','senior_resident','fellow') AND approval_status = 'approved'"
+        " ORDER BY display_name"
+    ).fetchall()
+    for r in rows:
+        if _lifecycle_of(r) == "deleted":
+            continue
+        postings = get_postings(r["username"])
+        out.append({
+            "username": r["username"], "displayName": r["display_name"],
+            "role": r["role"], "pgYear": r["pg_year"],
+            "status": _lifecycle_of(r),
+            "currentUnit": unit_for_date(postings, today) or "",
+            "postingCount": len(postings),
+        })
+    return jsonify({"candidates": out})
 
 
 @api.delete("/postings/<int:posting_id>")
@@ -1897,6 +2087,13 @@ def update_user(username):
         if new_unit is not None and (not isinstance(new_unit, str) or new_unit not in known_unit_keys()):
             db.rollback()
             return bad_unit_response(new_unit)
+        # Refused rather than quietly ignored: a Developer has no home unit,
+        # and silently dropping the write would leave the caller believing
+        # it had taken.
+        if new_unit and target["role"] == "developer" and _text(body.get("role"), 40) != "consultant":
+            db.rollback()
+            return jsonify({"error": "A Developer account has no home unit — "
+                                     "a Developer already covers every unit."}), 400
         db.execute("UPDATE users SET unit = ? WHERE username = ?", (new_unit, username))
     # Role changes and password resets stay Developer-only -- broader than
     # the specific batch/designation/delete powers HOD was given.
@@ -1909,7 +2106,17 @@ def update_user(username):
                 if blocked:
                     db.rollback()
                     return blocked
-            db.execute("UPDATE users SET role = ? WHERE username = ?", (_text(body["role"], 40), username))
+            new_role = _text(body["role"], 40)
+            db.execute("UPDATE users SET role = ? WHERE username = ?", (new_role, username))
+            # A Developer administers every unit, so a "home unit" on the
+            # account is a claim about scope that nothing in the app reads
+            # and that leaves their own My Account looking half-filled.
+            # Promoting someone clears whatever they carried in from their
+            # previous role; the same is true of a designation, which only
+            # ever means something on a consultant.
+            if new_role == "developer":
+                db.execute("UPDATE users SET unit = NULL, designation = NULL WHERE username = ?",
+                           (username,))
         if "password" in body and body["password"]:
             if len(_text(body["password"], 200) or "") < 8:
                 # Roll back first: the role/active/profile UPDATEs above have
