@@ -501,6 +501,61 @@
     .tile-badge .icon{width:11px; height:11px;}
   }
 
+  /* ---- Setting postings for other people --------------------------- */
+  .bp-list{max-height:320px; overflow-y:auto; border:1px solid var(--line); border-radius:10px;
+    padding:4px; margin-bottom:12px;}
+  .bp-row{display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px;
+    cursor:pointer; font-size:13px;}
+  .bp-row:hover{background:var(--surface-2);}
+  .bp-row input{flex:none; width:17px; height:17px;}
+  .bp-name{font-weight:600;}
+  .bp-meta{margin-left:auto; font-size:12px; text-align:right;}
+  .bp-allow{display:flex; align-items:flex-start; gap:9px; font-size:12.5px;
+    color:var(--ink-soft); margin:4px 0 2px; cursor:pointer;}
+  .bp-allow input{flex:none; margin-top:2px; width:17px; height:17px;}
+  .bp-result{display:grid; gap:10px; margin:6px 0 12px;}
+  .bp-group{border:1px solid var(--line); border-left-width:3px; border-radius:9px; padding:9px 12px;}
+  .bp-group-head{font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--ink-soft); margin-bottom:5px;}
+  .bp-item{font-size:13px; padding:2px 0;}
+  .bp-ok{border-left-color:var(--green); background:var(--green-bg);}
+  .bp-warn{border-left-color:var(--amber); background:var(--amber-bg);}
+  .bp-skip{border-left-color:var(--line-strong);}
+  @media (max-width:560px){
+    .bp-row{flex-wrap:wrap;}
+    .bp-meta{margin-left:27px; text-align:left; width:100%;}
+  }
+
+  /* ---- Back bar, and the unfinished-entry banner -------------------
+     The bar sits above the page's own content rather than inside a card,
+     so it reads as "where you are", not as one of the screen's controls.
+     It is only rendered when there is somewhere to go back TO -- a Back
+     button that does nothing is worse than none.
+  ------------------------------------------------------------------- */
+  .back-btn{margin-bottom:12px; background:var(--surface); border:1px solid var(--line);}
+  .back-btn:hover{border-color:var(--teal); color:var(--teal-ink);}
+
+  .resume-banner{display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:var(--amber-bg); color:var(--amber); border:1px solid var(--amber);
+    border-radius:10px; padding:11px 14px; margin-bottom:14px; font-size:13px;}
+  .resume-banner b{font-weight:600;}
+  .resume-acts{display:flex; gap:8px; margin-left:auto; flex-wrap:wrap;}
+  @media (max-width:560px){
+    .resume-acts{margin-left:0; width:100%;}
+    .resume-acts .btn{flex:1 1 0;}
+  }
+
+  /* Discard is kept out of the button row on purpose -- see the comment in
+     app.js. Quiet, below the fold of the action row, and red only on
+     approach, so it is never the thing a thumb lands on by accident. */
+  .wiz-discard-line{margin-top:12px; text-align:right;}
+  .wiz-discard-line .link-btn{color:var(--ink-soft); font-size:12.5px;}
+  .wiz-discard-line .link-btn:hover{color:var(--red);}
+
+  /* Four controls could not fit a phone row, and this one silently
+     overflowed the page before the wrap was added. */
+  .btn-row{flex-wrap:wrap;}
+
   .proc-opt{border:1px solid var(--line); border-radius:8px; padding:9px 11px; cursor:pointer; font-size:13.5px;}
   .proc-opt:hover{border-color:var(--teal);}
   .btn-row{display:flex; gap:10px; justify-content:space-between; margin-top:18px;}

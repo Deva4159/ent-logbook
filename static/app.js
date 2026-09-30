@@ -47,6 +47,10 @@
     accountArchives: null,
     accountReqCount: 0,
     bulkList: null,             // { key, preview }
+    // Setting postings for other people (HOD / Coordinator / Developer).
+    // { candidates, picked:{username:true}, unit, startDate, endDate,
+    //   allowOverlap, result } -- null while the panel is closed.
+    bulkPostings: null,
     entryLock: null,            // { id, rowVersion } while an edit form is open
     submitDialog: null,        // { ids:[], approver:"" }
     decideDialog: null,        // { id, action }
@@ -88,6 +92,254 @@
     // -- at most one open at a time, across every entries list on screen.
     openEntryMenu: null
   };
+
+  /* ============================================================
+     UNFINISHED ENTRIES  (local autosave + the resume banner)
+     ============================================================
+     A half-filled form is saved to this browser as it is typed, and
+     nothing ever asks you about it. Leave the form any way you like --
+     Back, the phone gesture, the sidebar, closing the tab -- and the
+     next time you open the Dashboard or Log Entry a banner offers to
+     pick it up, or to throw it away.
+
+     Why not a prompt on the way out, and why not a server draft:
+
+     - A dialog on an accidental Back press is the friction this is
+       meant to remove. The save has to be invisible or it is not a
+       safety net, it is another thing to dismiss.
+     - Server drafts exist for Surgical and Other Procedure ONLY. A
+       half-filled Academic, Seminar or Interesting Case has nowhere on
+       the server to go, so a "save as draft?" prompt could not honour
+       itself for three of the five forms.
+     - A draft is a real row in My Entries. Ten mis-presses would be ten
+       rows to clean up. This is a scratch copy, not a record.
+
+     The deliberate "Save as draft" button is untouched and is still the
+     right answer for a half-finished operation you want on the server
+     and visible from another device.
+
+     Scope, stated plainly: this is per-browser, so it does not follow
+     you from phone to laptop. EDITS of existing entries are never
+     stashed -- that data is already safe on the server, and an edit
+     holds a record lock that a stash would strand.
+
+     It holds a Hospital Number, so it is keyed per user, cleared on
+     save, on Discard and on sign-out, and never written for a form
+     nobody has typed into.
+  */
+  function draftStoreKey(){
+    return "entlog.unfinished." + ((state.user && state.user.username) || "_");
+  }
+  function readDraftStore(){
+    try{
+      var raw = localStorage.getItem(draftStoreKey());
+      if(!raw) return {};
+      var o = JSON.parse(raw);
+      return (o && typeof o === "object" && !Array.isArray(o)) ? o : {};
+    }catch(e){ return {}; }
+  }
+  function writeDraftStore(o){
+    try{
+      if(!Object.keys(o).length) localStorage.removeItem(draftStoreKey());
+      else localStorage.setItem(draftStoreKey(), JSON.stringify(o));
+    }catch(e){}   // private mode, quota, blocked storage -- never fatal
+  }
+  function clearWizDraft(type){
+    var store = readDraftStore();
+    if(store[type]){ delete store[type]; writeDraftStore(store); }
+  }
+  function clearAllWizDrafts(){ writeDraftStore({}); }
+
+  // An untouched form is not "unfinished work" -- stashing it would put a
+  // banner in front of someone who opened a form by accident and left.
+  function wizHasContent(w){
+    if(!w) return false;
+    var f = w.fields || {};
+    if(w.linkedFromId) return true;
+    var textish = ["hospitalNumber","age","comments","history","examination",
+                   "details","topic","venue","academicTypeOther","seminarTypeOther","consultant"];
+    for(var i=0;i<textish.length;i++){ if(String(f[textish[i]]||"").trim()) return true; }
+    var lists = ["diagnoses","diagnosesSecondary","comorbidities","procedures","assistantsPicked"];
+    for(var j=0;j<lists.length;j++){ if((f[lists[j]]||[]).length) return true; }
+    var blocks = f.procedureBlocks || [];
+    for(var k=0;k<blocks.length;k++){ if((blocks[k].procedures||[]).length) return true; }
+    return false;
+  }
+
+  function persistWizDraft(){
+    var w = state.wiz;
+    if(!w || w.editingId) return;
+    var store = readDraftStore();
+    if(!wizHasContent(w)){
+      if(store[w.entryType]){ delete store[w.entryType]; writeDraftStore(store); }
+      return;
+    }
+    store[w.entryType] = {
+      v: 1,
+      savedAt: new Date().toISOString(),
+      entryType: w.entryType,
+      linkedFromId: w.linkedFromId || null,
+      fields: w.fields
+    };
+    writeDraftStore(store);
+  }
+
+  function resumeBanner(){
+    if(state.wiz) return "";
+    var store = readDraftStore();
+    var keys = Object.keys(store).filter(function(k){ return PHOTO_TYPES[k]; });
+    if(!keys.length) return "";
+    keys.sort(function(a,b){ return (store[b].savedAt||"").localeCompare(store[a].savedAt||""); });
+    return keys.map(function(k){
+      var d = store[k];
+      return '<div class="resume-banner">'+
+        '<span>Unfinished <b>'+esc(entryTypeName(k))+'</b>, saved '+esc(fmtDateTime(d.savedAt))+
+        '. Nothing has been logged yet.</span>'+
+        '<span class="resume-acts">'+
+          '<button type="button" class="btn btn-sm btn-primary" data-resume-draft="'+esc(k)+'">Resume</button>'+
+          '<button type="button" class="btn btn-sm" data-discard-draft="'+esc(k)+'">Discard</button>'+
+        '</span>'+
+      '</div>';
+    }).join("");
+  }
+
+  function entryTypeName(k){
+    for(var i=0;i<ENTRY_TYPE_TILES.length;i++){ if(ENTRY_TYPE_TILES[i][0]===k) return ENTRY_TYPE_TILES[i][1]; }
+    return k;
+  }
+
+  function resumeWizDraft(type){
+    var d = readDraftStore()[type];
+    if(!d){ render(); return; }
+    goView("resident-log");
+    startWizard(type, d.fields);
+    if(state.wiz && d.linkedFromId) state.wiz.linkedFromId = d.linkedFromId;
+    render();
+  }
+
+  /* ============================================================
+     NAVIGATION HISTORY  (the Back button, and the phone's own)
+     ============================================================
+     This app renders every screen by replacing `#app`'s innerHTML and
+     never touched the History API, so the browser's Back button -- and,
+     far more importantly, the back gesture that is how people actually
+     navigate on a phone -- left the logbook entirely. Half-filled entry,
+     gone. The only way out of a form was the sidebar, which discarded it.
+
+     The model is a stack of *frames*. A frame is anything you entered
+     FROM somewhere: an entry form, a trainee's page, a feedback thread,
+     a dialog. Each carries the label its Back button shows and an undo()
+     that returns the app to the screen underneath.
+
+     One rule keeps this honest: **every way back funnels through
+     navBack(), which calls history.back()**. The on-screen button,
+     Cancel, Escape and the phone's gesture all end up in navOnPop(), so
+     our stack and the browser's can never drift apart. The alternative
+     -- some paths clearing state directly, others going through history
+     -- desynchronises the two within a handful of clicks and then Back
+     starts skipping screens.
+
+     history.state carries only a depth and the view it was recorded on,
+     never the app's data: a history entry can outlive a sign-out, and
+     putting a hospital number in one would mean putting it somewhere it
+     cannot be cleared from.
+  */
+  var navFrames = [];
+
+  function navSnapshot(){ return { entlog:true, d: navFrames.length, v: state.view }; }
+
+  function navReplace(){ try{ history.replaceState(navSnapshot(), ""); }catch(e){} }
+
+  function navPush(tag, label, undo){
+    navFrames.push({ tag:tag, label:label, undo:undo });
+    try{ history.pushState(navSnapshot(), ""); }catch(e){}
+  }
+
+  function navTop(){ return navFrames.length ? navFrames[navFrames.length-1] : null; }
+
+  // The single way back.
+  function navBack(){
+    if(!navFrames.length) return;
+    try{ history.back(); }
+    catch(e){
+      // No History API (very old browser, or an embedded webview with it
+      // disabled). Do the pop ourselves so Back still works; only the
+      // phone gesture is lost.
+      var f = navFrames.pop(); if(f){ try{ f.undo(); }catch(_){} }
+      render();
+    }
+  }
+
+  // Leaving a frame when the caller has ALREADY undone the state itself
+  // -- a successful save, say. The frame is dropped first, so navOnPop's
+  // unwind loop finds nothing left to do and cannot undo it twice.
+  function navDrop(tag){
+    var t = navTop();
+    if(!t || (tag && t.tag !== tag)) return;
+    navFrames.pop();
+    try{ history.go(-1); }catch(e){}
+  }
+
+  function navOnPop(ev){
+    var st = (ev && ev.state && ev.state.entlog) ? ev.state : { d:0, v:null };
+    var target = st.d || 0;
+    while(navFrames.length > target){
+      var f = navFrames.pop();
+      try{ f.undo(); }catch(e){}
+    }
+    if(navFrames.length < target){
+      // A history entry from a branch already unwound -- it points at a
+      // depth that no longer exists. Left alone the press would do
+      // nothing at all, which reads as a broken button, so honour the
+      // view it was recorded on and rewrite the entry to match reality.
+      navReplace();
+    }
+    if(navFrames.length === 0 && st.v && st.v !== state.view){
+      state.view = st.v;
+      state.mobileNavOpen = false;
+      render();
+      loadForView();
+      return;
+    }
+    render();
+  }
+
+  // Sidebar navigation is lateral, not a step deeper, so it unwinds any
+  // open frames rather than stacking on top of them.
+  function goView(v){
+    while(navFrames.length){
+      var f = navFrames.pop();
+      try{ f.undo(); }catch(e){}
+    }
+    state.view = v;
+    state.mobileNavOpen = false;
+    try{ history.pushState(navSnapshot(), ""); }catch(e){}
+    render();
+    loadForView();
+  }
+
+  // A dialog frame carries no label -- it sits over the page, so a Back
+  // bar for it would render underneath its own overlay. The bar shows the
+  // nearest frame that does have one.
+  // Opening a dialog. `open` sets the state, `close` clears it; the frame
+  // is what makes Escape, the Back bar and the phone gesture all close it
+  // through the same single path. No label: a dialog sits over the page,
+  // so a Back bar of its own would render underneath its own overlay.
+  function navOpenOverlay(open, close){
+    open();
+    navPush("overlay", "", close);
+    render();
+  }
+
+  function backBar(){
+    for(var i=navFrames.length-1;i>=0;i--){
+      if(navFrames[i].label){
+        return '<button type="button" class="btn btn-sm back-btn" id="nav-back">'+
+          '<span aria-hidden="true">←</span> '+esc(navFrames[i].label)+'</button>';
+      }
+    }
+    return "";
+  }
 
   // Every role that logs entries and gets the resident-style logbook/
   // dashboard experience -- "PG Resident" is one of three now.
@@ -752,6 +1004,13 @@
   async function bulkAddList(key, text, preview){
     return await api("POST","/config/bulk-add",{list:key, text:text, preview:!!preview});
   }
+  async function dPostingCandidates(){
+    return (await api("GET","/postings/candidates")).candidates || [];
+  }
+  async function dBulkPostings(mode, usernames, unit, startDate, endDate, allowOverlap){
+    return await api("POST","/postings/bulk",{ mode:mode, usernames:usernames, unit:unit,
+      startDate:startDate, endDate:endDate||null, allowOverlap: !!allowOverlap });
+  }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
@@ -779,6 +1038,11 @@
         try{ state.user.postings = (await api("GET","/postings")).postings; }catch(e){ state.user.postings = []; }
       }
     }catch(e){}
+    navReplace();
+    if(!window.__entlogPopBound){
+      window.__entlogPopBound = true;
+      window.addEventListener("popstate", navOnPop);
+    }
     render();
     if(state.user) loadForView();
   }
@@ -797,6 +1061,8 @@
       try{ state.user.postings = (await api("GET","/postings")).postings; }catch(e){ state.user.postings = []; }
       state.view = defaultViewFor(res.user.role);
       state.authBusy=false;
+      navFrames.length = 0;
+      navReplace();
       render();
       loadForView();
     }catch(err){
@@ -854,6 +1120,11 @@
   }
 
   function doLogout(){
+    // Before state.user is cleared: the key is per-username, and a scratch
+    // copy holding a Hospital Number must not outlive the session on what
+    // may well be a shared departmental computer.
+    clearAllWizDrafts();
+    navFrames.length = 0;
     api("POST","/auth/logout").catch(function(){});
     state.user = null;
     state.capabilities = null;
@@ -1019,6 +1290,7 @@
 
   async function openResidentDetail(username){
     state.detailUser = null; state.detailEntries=[]; state.detailPostings=[];
+    navPush("view", "Back to roster", function(){ state.view = "consultant-roster"; });
     state.view = "consultant-detail";
     render();
     try{
@@ -1044,16 +1316,36 @@
   /* ============================================================
      RESIDENT POSTINGS (unit + start/end date)
   ============================================================ */
-  async function addPosting(unit, startDate, endDate){
+  // Two postings that overlap are not an error -- a peripheral block inside
+  // a longer rotation is a real thing -- but they are worth knowing about,
+  // because the unit stamped on an entry comes from whichever overlapping
+  // posting STARTED later, and nothing was saying so. Warn with the actual
+  // clashing dates, then do as asked.
+  function describePosting(p){
+    return unitShort(p.unit)+"  "+fmtDate(p.startDate)+" \u2192 "+(p.endDate ? fmtDate(p.endDate) : "ongoing");
+  }
+  async function addPosting(unit, startDate, endDate, allowOverlap){
     if(!unit){ toast("Pick a unit."); return; }
     if(!startDate){ toast("Pick a start date."); return; }
     if(endDate && endDate < startDate){ toast("End date can't be before the start date."); return; }
     try{
-      var res = await api("POST","/postings",{ unit:unit, startDate:startDate, endDate: endDate||null });
+      var res = await api("POST","/postings",{ unit:unit, startDate:startDate,
+        endDate: endDate||null, allowOverlap: !!allowOverlap });
       state.user.postings = res.postings;
       toast("Posting added.");
       render();
-    }catch(e){ toast(e.message || "Could not save this posting."); }
+    }catch(e){
+      if(e.code === "posting_overlap" && e.data && e.data.overlaps && !allowOverlap){
+        var list = e.data.overlaps.map(function(p){ return "  \u2022 "+describePosting(p); }).join("\n");
+        var msg = "This overlaps "+(e.data.overlaps.length===1 ? "a posting" : e.data.overlaps.length+" postings")+
+          " you have already logged:\n\n"+list+
+          "\n\nWhile two postings overlap, an entry is filed under whichever of them started later."+
+          "\n\nAdd it anyway?";
+        if(window.confirm(msg)) addPosting(unit, startDate, endDate, true);
+        return;
+      }
+      toast(e.message || "Could not save this posting.");
+    }
   }
   async function removePosting(idx){
     if(!confirm("Remove this posting?")) return;
@@ -1071,7 +1363,14 @@
      Other Procedure, Interesting Case, Academic Participation).
      All field state lives in state.wiz.fields regardless of type.
   ============================================================ */
-  function startWizard(type, prefill){
+  // `opts` ({editingId, status}) is applied before the first render, not
+  // after it by the caller. It used to be set afterwards, which meant the
+  // wizard rendered once believing it was a brand-new entry -- and the
+  // autosave in render() therefore stashed somebody's EXISTING record as an
+  // unfinished new one, overwriting whatever genuine unfinished entry of
+  // that type they had, and leaving a resume banner for work that was
+  // already saved.
+  function startWizard(type, prefill, opts){
     var fields = { date: todayISO() };
     if(type==="surgical"){
       Object.assign(fields, { procedureBlocks:[newProcedureBlock([])], setting:state.config.settings[0], hospitalNumber:"", age:"", sex:state.config.sexOptions[0], diagnoses:[], diagnosesSecondary:[], comorbidities:[], consultantChoice:"__other__", consultant:"", assistantsPicked:[], comments:"", caseReport:"No" });
@@ -1085,7 +1384,10 @@
       Object.assign(fields, { seminarType:state.config.seminarTypes[0], seminarTypeOther:"", topic:"", venue:"", details:"" });
     }
     if(prefill) Object.assign(fields, prefill);
-    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null, editingId:null, status:"final", linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{} };
+    state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null,
+                  editingId:(opts&&opts.editingId)||null, status:(opts&&opts.status)||"final",
+                  linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{} };
+    navPush("wiz", "Back", function(){ releaseEntryLock(); state.wiz = null; });
     render();
     if(type==="surgical" || type==="other") loadWizPeopleList();
   }
@@ -1125,11 +1427,32 @@
   function wizPeopleDisplayNames(){
     return (state.wiz.peopleList||[]).map(function(p){ return p.displayName; });
   }
-  function cancelWizard(){
-    // Hand the record straight back rather than making the next person wait
-    // out the lease.
+  // Leaving the form WITHOUT throwing the work away. The lease is handed
+  // straight back rather than making the next person wait it out -- the
+  // frame's undo() does exactly that, so this is just the button's way in.
+  function cancelWizard(){ navBack(); }
+
+  // Throwing it away, deliberately. The only control in the form that
+  // destroys anything, which is the point of separating it from Back: an
+  // accidental Back now costs nothing at all.
+  function discardWizard(){
+    if(state.wiz && !state.wiz.editingId) clearWizDraft(state.wiz.entryType);
     releaseEntryLock();
-    state.wiz=null; render();
+    state.wiz = null;
+    navDrop("wiz");
+    render();
+  }
+
+  // Called at the end of every successful save, whichever form it came
+  // from: releases the lease, drops the local copy (it is on the server
+  // now) and steps back out of the form.
+  function wizFinished(){
+    var t = state.wiz ? state.wiz.entryType : null;
+    var editing = state.wiz ? state.wiz.editingId : null;
+    releaseEntryLock();
+    if(t && !editing) clearWizDraft(t);
+    state.wiz = null;
+    navDrop("wiz");
   }
 
   // Re-opens the wizard pre-filled from an existing entry, in edit mode
@@ -1212,9 +1535,11 @@
       });
       if(!fields.procedureBlocks.length) fields.procedureBlocks = [newProcedureBlock([])];
     }
-    startWizard(type, fields);
-    state.wiz.editingId = id;
-    state.wiz.status = e.status === "draft" ? "draft" : "final";
+    // View first: startWizard renders, and rendering the form while the
+    // view still said "My Entries" drew that list for a frame before the
+    // form replaced it.
+    state.view = "resident-log";
+    startWizard(type, fields, { editingId: id, status: e.status === "draft" ? "draft" : "final" });
     if(type==="surgical"){
       var linked = findLinkedCase(e.id, state.myEntries||[]);
       state.wiz.linkedCaseId = linked ? linked.id : null;
@@ -1224,7 +1549,6 @@
         comorbidities: (e.comorbidities||[]).slice(), procedures: entryProcedures(e).slice()
       };
     }
-    state.view = "resident-log";
     render();
   }
 
@@ -1470,7 +1794,7 @@
         var linkedCaseId = state.wiz.linkedCaseId || null;
         var origSnapshot = state.wiz.origSnapshot || null;
         await dUpdateEntry(editingId, data);
-        finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+        wizFinished(); state.myEntriesLoaded = false;
         toast("Entry updated.");
         state.view = "resident-entries";
         render();
@@ -1501,7 +1825,7 @@
         startWizard("case", { hospitalNumber:data.hospitalNumber, age:data.age, sex:data.sex, diagnoses:data.diagnoses.slice(), diagnosesSecondary:data.diagnosesSecondary.slice(), comorbidities:data.comorbidities.slice(), procedures:data.procedures.slice(), linkedFromId:newId });
         return;
       }
-      finishEditing(); state.wiz = null;
+      wizFinished();
       toast("Entry logged.");
       state.view = "resident-entries";
       render();
@@ -1540,7 +1864,7 @@
     var otherEditingId = state.wiz.editingId;
     try{
       if(otherEditingId){ await dUpdateEntry(otherEditingId, data); } else { await dAddEntry(data); }
-      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+      wizFinished(); state.myEntriesLoaded = false;
       toast(otherEditingId ? "Entry updated." : "Entry logged.");
       state.view = "resident-entries";
       render();
@@ -1585,7 +1909,7 @@
     var editingId = state.wiz.editingId;
     try{
       if(editingId){ await dUpdateEntry(editingId, data); } else { await dAddEntry(data); }
-      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+      wizFinished(); state.myEntriesLoaded = false;
       toast("Draft saved — you can continue it later from My Entries.");
       state.view = "resident-entries";
       render();
@@ -1615,7 +1939,7 @@
     var caseEditingId = state.wiz.editingId;
     try{
       if(caseEditingId){ await dUpdateEntry(caseEditingId, data); } else { await dAddEntry(data); }
-      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+      wizFinished(); state.myEntriesLoaded = false;
       toast(caseEditingId ? "Case updated." : "Case logged.");
       state.view = "resident-entries";
       render();
@@ -1642,7 +1966,7 @@
     var seminarEditingId = state.wiz.editingId;
     try{
       if(seminarEditingId){ await dUpdateEntry(seminarEditingId, data); } else { await dAddEntry(data); }
-      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+      wizFinished(); state.myEntriesLoaded = false;
       toast(seminarEditingId ? "Entry updated." : "Seminar/presentation logged.");
       state.view = "resident-entries";
       render();
@@ -1668,7 +1992,7 @@
     var academicEditingId = state.wiz.editingId;
     try{
       if(academicEditingId){ await dUpdateEntry(academicEditingId, data); } else { await dAddEntry(data); }
-      finishEditing(); state.wiz = null; state.myEntriesLoaded = false;
+      wizFinished(); state.myEntriesLoaded = false;
       toast(academicEditingId ? "Entry updated." : "Academic activity logged.");
       state.view = "resident-entries";
       render();
@@ -2407,6 +2731,7 @@
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
         (state.toast ? '<div class="success-banner" data-toast>'+esc(state.toast)+'</div>' : '')+
+        backBar()+
         inner+
       '</main>'+
     '</div>'+
@@ -2476,6 +2801,7 @@
     var todayUnit = unitForDate(state.user.postings, todayISO());
     var recent = finalizedOnly(state.myEntries).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
     return ''+
+    resumeBanner()+
     reminderBanner()+
     (todayUnit ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Current posting: '+unitShortHtml(todayUnit)+' — '+esc(unitFull(todayUnit))+'</div>'
       : '<div class="notice-banner">You don’t have a current posting on file — add one under My Postings so your entries can be tagged with a unit.</div>')+
@@ -2667,6 +2993,7 @@
   function renderResidentLog(){
     if(!state.wiz){
       return ''+
+      resumeBanner()+
       '<div class="card">'+
         '<span class="eyebrow">What are you logging?</span>'+
         '<h2>Log a new entry</h2>'+
@@ -2858,11 +3185,29 @@
     var isDraftEdit = state.wiz.editingId && state.wiz.status === "draft";
     var showDraftBtn = !state.wiz.editingId || isDraftEdit;
     var finalizeLabel = state.wiz.editingId && !isDraftEdit ? "Save changes" : "Finalize entry";
+    // "Discard", not "Cancel". Cancel is ambiguous about whether the work
+    // survives; this button is the only one that destroys anything, and the
+    // Back bar above the form is the way out that does not.
     return '<div class="btn-row">'+
-      '<button class="btn" id="wiz-back">Cancel</button>'+
+      wizBackButton()+
       (showDraftBtn ? '<button class="btn" id="wiz-save-draft">Save as draft</button>' : '')+
       '<button class="btn btn-primary" id="wiz-submit">'+finalizeLabel+'</button>'+
-    '</div>';
+    '</div>'+wizDiscardLine();
+  }
+  // Leaving the form is a button in the row, like it always was -- the
+  // Back bar at the top of the page is no use to someone who has just
+  // scrolled to the bottom of a Surgical form to save it.
+  function wizBackButton(){
+    return '<button type="button" class="btn" id="wiz-back">← Back</button>';
+  }
+  // Discard is deliberately NOT in that row. It is the one control here
+  // that destroys anything, and sitting it next to Finalize on a phone is
+  // asking for the mis-hit this whole release exists to prevent.
+  function wizDiscardLine(){
+    return '<div class="wiz-discard-line">'+
+      '<button type="button" class="link-btn" id="wiz-discard">'+
+      (state.wiz && state.wiz.editingId ? "Discard my changes" : "Discard this entry")+
+      '</button></div>';
   }
   function wizDraftBadge(){
     return (state.wiz.editingId && state.wiz.status==="draft")
@@ -2958,7 +3303,7 @@
       fieldGroup("history", '<label for="f-history">Brief History</label><textarea id="f-history">'+esc(f.history||"")+'</textarea>')+
       fieldGroup("examination", '<label for="f-examination">Examination Findings</label><textarea id="f-examination">'+esc(f.examination||"")+'</textarea>')+
       '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save case")+'</button></div>'+
+      '<div class="btn-row">'+wizBackButton()+'<button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save case")+'</button></div>'+wizDiscardLine()+
     '</div>';
   }
 
@@ -2975,7 +3320,7 @@
       '</div>'+
       fieldGroup("academicTypeOther", '<label for="f-academicTypeOther">Describe the activity type</label><input id="f-academicTypeOther" type="text" value="'+esc(f.academicTypeOther||"")+'">', "field", ' id="academic-other-wrap" style="'+(f.academicType==="Other"?"":"display:none;")+'"')+
       fieldGroup("details", '<label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea>')+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
+      '<div class="btn-row">'+wizBackButton()+'<button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+wizDiscardLine()+
     '</div>';
   }
 
@@ -2995,7 +3340,7 @@
       fieldGroup("topic", '<label for="f-topic">Topic / Title</label><input id="f-topic" type="text" value="'+esc(f.topic||"")+'" placeholder="e.g. Approach to vertigo in primary care">')+
       '<div class="field"><label for="f-venue">Venue / audience <span class="muted">(optional)</span></label><input id="f-venue" type="text" value="'+esc(f.venue||"")+'" placeholder="e.g. Departmental seminar, Unit 4"></div>'+
       fieldGroup("details", '<label for="f-details">Details</label><textarea id="f-details" style="min-height:120px;">'+esc(f.details||"")+'</textarea>')+
-      '<div class="btn-row"><button class="btn" id="wiz-back">Cancel</button><button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+
+      '<div class="btn-row">'+wizBackButton()+'<button class="btn btn-primary" id="wiz-submit">'+(state.wiz.editingId?"Save changes":"Save activity")+'</button></div>'+wizDiscardLine()+
     '</div>';
   }
 
@@ -3509,6 +3854,7 @@
     return esc(String(v));
   }
   async function openEntryHistory(id){
+    navPush("overlay", "", function(){ state.viewingHistoryEntryId = null; });
     state.viewingHistoryEntryId = id;
     state.historyLoading = true;
     state.historyEdits = [];
@@ -3620,8 +3966,13 @@
       '<div class="acct-grid">'+
         kv("Username", '<span class="tabular">'+esc(p.username)+'</span>')+
         kv("Role", esc(roleLabel(p.role)))+
-        kv(isTrainee ? "Batch" : "Designation", esc((isTrainee ? p.pgYear : p.designation) || ""))+
-        kv(isTrainee ? "Current posting" : "Unit", p.unit ? unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>' : "")+
+        // A Developer administers the whole department, so Designation and
+        // Unit are not blanks waiting to be filled in -- they do not apply.
+        // Showing them empty read as a half-finished account.
+        (p.role==="developer"
+          ? kv("Scope", '<span class="muted">Every unit</span>')
+          : kv(isTrainee ? "Batch" : "Designation", esc((isTrainee ? p.pgYear : p.designation) || ""))+
+            kv(isTrainee ? "Current posting" : "Unit", p.unit ? unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>' : ""))+
         kv("Account opened", fmtDate((p.createdAt||"").slice(0,10)))+
         kv("Last signed in", p.lastSeenAt ? fmtDateTime(p.lastSeenAt) : "")+
       '</div></div>';
@@ -3676,7 +4027,9 @@
         '</div>';
       }).join("")+'</div>';
     }
-    var unitCard = '<div class="card"><h2 style="font-size:15px;">'+
+    // A Developer has no home unit by design, so this card could only ever
+    // tell them to go and ask themselves to set one.
+    var unitCard = p.role==="developer" ? "" : '<div class="card"><h2 style="font-size:15px;">'+
         (p.unit ? esc(unitShort(p.unit))+' — who else is here' : 'Your unit')+'</h2>'+
       (p.unit ? '<div class="row2">'+
           '<div><div class="exp-sub">Consultants</div>'+memberList(m.consultants, "None on file for this unit.")+'</div>'+
@@ -4154,8 +4507,95 @@
     var rows = state.devUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
     renderCreateUserForm()+
+    renderBulkPostings()+
     '<div class="card"><h2>All accounts ('+rows.length+')</h2>'+
     renderUserAccountsTable(rows, true)+
+    '</div>';
+  }
+
+  /* ============================================================
+     SETTING POSTINGS FOR OTHER PEOPLE
+     ============================================================
+     A posting is what stamps a unit onto every entry logged while it
+     runs, and the stamp is written once, at save time -- it is never
+     recomputed. So a trainee who logs a fortnight of operations before
+     getting round to My Postings has a fortnight of records that their
+     Head of Unit will never see on the roster, permanently. Waiting for
+     forty people to each remember is not a plan; the people who set the
+     rota can now set it for everyone at once.
+
+     Preview before apply, like bulk list-add: this writes to other
+     people's records, and the screen says exactly whose and what before
+     anything happens. Anyone whose dates clash is held back into their
+     own group rather than quietly skipped or quietly written.
+  */
+  function renderBulkPostings(){
+    var bp = state.bulkPostings;
+    if(!bp) {
+      return '<div class="card">'+
+        '<div class="section-head" style="margin-bottom:0;"><h2 style="margin-bottom:0;">Set postings for trainees</h2>'+
+        '<button class="btn btn-sm" id="bp-open">+ Set postings</button></div>'+
+        '<p class="muted" style="margin:10px 0 0; font-size:13px;">Put a group of trainees into a unit for a block of dates, in one go — for a new intake, or to fill in a rotation nobody has logged yet.</p>'+
+      '</div>';
+    }
+    var cands = bp.candidates || [];
+    var picked = bp.picked || {};
+    var pickedCount = Object.keys(picked).filter(function(k){ return picked[k]; }).length;
+    var list = cands.length ? '<div class="bp-list">'+cands.map(function(c){
+        var here = c.currentUnit ? unitShortHtml(c.currentUnit) : '<span class="muted">nowhere on file</span>';
+        return '<label class="bp-row"><input type="checkbox" data-bp-pick="'+esc(c.username)+'"'+(picked[c.username]?" checked":"")+'>'+
+          '<span class="bp-name">'+esc(c.displayName)+accountStateChip(c.status)+'</span>'+
+          '<span class="muted bp-meta">'+esc(roleLabel(c.role))+(c.pgYear?' \u00b7 '+esc(c.pgYear):'')+' \u00b7 today: '+here+'</span>'+
+        '</label>';
+      }).join("")+'</div>'
+      : '<p class="muted" style="font-size:13px;">No approved trainees on the system yet.</p>';
+
+    var res = bp.result;
+    var resultBlock = "";
+    if(res){
+      function group(title, items, cls, extra){
+        if(!items || !items.length) return "";
+        return '<div class="bp-group '+cls+'"><div class="bp-group-head">'+esc(title)+' ('+items.length+')</div>'+
+          items.map(function(i){
+            return '<div class="bp-item"><b>'+esc(i.displayName||i.username)+'</b>'+
+              (extra ? extra(i) : "")+'</div>';
+          }).join("")+'</div>';
+      }
+      resultBlock = '<div class="bp-result">'+
+        group(res.added && res.added.length ? "Added" : "Ready to add",
+              (res.added && res.added.length) ? res.added : res.wouldAdd, "bp-ok")+
+        group("Overlaps an existing posting",
+              res.overlapping, "bp-warn", function(i){
+                return '<div class="muted" style="font-size:12px;">already: '+
+                  (i.overlaps||[]).map(function(o){ return esc(describePosting(o)); }).join(" \u00b7 ")+'</div>';
+              })+
+        group("Skipped", res.skipped, "bp-skip", function(i){
+          return ' <span class="muted" style="font-size:12px;">'+esc(i.reason||"")+'</span>';
+        })+
+      '</div>';
+    }
+
+    var hasOverlap = !!(res && res.overlapping && res.overlapping.length);
+    var canApply = !!(res && ((res.wouldAdd && res.wouldAdd.length) || (hasOverlap && bp.allowOverlap)));
+    return '<div class="card">'+
+      '<div class="section-head"><h2>Set postings for trainees</h2>'+
+        '<button class="btn btn-sm" id="bp-close">Cancel</button></div>'+
+      '<div class="row3">'+
+        '<div class="field"><label for="bp-unit-search">Unit</label>'+searchSingleField("bp-unit", unitSearchOptions(), bp.unit||null, "Search units\u2026")+'</div>'+
+        '<div class="field"><label for="bp-start">Start date</label><input id="bp-start" type="date" value="'+esc(bp.startDate||todayISO())+'"></div>'+
+        '<div class="field"><label for="bp-end">End date <span class="muted">(optional)</span></label><input id="bp-end" type="date" value="'+esc(bp.endDate||"")+'"></div>'+
+      '</div>'+
+      '<div class="section-head" style="margin-top:6px;"><div class="exp-sub">Who ('+pickedCount+' selected)</div>'+
+        '<span><button type="button" class="link-btn" id="bp-all">Select all</button> \u00b7 '+
+        '<button type="button" class="link-btn" id="bp-none">Clear</button></span></div>'+
+      list+
+      resultBlock+
+      (hasOverlap ? '<label class="bp-allow"><input type="checkbox" id="bp-allow"'+(bp.allowOverlap?" checked":"")+'> '+
+        'Add the overlapping ones too. While two postings overlap, an entry is filed under whichever started later.</label>' : '')+
+      '<div class="btn-row">'+
+        '<button class="btn" id="bp-preview">Check'+(pickedCount?' these '+pickedCount:'')+'</button>'+
+        '<button class="btn btn-primary" id="bp-apply"'+(canApply?"":" disabled")+'>Add postings</button>'+
+      '</div>'+
     '</div>';
   }
 
@@ -4163,6 +4603,7 @@
     if(state.loading) return skeletonTable(5);
     var rows = state.manageUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
+    ((state.capabilities||{}).isHod || (state.capabilities||{}).isCoordinator ? renderBulkPostings() : '')+
     '<div class="card"><h2>Manage accounts ('+rows.length+')</h2>'+
       '<p class="muted" style="margin-bottom:14px;">Update a trainee’s batch as they progress, or a consultant’s designation on promotion, and deactivate or delete accounts that no longer need access. Role changes and password resets stay Developer-only.</p>'+
       renderUserAccountsTable(rows, false)+
@@ -4475,6 +4916,19 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.3", date: "2026-10-01", title: "Going back, and not losing work",
+      note: "Leaving a half-filled entry no longer costs you the entry, and the rota can be set for people rather than by them.",
+      changes: [
+        ["added", "<b>A Back button on every screen that has somewhere to go back to</b> — and the phone's own back gesture and the browser's Back button now work inside the logbook instead of leaving it. Back also closes whichever dialog is open, rather than the page."],
+        ["added", "<b>A half-filled entry is saved as you type and offered back to you.</b> Leave the form any way at all — Back, the sidebar, closing the tab, the phone going to sleep — and the Dashboard and Log Entry tab offer to pick it up where you left off. Nothing asks you anything on the way out."],
+        ["changed", "The form's <b>Cancel</b> is now <b>Back</b>, which keeps your work, with <b>Discard</b> moved out of the button row so it is never the thing a thumb lands on next to Finalize. Discard is the only control that throws anything away, and it asks first."],
+        ["added", "<b>Overlapping postings are flagged before they are saved</b>, with the dates of what they clash with — then added anyway if that is what you meant. While two postings overlap, an entry is filed under whichever of them started later, which nothing was telling anybody."],
+        ["added", "<b>The Head of Department, a Course Coordinator or a Developer can set postings for trainees</b>, a whole group at once. Check first — it shows exactly who would be added, who already has a clashing posting, and who is being skipped and why — then commit. Every one is recorded against that person's account."],
+        ["changed", "<b>A Developer account no longer carries a home unit.</b> A Developer covers every unit, so Unit and Designation are gone from their My Account rather than sitting there empty, and promoting someone to Developer clears theirs."],
+        ["fixed", "Following a linked case from inside an open record no longer needed two presses of Back to get out of it."],
+      ],
+    },
     {
       version: "7.2", date: "2026-09-30", title: "Photographs on the entry types",
       note: "The five entry types now carry a department photograph, on the phone as well as the desktop.",
@@ -4876,6 +5330,11 @@
     if(main && state.view !== __entlogLastView) main.classList.add("view-enter");
     __entlogLastView = state.view;
     wireShellEvents();
+    // Catches every change that goes through state -- a diagnosis ticked, a
+    // site added, the date changed. Typing is caught by the debounced input
+    // listener in wireShellEvents instead, because typing deliberately does
+    // NOT re-render (that is what would eat the cursor).
+    persistWizDraft();
   }
 
   /* ============================================================
@@ -4980,19 +5439,51 @@
         var target = b.getAttribute("data-nav");
         state.mobileNavOpen = false; // picking a destination closes the mobile drawer
         if(target && target.indexOf("__new-")===0){
-          state.view = "resident-log";
-          render();
+          // goView first, deliberately: the picker is the screen Back
+          // should return to, so the view change is recorded before the
+          // form is stacked on top of it.
+          goView("resident-log");
           startWizard(target.replace("__new-",""));
           return;
         }
-        state.view = target;
-        finishEditing(); state.wiz = null;
-        render();
-        loadForView();
+        goView(target);
       };
     });
     var navToggle = el("btn-nav-toggle");
     if(navToggle) navToggle.onclick = function(){ state.mobileNavOpen = !state.mobileNavOpen; render(); };
+    var navBackBtn = el("nav-back"); if(navBackBtn) navBackBtn.onclick = navBack;
+
+    document.querySelectorAll("[data-resume-draft]").forEach(function(b){
+      b.onclick = function(){ resumeWizDraft(b.getAttribute("data-resume-draft")); };
+    });
+    document.querySelectorAll("[data-discard-draft]").forEach(function(b){
+      b.onclick = function(){
+        var k = b.getAttribute("data-discard-draft");
+        if(!window.confirm("Throw away the unfinished "+entryTypeName(k)+"? This cannot be undone.")) return;
+        clearWizDraft(k);
+        render();
+      };
+    });
+
+    // Typing does not re-render (that is what would eat the cursor), so the
+    // autosave in render() never sees a keystroke. One delegated listener on
+    // the container -- which innerHTML never replaces -- covers every field
+    // in every form, debounced so a fast typist writes to storage about once
+    // a second rather than once a character.
+    if(!window.__entlogDraftBound){
+      window.__entlogDraftBound = true;
+      var draftTimer = null;
+      var appEl = el("app");
+      if(appEl) appEl.addEventListener("input", function(){
+        if(!state.wiz || state.wiz.editingId) return;
+        clearTimeout(draftTimer);
+        draftTimer = setTimeout(function(){
+          if(!state.wiz || state.wiz.editingId) return;
+          syncWizFieldsFromDom();
+          persistWizDraft();
+        }, 800);
+      });
+    }
     /* ---------------- approvals ---------------- */
     function pickIds(){ return Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; }); }
     async function openSubmit(ids){
@@ -5000,8 +5491,9 @@
       // the submit dialog can be opened straight from My Entries.
       await loadConsultants();
       var d = approverOptions();
-      state.submitDialog = { ids: ids, approver: d.length===1 ? d[0].username : "" };
-      render();
+      navOpenOverlay(function(){
+        state.submitDialog = { ids: ids, approver: d.length===1 ? d[0].username : "" };
+      }, function(){ state.submitDialog = null; });
     }
     document.querySelectorAll("[data-send-approval]").forEach(function(b){
       b.onclick = function(){ state.openEntryMenu=null; openSubmit([b.getAttribute("data-send-approval")]); };
@@ -5074,13 +5566,13 @@
       }catch(e){ toast(e.message||"Could not sign those off."); }
     });
     document.querySelectorAll("[data-sign-off]").forEach(function(b){
-      b.onclick = function(){ state.decideDialog = { id: b.getAttribute("data-sign-off"), action:"approve" }; render(); };
+      b.onclick = function(){ navOpenOverlay(function(){ state.decideDialog = { id: b.getAttribute("data-sign-off"), action:"approve" }; }, function(){ state.decideDialog = null; }); };
     });
     document.querySelectorAll("[data-ask-changes]").forEach(function(b){
-      b.onclick = function(){ state.decideDialog = { id: b.getAttribute("data-ask-changes"), action:"changes" }; render(); };
+      b.onclick = function(){ navOpenOverlay(function(){ state.decideDialog = { id: b.getAttribute("data-ask-changes"), action:"changes" }; }, function(){ state.decideDialog = null; }); };
     });
     document.querySelectorAll("[data-open-entry]").forEach(function(b){
-      b.onclick = function(){ state.viewingEntryId = b.getAttribute("data-open-entry"); render(); };
+      b.onclick = function(){ var id=b.getAttribute("data-open-entry"); navOpenOverlay(function(){ state.viewingEntryId = id; }, function(){ state.viewingEntryId = null; }); };
     });
     document.querySelectorAll("[data-approval-history]").forEach(function(b){
       b.onclick = async function(){
@@ -5093,10 +5585,10 @@
     });
     // submit dialog
     document.querySelectorAll("[data-submit-cancel]").forEach(function(b){
-      b.onclick = function(){ state.submitDialog=null; render(); };
+      b.onclick = navBack;
     });
     var subOv = document.querySelector("[data-submit-overlay]");
-    if(subOv) subOv.onclick = function(ev){ if(ev.target===subOv){ state.submitDialog=null; render(); } };
+    if(subOv) subOv.onclick = function(ev){ if(ev.target===subOv) navBack(); };
     var subGo = document.querySelector("[data-submit-go]");
     if(subGo) subGo.onclick = once("submit-approval", async function(){
       var who = (el("submit-approver")||{}).value || "";
@@ -5107,7 +5599,7 @@
       try{
         if(ids.length===1) await aSubmit(ids[0], who, note);
         else await aBulkSubmit(ids, who);
-        state.submitDialog=null; state.approvalPick={};
+        state.submitDialog=null; navDrop("overlay"); state.approvalPick={};
         await loadMyEntries(); await refreshApprovalSummary();
         toast(ids.length===1 ? "Sent for sign-off." : "Sent "+ids.length+" records for sign-off.");
         render();
@@ -5115,10 +5607,10 @@
     });
     // decide dialog
     document.querySelectorAll("[data-decide-cancel]").forEach(function(b){
-      b.onclick = function(){ state.decideDialog=null; render(); };
+      b.onclick = navBack;
     });
     var decOv = document.querySelector("[data-decide-overlay]");
-    if(decOv) decOv.onclick = function(ev){ if(ev.target===decOv){ state.decideDialog=null; render(); } };
+    if(decOv) decOv.onclick = function(ev){ if(ev.target===decOv) navBack(); };
     var decGo = document.querySelector("[data-decide-go]");
     if(decGo) decGo.onclick = once("decide-approval", async function(){
       var d = state.decideDialog, note = (el("decide-note")||{}).value || "";
@@ -5126,7 +5618,7 @@
       decGo.disabled = true; decGo.innerHTML = '<span class="spin"></span>Saving…';
       try{
         if(d.action==="approve") await aApprove(d.id, note); else await aRequestChanges(d.id, note);
-        state.decideDialog=null;
+        state.decideDialog=null; navDrop("overlay");
         state.approvalQueue = await aQueue(); await refreshApprovalSummary();
         toast(d.action==="approve" ? "Signed off." : "Sent back with your note.");
         render();
@@ -5257,11 +5749,14 @@
         // it was written when there were two and the dialogs added since
         // (export, send-for-sign-off, sign-off decision) were never added
         // to it, so Escape silently did nothing on three of the five.
-        if(state.exportDialog){ state.exportDialog = null; render(); }
-        else if(state.decideDialog){ state.decideDialog = null; render(); }
-        else if(state.submitDialog){ state.submitDialog = null; render(); }
-        else if(state.viewingHistoryEntryId != null){ state.viewingHistoryEntryId = null; render(); }
-        else if(state.viewingEntryId){ state.viewingEntryId = null; render(); }
+        // Every dialog is a navigation frame now, so Escape is just Back
+        // -- which means it can never again fall out of step with the list
+        // of dialogs that exist. Guarded on something actually being open,
+        // so Escape inside an entry form does NOT walk out of the form.
+        if(state.exportDialog || state.decideDialog || state.submitDialog
+           || state.viewingHistoryEntryId != null || state.viewingEntryId){
+          navBack();
+        }
       });
     }
     var logout = el("btn-logout"); if(logout) logout.onclick = doLogout;
@@ -5269,10 +5764,19 @@
     // entry-detail modal (opened from the Case Report "Yes" link, or the
     // View button, in My Entries)
     document.querySelectorAll("[data-view-entry]").forEach(function(b){
-      b.onclick = function(){ state.viewingEntryId = b.getAttribute("data-view-entry"); render(); };
+      b.onclick = function(){
+        var id = b.getAttribute("data-view-entry");
+        // These buttons appear INSIDE the entry-detail dialog as well as in
+        // the lists -- following a linked case from an open record. There is
+        // one viewingEntryId, so the dialog swaps its contents rather than
+        // stacking; pushing a second frame for it would leave one that
+        // undoes nothing, and Back would then need two presses to escape.
+        if(state.viewingEntryId){ state.viewingEntryId = id; render(); return; }
+        navOpenOverlay(function(){ state.viewingEntryId = id; }, function(){ state.viewingEntryId = null; });
+      };
     });
-    var entryDetailClose = el("entry-detail-close"); if(entryDetailClose) entryDetailClose.onclick = function(){ state.viewingEntryId = null; render(); };
-    var entryDetailOverlay = el("entry-detail-overlay"); if(entryDetailOverlay) entryDetailOverlay.onclick = function(ev){ if(ev.target===entryDetailOverlay){ state.viewingEntryId = null; render(); } };
+    var entryDetailClose = el("entry-detail-close"); if(entryDetailClose) entryDetailClose.onclick = navBack;
+    var entryDetailOverlay = el("entry-detail-overlay"); if(entryDetailOverlay) entryDetailOverlay.onclick = function(ev){ if(ev.target===entryDetailOverlay) navBack(); };
     document.querySelectorAll("[data-edit-entry]").forEach(function(b){
       b.onclick = function(){ editEntry(b.getAttribute("data-edit-entry")); };
     });
@@ -5332,14 +5836,25 @@
     document.querySelectorAll("[data-view-history]").forEach(function(b){
       b.onclick = function(){ openEntryHistory(b.getAttribute("data-view-history")); };
     });
-    var entryHistoryClose = el("entry-history-close"); if(entryHistoryClose) entryHistoryClose.onclick = function(){ state.viewingHistoryEntryId = null; render(); };
-    var entryHistoryOverlay = el("entry-history-overlay"); if(entryHistoryOverlay) entryHistoryOverlay.onclick = function(ev){ if(ev.target===entryHistoryOverlay){ state.viewingHistoryEntryId = null; render(); } };
+    var entryHistoryClose = el("entry-history-close"); if(entryHistoryClose) entryHistoryClose.onclick = navBack;
+    var entryHistoryOverlay = el("entry-history-overlay"); if(entryHistoryOverlay) entryHistoryOverlay.onclick = function(ev){ if(ev.target===entryHistoryOverlay) navBack(); };
 
     // entry wizard
     document.querySelectorAll("[data-start]").forEach(function(b){
       b.onclick = function(){ startWizard(b.getAttribute("data-start")); };
     });
     var wizBack = el("wiz-back"); if(wizBack) wizBack.onclick = cancelWizard;
+    var wizDiscard = el("wiz-discard");
+    if(wizDiscard) wizDiscard.onclick = function(){
+      // The one destructive control in the form, so it is the one that asks.
+      if(state.wiz && (state.wiz.editingId || wizHasContent(state.wiz))){
+        var q = state.wiz.editingId
+          ? "Discard your changes to this entry?"
+          : "Discard this entry? The saved copy on this device goes too.";
+        if(!window.confirm(q)) return;
+      }
+      discardWizard();
+    };
     var wizSubmit = el("wiz-submit"); if(wizSubmit) wizSubmit.onclick = function(){
       var t = state.wiz.entryType;
       if(t==="surgical") submitSurgical();
@@ -5434,8 +5949,91 @@
 
     // resident postings
     var addPostingBtn = el("add-posting"); if(addPostingBtn) addPostingBtn.onclick = function(){
-      addPosting((el("posting-unit")||{}).value, (el("posting-date")||{}).value, (el("posting-end")||{}).value);
+      addPosting((el("posting-unit")||{}).value, (el("posting-date")||{}).value, (el("posting-end")||{}).value, false);
     };
+
+    /* ---------------- setting postings for other people ---------------- */
+    // The three inputs are read back off the DOM before ANY re-render, the
+    // same discipline the export dialog needs: render() replaces the whole
+    // form, so a date typed but not yet in state is gone the moment a
+    // checkbox is ticked.
+    function bpSync(){
+      var bp = state.bulkPostings; if(!bp) return;
+      var u = el("bp-unit"); if(u) bp.unit = u.value || "";
+      var st = el("bp-start"); if(st) bp.startDate = st.value || "";
+      var en = el("bp-end"); if(en) bp.endDate = en.value || "";
+      var al = el("bp-allow"); if(al) bp.allowOverlap = !!al.checked;
+    }
+    var bpOpen = el("bp-open");
+    if(bpOpen) bpOpen.onclick = once("bp-open", async function(){
+      state.bulkPostings = { candidates: [], picked:{}, unit:"", startDate: todayISO(),
+                             endDate:"", allowOverlap:false, result:null };
+      render();
+      try{ state.bulkPostings.candidates = await dPostingCandidates(); }
+      catch(e){ state.bulkPostings = null; toast(e.message||"Could not load the trainee list."); }
+      render();
+    });
+    var bpClose = el("bp-close");
+    if(bpClose) bpClose.onclick = function(){ state.bulkPostings = null; render(); };
+    document.querySelectorAll("[data-bp-pick]").forEach(function(c){
+      c.onchange = function(){
+        bpSync();
+        var bp = state.bulkPostings; if(!bp) return;
+        bp.picked[c.getAttribute("data-bp-pick")] = c.checked;
+        bp.result = null;   // the selection changed, so the check is stale
+        render();
+      };
+    });
+    var bpAll = el("bp-all");
+    if(bpAll) bpAll.onclick = function(){
+      bpSync(); var bp = state.bulkPostings; if(!bp) return;
+      bp.picked = {}; (bp.candidates||[]).forEach(function(c){ bp.picked[c.username] = true; });
+      bp.result = null; render();
+    };
+    var bpNone = el("bp-none");
+    if(bpNone) bpNone.onclick = function(){
+      bpSync(); var bp = state.bulkPostings; if(!bp) return;
+      bp.picked = {}; bp.result = null; render();
+    };
+    var bpAllow = el("bp-allow");
+    if(bpAllow) bpAllow.onchange = function(){ bpSync(); render(); };
+    function bpPicked(){
+      var bp = state.bulkPostings; if(!bp) return [];
+      return Object.keys(bp.picked||{}).filter(function(k){ return bp.picked[k]; });
+    }
+    var bpPreview = el("bp-preview");
+    if(bpPreview) bpPreview.onclick = once("bp-preview", async function(){
+      bpSync();
+      var bp = state.bulkPostings; if(!bp) return;
+      var who = bpPicked();
+      if(!who.length){ toast("Pick at least one trainee."); return; }
+      if(!bp.unit){ toast("Pick a unit."); return; }
+      if(!bp.startDate){ toast("Pick a start date."); return; }
+      try{
+        bp.result = await dBulkPostings("preview", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap);
+      }catch(e){ toast(e.message||"Could not check that."); }
+      render();
+    });
+    var bpApply = el("bp-apply");
+    if(bpApply) bpApply.onclick = once("bp-apply", async function(){
+      bpSync();
+      var bp = state.bulkPostings; if(!bp || !bp.result) return;
+      var who = bpPicked();
+      var n = (bp.result.wouldAdd||[]).length + (bp.allowOverlap ? (bp.result.overlapping||[]).length : 0);
+      if(!n){ toast("Nothing to add."); return; }
+      if(!window.confirm("Add this posting to "+n+" "+(n===1?"account":"accounts")+"? It goes on their record, and is logged against their account.")) return;
+      try{
+        var res = await dBulkPostings("apply", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap);
+        bp.result = res;
+        // Clear only the people who were actually written. Anyone held back
+        // for an overlap stays ticked, so the obvious next move -- tick
+        // "add the overlapping ones too" and apply again -- works without
+        // re-selecting them, and nobody can be added twice by accident.
+        (res.added||[]).forEach(function(a){ delete bp.picked[a.username]; });
+        toast((res.added||[]).length+" posting"+((res.added||[]).length===1?"":"s")+" added.");
+      }catch(e){ toast(e.message||"Could not add those postings."); }
+      render();
+    });
     document.querySelectorAll("[data-remove-posting]").forEach(function(b){
       b.onclick = function(){ removePosting(Number(b.getAttribute("data-remove-posting"))); };
     });
@@ -5495,10 +6093,11 @@
 
     /* ---------------- export builder ---------------- */
     var openExp = el("open-export"); if(openExp) openExp.onclick = async function(){
-      state.exportDialog = { sel: loadExportSel(), options: null };
-      render();
+      navOpenOverlay(function(){
+        state.exportDialog = { sel: loadExportSel(), options: null };
+      }, function(){ state.exportDialog = null; });
       try{ state.exportDialog.options = await xOptions(); }
-      catch(e){ state.exportDialog = null; toast(e.message||"Could not open the export options."); }
+      catch(e){ navBack(); toast(e.message||"Could not open the export options."); return; }
       render();
     };
     function expSel(){ return state.exportDialog && state.exportDialog.sel; }
@@ -5549,17 +6148,17 @@
       };
     });
     document.querySelectorAll("[data-export-cancel]").forEach(function(b){
-      b.onclick = function(){ state.exportDialog = null; render(); };
+      b.onclick = navBack;
     });
     var expOv = document.querySelector("[data-export-overlay]");
-    if(expOv) expOv.onclick = function(ev){ if(ev.target===expOv){ state.exportDialog = null; render(); } };
+    if(expOv) expOv.onclick = function(ev){ if(ev.target===expOv) navBack(); };
     var expGo = document.querySelector("[data-export-go]");
     if(expGo) expGo.onclick = function(){
       syncExpDates();
       var d = state.exportDialog;
       saveExportSel(d.sel);
       window.location.href = exportURL(d.sel);
-      state.exportDialog = null;
+      state.exportDialog = null; navDrop("overlay");
       toast("Building your CSV…");
       render();
     };
