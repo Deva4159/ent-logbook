@@ -309,6 +309,88 @@
     return '<span class="plate art a-'+key+(extraClass?" "+extraClass:"")+'" aria-hidden="true"></span>';
   }
 
+  /* ---------------------------------------------------------------
+     Entry-type photographs
+     ---------------------------------------------------------------
+     One department photograph per entry type, served from /photo (see
+     PHOTO_FILES in app.py). Each type has two files:
+
+       <type>.webp      256x256 thumbnail
+       <type>-bg.webp   96x54 pre-blurred plate, under 1 KB
+
+     The background is a real image rather than a CSS filter on purpose.
+     `filter: blur(24px)` over a full-size photograph is a repaint on
+     every scroll frame, which a mid-range phone feels immediately; a
+     96px-wide plate stretched to card size is blurred by the browser's
+     own upscale and costs nothing. Both stay purely decorative --
+     alt="" and aria-hidden, because the tile's own text is the label
+     and a screen reader announcing "photograph of an operating
+     theatre" before every button is noise.
+
+     The type's colour still rides along as a small icon badge on the
+     corner of the thumbnail: the teal/amber/grey/green/violet coding is
+     used on chips, stat tiles and charts everywhere else, and dropping
+     it here would break the one visual thread that ties a tile to the
+     entries it produces.
+  */
+  var PHOTO_TYPES = { surgical:1, other:1, "case":1, academic:1, seminar:1 };
+
+  var ENTRY_TYPE_COLOR = {
+    surgical:"var(--teal)", other:"var(--amber)", "case":"var(--ink-soft)",
+    academic:"var(--green)", seminar:"var(--violet)"
+  };
+
+  function photoThumb(type){
+    if(!PHOTO_TYPES[type]) return "";
+    return '<img class="photo-thumb" src="/photo/'+type+'.webp" alt="" aria-hidden="true" '+
+           'width="256" height="256" loading="lazy" decoding="async">';
+  }
+
+  // Inline custom property rather than a per-type CSS rule: keeps the five
+  // background URLs next to the five thumbnails instead of splitting them
+  // across two files. `type` is always one of the PHOTO_TYPES keys above --
+  // never user input -- so the unquoted url() is safe.
+  function photoBgStyle(type){
+    return PHOTO_TYPES[type] ? ' style="--photo-bg:url(/photo/'+type+'-bg.webp);"' : '';
+  }
+
+  function photoBadge(type, color){
+    return '<span class="tile-badge"'+(color?' style="color:'+color+';"':'')+'>'+icon(type)+'</span>';
+  }
+
+  // Thumbnail + colour badge, as used on both tile styles.
+  function photoFrame(type, color){
+    if(!PHOTO_TYPES[type]) return "";
+    return '<span class="photo-frame">'+photoThumb(type)+photoBadge(type, color)+'</span>';
+  }
+
+  // The slim photograph band that heads an entry form and the entry-detail
+  // modal, so the picture you picked on the tile carries through into the
+  // thing you are actually filling in.
+  function photoBand(type, title, trailing){
+    if(!PHOTO_TYPES[type]) return '<h2>'+title+(trailing||"")+'</h2>';
+    return '<div class="photo-band"'+photoBgStyle(type)+'>'+
+      photoFrame(type, ENTRY_TYPE_COLOR[type])+
+      '<h2>'+title+(trailing||"")+'</h2>'+
+    '</div>';
+  }
+
+  // Title and blurb for the five type tiles. Single source of truth
+  // for both the dashboard "Log a new entry" grid and the picker on the Log
+  // Entry tab -- the two used to carry duplicated copy that drifted apart.
+  var ENTRY_TYPE_TILES = [
+    ["surgical", "Surgical Procedure", "Any OT-booked operative case.",
+                 "Any operative case, OT-booked."],
+    ["other", "Other Procedure", "OPD, bedside, ED or treatment-room procedures.",
+              "OPD, bedside, ED or treatment-room procedures."],
+    ["case", "Interesting Case", "Rare presentations, diagnostic dilemmas, teaching cases.",
+             "Rare presentations, diagnostic dilemmas."],
+    ["academic", "Academic Participation", "CME, journal club, paper presentation, university activity.",
+                 "CME, journal club, papers, university activity."],
+    ["seminar", "Seminar / Presentation", "Seminars, lectures or case presentations YOU conducted.",
+                "Seminars, lectures or case presentations you conducted."]
+  ];
+
   // Skeletons rather than the word "Loading…". The page used to empty out
   // and then snap back full; these hold the shape of what is arriving, so
   // nothing jumps when it lands.
@@ -488,7 +570,16 @@
     // id may arrive as a string (every DOM data-* attribute reads back as a
     // string) while entry.id is a number straight from the JSON API --
     // compare loosely (==) so a string "12" still matches the number 12.
-    var pools = [state.myEntries||[], state.detailEntries||[], state.devAllEntries||[]];
+    // The Case Sign-off queue has to be in here too. Its rows are full
+    // entries (GET /approvals/queue returns entry_row_to_dict), but they
+    // live in their own slice of state, so "Open" on a queue row used to
+    // set viewingEntryId to an id no pool contained -- findEntryById
+    // returned null, renderEntryDetailModal returned "", and the button
+    // did nothing at all. That is the one screen where a consultant most
+    // needs to read the record before signing it off.
+    var q = state.approvalQueue || {};
+    var pools = [state.myEntries||[], state.detailEntries||[], state.devAllEntries||[],
+                 q.queue||[], q.delegated||[]];
     for(var i=0;i<pools.length;i++){
       var hit = pools[i].filter(function(x){ return x.id==id; })[0];
       if(hit) return hit;
@@ -2322,8 +2413,16 @@
     '<div class="footer-note">De-identified data only</div>';
   }
 
-  function dashCard(navTo, title, desc, badge, iconKey, iconColor){
-    return '<button class="dash-card" data-nav="'+navTo+'"><div class="icn" style="'+(iconColor?"color:"+iconColor+";":"")+'">'+(iconKey?icon(iconKey):esc(title.slice(0,1)))+'</div><div class="t">'+esc(title)+(badge?badge:"")+'</div><div class="d">'+esc(desc)+'</div></button>';
+  // photoKey (optional, and only ever an entry-type key) swaps the flat
+  // icon tile for the type's photograph plus a blurred plate behind the
+  // whole card. Every other caller passes six arguments and is unchanged.
+  function dashCard(navTo, title, desc, badge, iconKey, iconColor, photoKey){
+    var photo = photoKey && PHOTO_TYPES[photoKey];
+    return '<button class="dash-card'+(photo?" has-photo":"")+'" data-nav="'+navTo+'"'+
+      (photo?photoBgStyle(photoKey):"")+'>'+
+      (photo ? photoFrame(photoKey, iconColor)
+             : '<div class="icn" style="'+(iconColor?"color:"+iconColor+";":"")+'">'+(iconKey?icon(iconKey):esc(title.slice(0,1)))+'</div>')+
+      '<div class="t">'+esc(title)+(badge?badge:"")+'</div><div class="d">'+esc(desc)+'</div></button>';
   }
 
   // Backend sends structured facts, not copy -- composing the sentence here
@@ -2383,12 +2482,10 @@
     '<div class="stat-grid">'+
       statTile(s.total,"Total entries")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other procedures","other")+statTile(s["case"],"Interesting cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars given","seminar")+
     '</div>'+
-    '<div class="card"><span class="eyebrow">New entry</span><h2>Log a new entry</h2><div class="dash-grid" style="margin-top:14px;">'+
-      dashCard("__new-surgical","Surgical Procedure","Any operative case, OT-booked.",null,"surgical","var(--teal)")+
-      dashCard("__new-other","Other Procedure","OPD, bedside, ED or treatment-room procedures.",null,"other","var(--amber)")+
-      dashCard("__new-case","Interesting Case","Rare presentations, diagnostic dilemmas.",null,"case","var(--ink-soft)")+
-      dashCard("__new-academic","Academic Participation","CME, journal club, papers, university activity.",null,"academic","var(--green)")+
-      dashCard("__new-seminar","Seminar / Presentation","Seminars, lectures or case presentations you conducted.",null,"seminar","var(--violet)")+
+    '<div class="card"><span class="eyebrow">New entry</span><h2>Log a new entry</h2><div class="dash-grid dash-grid-photo" style="margin-top:14px;">'+
+      ENTRY_TYPE_TILES.map(function(t){
+        return dashCard("__new-"+t[0], t[1], t[3], null, t[0], ENTRY_TYPE_COLOR[t[0]], t[0]);
+      }).join("")+
     '</div></div>'+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
       (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
@@ -2575,11 +2672,13 @@
         '<h2>Log a new entry</h2>'+
         '<p class="muted" style="margin:8px 0 16px;">Use the Hospital Number — never the patient’s name.</p>'+
         '<div class="cat-pick">'+
-          '<div class="cat-card" role="button" tabindex="0" data-start="surgical"><span class="icn" style="color:var(--teal);">'+icon("surgical")+'</span><div><div style="font-weight:600;">Surgical Procedure</div><div class="muted" style="font-size:12.5px;">Any OT-booked operative case.</div></div></div>'+
-          '<div class="cat-card" role="button" tabindex="0" data-start="other"><span class="icn" style="color:var(--amber);">'+icon("other")+'</span><div><div style="font-weight:600;">Other Procedure</div><div class="muted" style="font-size:12.5px;">OPD, bedside, ED or treatment-room procedures.</div></div></div>'+
-          '<div class="cat-card" role="button" tabindex="0" data-start="case"><span class="icn" style="color:var(--ink-soft);">'+icon("case")+'</span><div><div style="font-weight:600;">Interesting Case</div><div class="muted" style="font-size:12.5px;">Rare presentations, diagnostic dilemmas, teaching cases.</div></div></div>'+
-          '<div class="cat-card" role="button" tabindex="0" data-start="academic"><span class="icn" style="color:var(--green);">'+icon("academic")+'</span><div><div style="font-weight:600;">Academic Participation</div><div class="muted" style="font-size:12.5px;">CME, journal club, paper presentation, university activity.</div></div></div>'+
-          '<div class="cat-card" role="button" tabindex="0" data-start="seminar"><span class="icn" style="color:var(--violet);">'+icon("seminar")+'</span><div><div style="font-weight:600;">Seminar / Presentation</div><div class="muted" style="font-size:12.5px;">Seminars, lectures or case presentations YOU conducted.</div></div></div>'+
+          ENTRY_TYPE_TILES.map(function(t){
+            return '<div class="cat-card has-photo" role="button" tabindex="0" data-start="'+t[0]+'"'+photoBgStyle(t[0])+'>'+
+              photoFrame(t[0], ENTRY_TYPE_COLOR[t[0]])+
+              '<div class="cat-card-text"><div style="font-weight:600;">'+esc(t[1])+'</div>'+
+              '<div class="muted" style="font-size:12.5px;">'+esc(t[2])+'</div></div>'+
+            '</div>';
+          }).join("")+
         '</div>'+
       '</div>';
     }
@@ -2773,7 +2872,7 @@
   function renderSurgicalForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Surgical Procedure'+wizDraftBadge()+'</h2>'+
+    '<div class="card">'+photoBand("surgical",(state.wiz.editingId?"Edit ":"")+"Surgical Procedure",wizDraftBadge())+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -2805,7 +2904,7 @@
   function renderOtherForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Other Procedure'+wizDraftBadge()+'</h2>'+
+    '<div class="card">'+photoBand("other",(state.wiz.editingId?"Edit ":"")+"Other Procedure",wizDraftBadge())+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -2843,7 +2942,7 @@
     return ''+
     '<div class="card">'+
       (state.wiz.linkedFromId ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Pre-filled from the surgical procedure you just logged — add the history and examination findings to finish.</div>' : '')+
-      '<h2>'+(state.wiz.editingId?"Edit ":"")+'Interesting Case</h2>'+
+      photoBand("case",(state.wiz.editingId?"Edit ":"")+"Interesting Case")+
       '<div class="row2">'+
         fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
@@ -2866,7 +2965,7 @@
   function renderAcademicForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Academic Participation</h2>'+
+    '<div class="card">'+photoBand("academic",(state.wiz.editingId?"Edit ":"")+"Academic Participation")+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
         '<div class="field"><label for="f-academicType">Type</label><select id="f-academicType" onchange="window.__entlog_toggleAcademicOther(this.value)">'+
@@ -2883,7 +2982,7 @@
   function renderSeminarForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card"><h2>'+(state.wiz.editingId?"Edit ":"")+'Seminar / Presentation</h2>'+
+    '<div class="card">'+photoBand("seminar",(state.wiz.editingId?"Edit ":"")+"Seminar / Presentation")+
       '<p class="muted" style="margin-bottom:16px;">For seminars, lectures or case presentations <b>you</b> conducted — not ones you attended (log those as Academic Participation).</p>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
@@ -3364,7 +3463,7 @@
       '<div class="modal-card">'+
         '<button class="modal-close" id="entry-detail-close" aria-label="Close">×</button>'+
         '<span class="eyebrow">Entry detail</span>'+
-        '<h2>'+(t==="case"?"Interesting Case":esc(summarizeEntry(e)))+'</h2>'+
+        photoBand(t, (t==="case" ? "Interesting Case" : esc(summarizeEntry(e))))+
         '<div style="margin-top:14px;">'+
           rows.map(function(r){ return '<div class="detail-row"><div class="k">'+esc(r[0])+'</div><div>'+r[1]+'</div></div>'; }).join("")+
         '</div>'+
@@ -4376,6 +4475,15 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.2", date: "2026-09-30", title: "Photographs on the entry types",
+      note: "The five entry types now carry a department photograph, on the phone as well as the desktop.",
+      changes: [
+        ["added", "<b>Each entry type has its own photograph</b> — theatre for a Surgical Procedure, the endoscopy room for an Other Procedure, the OPD for an Interesting Case, the lecture hall for Academic Participation and the departmental teaching room for a Seminar. It appears as a thumbnail on the tiles you pick from, softly blurred behind them, and again at the head of the form you fill in and of the record when it is opened."],
+        ["changed", "On a phone the five tiles on the dashboard now read side-on — picture left, text right — instead of stacking into five tall blocks, so Recent Entries is back within reach of one scroll."],
+        ["fixed", "<b>“Open” on a record in the Case Sign-off queue did nothing.</b> A consultant could sign a record off without ever being able to read it from that screen. It now opens the full record, as it always should have."],
+      ],
+    },
     {
       version: "7.1", date: "2026-09-26", title: "Live-site check",
       note: "Tested against the deployed site. Two fixes.",

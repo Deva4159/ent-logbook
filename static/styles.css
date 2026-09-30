@@ -411,6 +411,96 @@
   .cat-card .icn{width:38px; height:38px; border-radius:9px; display:flex; align-items:center; justify-content:center; flex:none; background:var(--surface-2);}
   .cat-card .icn .icon{width:21px; height:21px;}
   .cat-card .sw{width:10px; height:10px; border-radius:50%; flex:none;}
+
+  /* ---- Entry-type photographs --------------------------------------
+     A department photograph per entry type: a thumbnail on the tile, and
+     the same picture, pre-blurred and very faint, as the tile's
+     background. Two rules govern everything below.
+
+     1. The photo NEVER decides legibility. It sits on a pseudo-element
+        at low opacity behind the card's own --surface, masked away from
+        the side the text is on, so the contrast of the label against the
+        card is effectively unchanged whatever the picture happens to
+        be. Dark mode drops the opacity further, because a bright
+        photograph lifting a dark card reads as a rendering fault rather
+        than as decoration.
+     2. It is never a CSS blur. The background files are 96px wide and
+        already soft (see /photo in app.py); the browser's upscale
+        finishes the job. `filter: blur()` over a photograph repaints on
+        every scroll frame and is exactly the thing that makes a page
+        feel broken on a mid-range Android.
+  ------------------------------------------------------------------- */
+  .photo-frame{position:relative; flex:none; display:block; line-height:0;}
+  .photo-thumb{width:100%; height:100%; object-fit:cover; border-radius:9px;
+    display:block; background:var(--surface-2); border:1px solid var(--plate-edge);
+    box-shadow:var(--plate-sh);}
+  /* The type's colour still has to survive: teal/amber/grey/green/violet
+     is the thread that links a tile to its chips, tiles and charts. */
+  .tile-badge{position:absolute; right:-5px; bottom:-5px; width:21px; height:21px;
+    border-radius:7px; background:var(--surface); border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center; line-height:0;}
+  .tile-badge .icon{width:12px; height:12px;}
+
+  .has-photo{position:relative; overflow:hidden; isolation:isolate;}
+  .has-photo::before{content:""; position:absolute; inset:0; z-index:-1;
+    background-image:var(--photo-bg); background-size:cover; background-position:50% 50%;
+    opacity:.17;
+    -webkit-mask-image:linear-gradient(100deg, rgba(0,0,0,.18) 0%, rgba(0,0,0,.55) 45%, rgba(0,0,0,1) 100%);
+            mask-image:linear-gradient(100deg, rgba(0,0,0,.18) 0%, rgba(0,0,0,.55) 45%, rgba(0,0,0,1) 100%);}
+  .cat-card.has-photo{background:var(--surface);}
+  .cat-card .photo-frame{width:52px; height:52px;}
+  .cat-card-text{min-width:0;}
+  .dash-card.has-photo .photo-frame{width:64px; height:64px; margin-bottom:10px;}
+
+  /* Slim band at the head of an entry form and the entry-detail modal, so
+     the picture chosen on the tile carries into the thing being filled in. */
+  .photo-band{position:relative; overflow:hidden; isolation:isolate;
+    display:flex; align-items:center; gap:13px; padding:12px 14px;
+    border:1px solid var(--line); border-radius:11px; background:var(--surface-2);
+    margin:0 0 16px;}
+  /* 100% 100% rather than cover: the band is roughly 20:1 and the plate is
+     16:9, so `cover` would blow the image up until only one thin horizontal
+     slice of it showed -- a grey smear with none of the photograph's colour
+     left. Squashing it keeps the whole scene's colour across the band, and
+     nothing is recognisable at this blur anyway. */
+  .photo-band::before{content:""; position:absolute; inset:0; z-index:-1;
+    background-image:var(--photo-bg); background-size:100% 100%; background-position:50% 50%;
+    opacity:.30;
+    -webkit-mask-image:linear-gradient(100deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.5) 40%, rgba(0,0,0,1) 100%);
+            mask-image:linear-gradient(100deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.5) 40%, rgba(0,0,0,1) 100%);}
+  .photo-band .photo-frame{width:46px; height:46px;}
+  .card .photo-band h2, .modal-card .photo-band h2{margin:0; min-width:0; overflow-wrap:anywhere;}
+
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .has-photo::before{opacity:.13;}
+    :root:not([data-theme="light"]) .photo-band::before{opacity:.20;}
+  }
+  :root[data-theme="dark"] .has-photo::before{opacity:.13;}
+  :root[data-theme="dark"] .photo-band::before{opacity:.20;}
+
+  /* Phones. The thumbnails shrink rather than disappear -- they are the
+     fastest way to tell the five tiles apart at a glance, and at this size
+     they cost nothing (the five files together are under 60 KB and are
+     shared with the dashboard tiles, so they are fetched once). */
+  @media (max-width:560px){
+    .cat-card .photo-frame{width:46px; height:46px;}
+    /* One column on a phone, so the five entry-type tiles would otherwise
+       become five tall stacked blocks and push Recent Entries most of a
+       screen further down. Laid out side-on instead -- picture left, text
+       right -- which also makes them read as the same control as the
+       picker on the Log Entry tab. */
+    .dash-card.has-photo{display:grid; grid-template-columns:auto 1fr;
+      column-gap:12px; align-items:center; padding:14px;}
+    .dash-card.has-photo .photo-frame{grid-row:1 / span 2; width:52px; height:52px; margin-bottom:0;}
+    .dash-card.has-photo .t{align-self:end; min-width:0;}
+    .dash-card.has-photo .d{align-self:start; min-width:0;}
+    .photo-band{padding:10px 12px; gap:11px; margin-bottom:14px;}
+    .photo-band .photo-frame{width:40px; height:40px;}
+    .card .photo-band h2, .modal-card .photo-band h2{font-size:17px;}
+    .tile-badge{width:19px; height:19px; right:-4px; bottom:-4px;}
+    .tile-badge .icon{width:11px; height:11px;}
+  }
+
   .proc-opt{border:1px solid var(--line); border-radius:8px; padding:9px 11px; cursor:pointer; font-size:13.5px;}
   .proc-opt:hover{border-color:var(--teal);}
   .btn-row{display:flex; gap:10px; justify-content:space-between; margin-top:18px;}
@@ -612,6 +702,22 @@
   .cat-card{transition:border-color var(--dur-2) var(--ease);}
   .cat-card .plate{transition:transform var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease);}
   .cat-card:hover .plate{transform:scale(1.06) rotate(-1.5deg); box-shadow:0 4px 14px rgba(38,35,32,.16);}
+  /* The photograph lifts on hover the same way the watercolour plates do.
+     Scaling the <img> inside its frame, not the frame itself, so the badge
+     pinned to the corner stays put. */
+  .photo-frame{overflow:visible;}
+  .cat-card .photo-thumb, .dash-card .photo-thumb{
+    transition:transform var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease);}
+  .cat-card:hover .photo-thumb, .dash-card:hover .photo-thumb{
+    transform:scale(1.04); box-shadow:0 4px 14px rgba(20,26,32,.18);}
+  .has-photo::before{transition:opacity var(--dur-3) var(--ease);}
+  .cat-card:hover.has-photo::before, .dash-card:hover.has-photo::before{opacity:.24;}
+  :root[data-theme="dark"] .cat-card:hover.has-photo::before,
+  :root[data-theme="dark"] .dash-card:hover.has-photo::before{opacity:.18;}
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .cat-card:hover.has-photo::before,
+    :root:not([data-theme="light"]) .dash-card:hover.has-photo::before{opacity:.18;}
+  }
   /* The write-up status select looked like a static chip, so nobody found
      out it was editable. */
   .ps-select{transition:border-color var(--dur-2) var(--ease);}
