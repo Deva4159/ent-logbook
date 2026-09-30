@@ -168,6 +168,32 @@ def art_png(name):
                                mimetype="image/png")
 
 
+# Entry-type photographs. One per entry type, in two forms:
+#
+#   <type>.webp      256x256 thumbnail shown on the type tiles and on the
+#                    header band of the form / entry detail.
+#   <type>-bg.webp   96x54 pre-blurred plate used as the soft background of
+#                    the same surfaces. Deliberately tiny (<1 KB): the
+#                    browser's own upscale to card size IS the blur, which
+#                    costs nothing on a phone, where a CSS filter: blur()
+#                    over a full-size photograph repaints on every scroll.
+#
+# Same allow-list rule as /art above -- a new photograph needs a line in
+# PHOTO_FILES, not a wildcard directory handler. "surgical" is the operating
+# theatre picture that also fronts the sign-in screen, at a crop that suits a
+# square tile; signin.webp itself is unchanged and still served above.
+PHOTO_FILES = {"surgical", "other", "case", "academic", "seminar"}
+
+
+@app.get("/photo/<name>.webp")
+def photo_webp(name):
+    base = name[:-3] if name.endswith("-bg") else name
+    if base not in PHOTO_FILES:
+        return jsonify({"error": "not_found"}), 404
+    return send_from_directory(os.path.join(STATIC_DIR, "photo"), name + ".webp",
+                               mimetype="image/webp")
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
