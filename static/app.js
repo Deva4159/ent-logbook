@@ -704,7 +704,7 @@
     // Only active consultants. The free-text "consultant" on the entry stays
     // the record of who supervised; this is who signs it off, which is not
     // always the same person.
-    return (state.consultantsList||[]).filter(function(c){ return c.role==="consultant"; });
+    return (state.consultantsList||[]).filter(function(c){ return c.role==="consultant" || c.canSignOff; });
   }
 
   function icon(key, extraClass){
@@ -1007,9 +1007,9 @@
   async function dPostingCandidates(){
     return (await api("GET","/postings/candidates")).candidates || [];
   }
-  async function dBulkPostings(mode, usernames, unit, startDate, endDate, allowOverlap){
+  async function dBulkPostings(mode, usernames, unit, startDate, endDate, allowOverlap, allowCourse){
     return await api("POST","/postings/bulk",{ mode:mode, usernames:usernames, unit:unit,
-      startDate:startDate, endDate:endDate||null, allowOverlap: !!allowOverlap });
+      startDate:startDate, endDate:endDate||null, allowOverlap: !!allowOverlap, allowOutOfCourse: !!allowCourse });
   }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
@@ -1027,6 +1027,7 @@
   async function boot(){
     render();
     try{ state.config = await dGetConfig(); }catch(e){ state.config = defaultConfig(); }
+    await vLoadCourses();
     state.capReady = true;
 
     try{
@@ -1080,7 +1081,8 @@
       var res = await api("POST","/auth/signup",{
         username: cleanUsername(fields.username), password: fields.password, confirm: fields.confirm,
         displayName: fields.displayName, role: fields.role, pgYear: fields.pgYear,
-        designation: fields.designation, unit: fields.unit
+        designation: fields.designation, unit: fields.unit,
+        courseId: fields.courseId || undefined, joinedYm: fields.joinedYm || undefined
       });
       if(res.pending){
         state.authBusy=false;
@@ -1198,8 +1200,7 @@
   }
 
   async function refreshAccountBadge(){
-    var caps = state.capabilities || {};
-    if(!(caps.isHod || caps.isCoordinator || caps.isDeveloper)){ state.accountReqCount = 0; return; }
+    if(!hasPerm("accounts.requests_view")){ state.accountReqCount = 0; return; }
     try{ state.accountReqCount = ((await acctRequests()).pending || []).length; }
     catch(e){ state.accountReqCount = 0; }
   }
@@ -1213,6 +1214,8 @@
   async function loadForView(){
     if(!state.user) return;
     var v = state.view, role = state.user.role, caps = state.capabilities || {};
+    vTick();
+    if(V_VIEWS.indexOf(v)!==-1){ await vLoadView(v); return; }
     if(v==="dashboard"){
       state.loading = true; render();
       if(isTraineeRole(role)){ await loadMyEntries(); await loadReminders(); await refreshApprovalSummary(); }
@@ -1244,7 +1247,7 @@
     if(v==="resident-log"){ await loadConsultants(); render(); return; }
     if(v==="resident-entries" || v==="resident-progress"){ await loadMyEntries(); render(); return; }
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
-    if(v==="developer-users"){ await loadDevUsers(); render(); return; }
+    if(v==="developer-users"){ await loadDevUsers(); await vLoadCourses(); render(); return; }
     if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
     if(v==="account"){
       state.loading=true; state.accountAction=null; render();
@@ -1285,7 +1288,7 @@
     }
     if(v==="developer-password-requests"){ state.loading=!state.passwordResetsLoaded; render(); await loadDevUsers(); await loadPasswordRequests(); state.loading=false; render(); return; }
     if(v==="signup-approvals"){ state.loading=!state.signupRequestsLoaded; render(); await loadSignupRequests(); state.loading=false; render(); return; }
-    if(v==="manage-users"){ state.loading=!state.manageUsersLoaded; render(); await loadManageUsers(); state.loading=false; render(); return; }
+    if(v==="manage-users"){ state.loading=!state.manageUsersLoaded; render(); await loadManageUsers(); await vLoadCourses(); state.loading=false; render(); return; }
   }
 
   async function openResidentDetail(username){
@@ -1324,13 +1327,13 @@
   function describePosting(p){
     return unitShort(p.unit)+"  "+fmtDate(p.startDate)+" \u2192 "+(p.endDate ? fmtDate(p.endDate) : "ongoing");
   }
-  async function addPosting(unit, startDate, endDate, allowOverlap){
+  async function addPosting(unit, startDate, endDate, allowOverlap, allowCourse){
     if(!unit){ toast("Pick a unit."); return; }
     if(!startDate){ toast("Pick a start date."); return; }
     if(endDate && endDate < startDate){ toast("End date can't be before the start date."); return; }
     try{
       var res = await api("POST","/postings",{ unit:unit, startDate:startDate,
-        endDate: endDate||null, allowOverlap: !!allowOverlap });
+        endDate: endDate||null, allowOverlap: !!allowOverlap, allowOutOfCourse: !!allowCourse });
       state.user.postings = res.postings;
       toast("Posting added.");
       render();
@@ -1341,7 +1344,11 @@
           " you have already logged:\n\n"+list+
           "\n\nWhile two postings overlap, an entry is filed under whichever of them started later."+
           "\n\nAdd it anyway?";
-        if(window.confirm(msg)) addPosting(unit, startDate, endDate, true);
+        if(window.confirm(msg)) addPosting(unit, startDate, endDate, true, allowCourse);
+        return;
+      }
+      if(e.code === "posting_out_of_course" && !allowCourse){
+        if(window.confirm((e.data && e.data.detail || "This posting is outside your course.")+"\n\nThis is not an error — rotations sometimes differ from the plan — but it is flagged so a slip is caught.\n\nAdd it anyway?")) addPosting(unit, startDate, endDate, !!allowOverlap, true);
         return;
       }
       toast(e.message || "Could not save this posting.");
@@ -1406,7 +1413,7 @@
         state.wiz.peopleList = res.people || [];
       }catch(e){ state.wiz.peopleList = []; }
     } else {
-      state.wiz.peopleList = (state.consultantsList||[]).map(function(c){ return { username:c.username, displayName:c.displayName, role:"consultant" }; });
+      state.wiz.peopleList = (state.consultantsList||[]).filter(function(c){ return c.role==="consultant"; }).map(function(c){ return { username:c.username, displayName:c.displayName, role:"consultant" }; });
     }
     render();
   }
@@ -2073,10 +2080,13 @@
       var username = cleanUsername(fields.username);
       if(username.length < 3){ toast("Username must be at least 3 characters."); return; }
       if((fields.password||"").length < 8){ toast("Password must be at least 8 characters."); return; }
-      await dCreateUser(username, {
-        password: fields.password, role: fields.role, displayName: fields.displayName || username,
-        pgYear: fields.pgYear, designation: fields.designation, unit: fields.unit
-      });
+      var body = { username:username, password: fields.password, role: fields.role, displayName: fields.displayName || username,
+        pgYear: fields.pgYear, designation: fields.designation, unit: fields.unit };
+      if(fields.courseId) body.courseId = fields.courseId;
+      if(fields.joinedYm) body.joinedYm = fields.joinedYm;
+      if(fields.email) body.email = fields.email;
+      if(fields.phone) body.phone = fields.phone;
+      await api("POST","/users", body);
       state.devUsersLoaded = false;
       state.showCreateUserForm = false;
       toast("Account created for "+username+".");
@@ -2622,7 +2632,7 @@
       '</div>'+
       '<div class="field"><label for="su-displayName">Display name</label><input id="su-displayName" type="text" placeholder="e.g. Dr. Devashish Chaudhary"></div>'+
       (isTrainee ?
-        '<div class="field"><label for="su-pgYear">Batch / Year</label><select id="su-pgYear">'+state.config.pgYears.map(function(o){return '<option>'+o+'</option>';}).join("")+'</select></div>'+
+        vCourseFields("su", role, "")+
         (role==="fellow" ?
           '<div class="field"><label for="su-unit-search">Parent / home unit</label>'+searchSingleField("su-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
           '<p class="hint">This is your home unit for the fellowship — you can still log peripheral postings in other units under My Postings after signing in.</p>'
@@ -2692,7 +2702,16 @@
   }
   function navItems(){
     var caps = state.capabilities || {};
-    if(isTraineeRole(state.user.role)) return [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"],["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]];
+    if(isTraineeRole(state.user.role)){
+      // A Fellow can be given roster and sign-off rights from the Permissions
+      // panel; the menu follows what the server says they hold.
+      var tItems = [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"]];
+      if(state.user.role==="fellow" && hasPerm("view.roster")) tItems.push(["consultant-roster","Roster"]);
+      if(state.user.role==="fellow" && hasPerm("signoff.approve")) tItems.push(["approval-queue","Case Sign-off"]);
+      if(state.user.role==="fellow" && caps.canApprove) tItems.push(["signup-approvals","Approvals"]);
+      tItems.push(["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]);
+      return tItems;
+    }
     if(state.user.role==="consultant"){
       var items = [["dashboard","Dashboard"],["consultant-roster","Roster"]];
       // "Approvals" already means account sign-ups in this app, so the case
@@ -2701,11 +2720,11 @@
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
       items.push(["feedback","Feedback"]);
-      if(caps.isHod || caps.isCoordinator) items.push(["account-requests","Account Requests"]);
+      if(hasPerm("accounts.requests_view")) items.push(["account-requests","Account Requests"]);
       items.push(["account","My Account"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -2717,7 +2736,7 @@
         '<button type="button" class="nav-toggle" id="btn-nav-toggle" aria-label="'+(state.mobileNavOpen?"Close menu":"Open menu")+'">'+icon(state.mobileNavOpen?"close":"menu")+'</button>'+
         '<div class="brand-mark">EL</div><div class="brand-text"><h1>ENT Surgical Logbook</h1><div class="sub">'+"De-identified logbook"+'</div></div>'+
       '</div>'+
-      '<div class="user-chip"><span class="role-badge">'+esc(roleLabelText)+'</span><span>'+esc(state.user.displayName)+'</span>'+themeButton()+'<button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
+      '<div class="user-chip"><span class="role-badge">'+esc(roleLabelText)+'</span><span>'+esc(state.user.displayName)+'</span>'+vBell()+themeButton()+'<button class="btn btn-ghost btn-sm" id="btn-logout">Log out</button></div>'+
     '</div>'+
     '<div class="shell-body">'+
       '<nav class="sidenav'+(state.mobileNavOpen?" open":"")+'">'+navItems().map(function(item){
@@ -2727,11 +2746,12 @@
         if(item[0]==="account-requests" && state.accountReqCount>0) badge = '<span class="alert-count">'+state.accountReqCount+'</span>';
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
         if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
-        return '<button data-nav="'+item[0]+'" class="'+(state.view===item[0]?"active":"")+'">'+esc(item[1])+badge+'</button>';
+        return '<button data-nav="'+item[0]+'" class="'+(vNavActive(item[0])?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
         (state.toast ? '<div class="success-banner" data-toast>'+esc(state.toast)+'</div>' : '')+
         backBar()+
+        vUrgentBanner()+
         inner+
       '</main>'+
     '</div>'+
@@ -3973,6 +3993,8 @@
           ? kv("Scope", '<span class="muted">Every unit</span>')
           : kv(isTrainee ? "Batch" : "Designation", esc((isTrainee ? p.pgYear : p.designation) || ""))+
             kv(isTrainee ? "Current posting" : "Unit", p.unit ? unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>' : ""))+
+        (isTrainee && p.course ? kv("Course", esc(p.course.name)+' <span class="muted">· '+p.course.durationMonths+' months</span>') : "")+
+        (isTrainee && p.course ? kv("Year of study", studyLine(p.course, p.joinedYm)) : "")+
         kv("Account opened", fmtDate((p.createdAt||"").slice(0,10)))+
         kv("Last signed in", p.lastSeenAt ? fmtDateTime(p.lastSeenAt) : "")+
       '</div></div>';
@@ -3993,6 +4015,18 @@
         (rows ? '<div class="table-wrap"><table><thead><tr><th>Role</th><th>Unit</th><th>From</th><th>To</th><th>Served</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
               : '<p class="muted" style="font-size:13px;">No Head of Unit, Course Coordinator or Head of Department appointment on file.</p>')+
       '</div>';
+    }
+
+    // What this account may do, and why -- the same answer the server gives
+    // every request, so nobody has to guess what a role "includes".
+    var mine = "";
+    var myPerms = a.myPermissions || [];
+    if(p.role!=="developer" && (p.role==="consultant" || p.role==="fellow")){
+      mine = '<div class="card"><h2 style="font-size:15px;">What this account can do</h2>'+
+        (myPerms.length ? '<div class="table-wrap"><table><thead><tr><th>Permission</th><th>Where</th><th>Because</th></tr></thead><tbody>'+
+          myPerms.map(function(x){ return '<tr><td>'+esc(x.label)+'</td><td>'+scopeChip(x.scope, x.units)+'</td><td class="muted" style="font-size:12.5px;">'+esc((x.sources||[]).join(" + "))+'</td></tr>'; }).join("")+'</tbody></table></div>'
+          : '<p class="muted" style="font-size:13px;">Nothing beyond logging your own work.</p>')+
+        '<p class="hint" style="margin-top:8px;">Set by the Developer. Ask them if something you need is missing.</p></div>';
     }
 
     // Postings, for a trainee.
@@ -4051,7 +4085,7 @@
         '<button class="btn btn-primary" id="btn-change-password">Update password</button></div>'+
     '</div>';
 
-    return identity + appts + postings + unitCard + password + renderAccountClosure(a);
+    return identity + appts + mine + postings + unitCard + password + renderAccountClosure(a);
   }
 
   /* ------------------------------------------------------------
@@ -4206,8 +4240,7 @@
   // Whole-department oversight: Head of Department and Course Coordinator.
   // A plain consultant and a Head of Unit see the operative columns only.
   function seesTeachingColumns(){
-    var caps = state.capabilities || {};
-    return !!(caps.isHod || caps.isCoordinator || caps.isDeveloper);
+    return hasPerm("view.teaching");
   }
 
   // Days between two ISO dates, inclusive of the start day. Kept to whole
@@ -4395,7 +4428,7 @@
     // clarification) -- a plain Professor with roster access but no role
     // assignment sees the entries themselves but never gets this button.
     var caps = state.capabilities || {};
-    var showHistory = !!(caps.isHod || caps.isCoordinator || caps.isHeadOfUnit);
+    var showHistory = hasPerm("view.history");
     var uiKey = "detail:"+state.detailUser.username;
     return ''+
     renderScopeBanner()+
@@ -4440,7 +4473,9 @@
           '<div class="field"><label for="nu-password">Temporary password</label><input id="nu-password" type="text"></div>'+
         '</div>'+
         '<div class="field"><label for="nu-displayName">Display name</label><input id="nu-displayName" type="text"></div>'+
-        (isTraineeRole(role) ? '<div class="field"><label for="nu-pgYear">Batch / Year</label><select id="nu-pgYear">'+opts_(state.config.pgYears,state.config.pgYears[0])+'</select></div>' : '')+
+        (isTraineeRole(role) ? vCourseFields("nu", role, "")+'<div class="row2">'+
+            '<div class="field"><label for="nu-email">Email <span class="muted">(optional)</span></label><input id="nu-email" type="email" maxlength="200"></div>'+
+            '<div class="field"><label for="nu-phone">Phone <span class="muted">(optional)</span></label><input id="nu-phone" type="text" maxlength="40"></div></div>' : '')+
         (role==="consultant" ? (
           '<div class="row2">'+
             '<div class="field"><label for="nu-designation">Designation</label><select id="nu-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
@@ -4569,6 +4604,9 @@
                 return '<div class="muted" style="font-size:12px;">already: '+
                   (i.overlaps||[]).map(function(o){ return esc(describePosting(o)); }).join(" \u00b7 ")+'</div>';
               })+
+        group("Outside their course", res.outOfCourse, "bp-warn", function(i){
+          return '<div class="muted" style="font-size:12px;">'+esc((i.flags||[]).join(" "))+'</div>';
+        })+
         group("Skipped", res.skipped, "bp-skip", function(i){
           return ' <span class="muted" style="font-size:12px;">'+esc(i.reason||"")+'</span>';
         })+
@@ -4576,7 +4614,8 @@
     }
 
     var hasOverlap = !!(res && res.overlapping && res.overlapping.length);
-    var canApply = !!(res && ((res.wouldAdd && res.wouldAdd.length) || (hasOverlap && bp.allowOverlap)));
+    var hasOffCourse = !!(res && res.outOfCourse && res.outOfCourse.length);
+    var canApply = !!(res && ((res.wouldAdd && res.wouldAdd.length) || (hasOverlap && bp.allowOverlap) || (hasOffCourse && bp.allowCourse)));
     return '<div class="card">'+
       '<div class="section-head"><h2>Set postings for trainees</h2>'+
         '<button class="btn btn-sm" id="bp-close">Cancel</button></div>'+
@@ -4590,6 +4629,8 @@
         '<button type="button" class="link-btn" id="bp-none">Clear</button></span></div>'+
       list+
       resultBlock+
+      (hasOffCourse ? '<label class="bp-allow"><input type="checkbox" id="bp-allowcourse"'+(bp.allowCourse?" checked":"")+'> '+
+        'Add the ones outside their course too. This is flagged, not forbidden — use it when the rotation really is different.</label>' : '')+
       (hasOverlap ? '<label class="bp-allow"><input type="checkbox" id="bp-allow"'+(bp.allowOverlap?" checked":"")+'> '+
         'Add the overlapping ones too. While two postings overlap, an entry is filed under whichever started later.</label>' : '')+
       '<div class="btn-row">'+
@@ -4603,7 +4644,7 @@
     if(state.loading) return skeletonTable(5);
     var rows = state.manageUsers.slice().sort(function(a,b){ return (a.username).localeCompare(b.username); });
     return ''+
-    ((state.capabilities||{}).isHod || (state.capabilities||{}).isCoordinator ? renderBulkPostings() : '')+
+    (hasPerm("postings.assign_others") ? renderBulkPostings() : '')+
     '<div class="card"><h2>Manage accounts ('+rows.length+')</h2>'+
       '<p class="muted" style="margin-bottom:14px;">Update a trainee’s batch as they progress, or a consultant’s designation on promotion, and deactivate or delete accounts that no longer need access. Role changes and password resets stay Developer-only.</p>'+
       renderUserAccountsTable(rows, false)+
@@ -4917,6 +4958,22 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.4", date: "2026-10-07", title: "Permissions, people, alerts, courses and backups",
+      note: "Five Developer tools in one release. Nothing changes for anyone until the Developer changes it: the shipped permissions reproduce exactly what each role could already do, with one deliberate exception noted below.",
+      changes: [
+        ["added", "<b>A Permissions panel.</b> 36 permissions in five groups, each with a plain-language description. Every kind of person — Head of Department, Course Coordinator, Head of Unit, Professor, every Consultant, every Fellow — is a <b>bundle</b> the Developer can edit, with each permission set to off, own unit, or all units. Any one person can then be <b>given extra permissions or have one taken away</b>, for particular units if wanted, and the page shows what they hold as <i>appointments + added − removed</i>, with the reason for each. Every change is logged with who made it and when."],
+        ["added", "<b>Limits that cannot be edited away.</b> Ten permissions (changing permissions, roles, designations, passwords, usernames, courses, alerts, backups…) are Developer-only. Residents and Senior Residents can hold no delegated permission. A Fellow can hold only viewing, export and sign-off rights, and may sign off only Resident and Senior Resident records. Nobody can approve their own record. The trainee-closure decision stays with the Head of Department, not the Developer."],
+        ["changed", "<b>The Users page is a short list, and each person opens on their own page.</b> Search by name, username, unit or course; filter by kind and status. The page holds name, username, contact details, kind, unit, course, joining month, status, appointments, permissions and the person's account history. The Head of Department and Coordinator see the fields their permissions allow."],
+        ["added", "<b>A username can be changed without losing anything.</b> It checks as you type — letters, numbers, dots, underscores and hyphens, not already used, not differing only by capitals. Every entry, sign-off, edit-history line, posting, appointment, permission and log line moves to the new name in a single step that either completes entirely or changes nothing; the person is signed out and signs in with the new name and the same password. A name belonging only to a <i>closed</i> account can be reused; the closed account's records are set aside under another name so the new holder inherits none of them. Deactivated accounts keep their name reserved."],
+        ["added", "<b>Alerts.</b> The Developer writes an alert and aims it at everyone, a group (kinds of account and appointments, optionally narrowed to units), particular people, or whoever holds a permission, with a start and end date and an importance. A bell in the top bar shows them; urgent ones also appear as a banner on the dashboard. A person can mark an alert read or dismiss it."],
+        ["added", "<b>Automatic alerts</b> for a posting about to end, a trainee with no current posting, an appointment about to end, a vacant post (HOD, Coordinator, a unit's Head), a course about to finish, and a backup that is overdue. Each can be switched off and its lead time changed. They are worked out when someone uses the app, not on a timer, so nothing is raised while nobody is signed in."],
+        ["added", "<b>A Course Creator.</b> A course sets how long a programme runs, whether it covers the whole department or particular units, whether it has peripheral postings (and how many months at most), and what each year is called. Trainees pick a course and enter the <b>month and year they joined; their year of study is worked out</b> and shown as they type, and everywhere it appears. Existing trainees and entries were attached to starter courses (PG, Senior Residency, Fellowship) which the Developer should confirm. A posting outside the course is flagged and needs a confirmation, never blocked."],
+        ["added", "<b>Backups and restore.</b> The Developer downloads the whole logbook as one file, and a reminder appears when one is overdue. A downloaded file can be uploaded again if the server's disk is lost or something is deleted: it is checked first, compared with the live data, and only replaces it after the Developer re-enters their password and types RESTORE. The data it replaces is copied aside first, so a mistaken restore can be undone. The file holds every record and every password hash — keep it as carefully as the logbook."],
+        ["changed", "<b>Academic and Seminar entries are now withheld by the server</b> from anyone without the “see teaching records” permission (shipped: Head of Department and Coordinator only). Before, a Head of Unit's screen merely did not draw them; the data was still sent."],
+        ["changed", "A Head of Department who tries to set another person's password is now told it is Developer-only, rather than the request being quietly ignored."],
+      ],
+    },
+    {
       version: "7.3", date: "2026-10-01", title: "Going back, and not losing work",
       note: "Leaving a half-filled entry no longer costs you the entry, and the rota can be set for people rather than by them.",
       changes: [
@@ -5120,8 +5177,7 @@
     closed:      ["Closed",      "chip-green"],
   };
   function canReadFeedback(){
-    var caps = state.capabilities || {};
-    return !!(caps.isHod || caps.isCoordinator || caps.isDeveloper);
+    return hasPerm("feedback.manage");
   }
   function feedbackStatusChip(s){
     var d = FEEDBACK_STATUS[s] || FEEDBACK_STATUS.open;
@@ -5307,13 +5363,14 @@
     else if(state.view==="resident-postings") inner = renderResidentPostings();
     else if(state.view==="consultant-roster") inner = renderConsultantRoster();
     else if(state.view==="consultant-detail") inner = renderConsultantDetail();
-    else if(state.view==="developer-users") inner = renderDeveloperUsers();
+    else if(state.view==="developer-users") inner = renderUsersConcise();
+    else if(V_VIEWS.indexOf(state.view)!==-1) inner = vRenderView();
     else if(state.view==="developer-password-requests") inner = renderDeveloperPasswordRequests();
     else if(state.view==="developer-lists") inner = renderDeveloperLists();
     else if(state.view==="developer-roles") inner = renderDeveloperRoles();
     else if(state.view==="developer-data") inner = renderDeveloperData();
     else if(state.view==="signup-approvals") inner = renderSignupApprovals();
-    else if(state.view==="manage-users") inner = renderManageUsers();
+    else if(state.view==="manage-users") inner = renderUsersConcise();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
     else if(state.view==="feedback") inner = renderFeedback();
@@ -5321,7 +5378,7 @@
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
       + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
-      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog();
+      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog() + vAlertPanel();
     // THE GATE. render() runs on every state change -- every keystroke in a
     // filter, every checkbox -- and replaces the entire DOM, so an entry
     // animation attached to these elements would re-fire constantly and the
@@ -5424,7 +5481,8 @@
       doSignup({
         username: el("su-username").value, password: el("su-password").value, confirm: el("su-confirm").value,
         displayName: el("su-displayName").value, role: state.signupRole,
-        pgYear: (el("su-pgYear")||{}).value, designation: (el("su-designation")||{}).value, unit: (el("su-unit")||{}).value
+        pgYear: (el("su-pgYear")||{}).value, designation: (el("su-designation")||{}).value, unit: (el("su-unit")||{}).value,
+        courseId: (el("su-course")||{}).value, joinedYm: (el("su-joined")||{}).value
       });
     };
 
@@ -5963,6 +6021,7 @@
       var st = el("bp-start"); if(st) bp.startDate = st.value || "";
       var en = el("bp-end"); if(en) bp.endDate = en.value || "";
       var al = el("bp-allow"); if(al) bp.allowOverlap = !!al.checked;
+      var ac = el("bp-allowcourse"); if(ac) bp.allowCourse = !!ac.checked;
     }
     var bpOpen = el("bp-open");
     if(bpOpen) bpOpen.onclick = once("bp-open", async function(){
@@ -5997,6 +6056,8 @@
     };
     var bpAllow = el("bp-allow");
     if(bpAllow) bpAllow.onchange = function(){ bpSync(); render(); };
+    var bpAllowCourse = el("bp-allowcourse");
+    if(bpAllowCourse) bpAllowCourse.onchange = function(){ bpSync(); render(); };
     function bpPicked(){
       var bp = state.bulkPostings; if(!bp) return [];
       return Object.keys(bp.picked||{}).filter(function(k){ return bp.picked[k]; });
@@ -6010,7 +6071,7 @@
       if(!bp.unit){ toast("Pick a unit."); return; }
       if(!bp.startDate){ toast("Pick a start date."); return; }
       try{
-        bp.result = await dBulkPostings("preview", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap);
+        bp.result = await dBulkPostings("preview", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap, bp.allowCourse);
       }catch(e){ toast(e.message||"Could not check that."); }
       render();
     });
@@ -6019,11 +6080,11 @@
       bpSync();
       var bp = state.bulkPostings; if(!bp || !bp.result) return;
       var who = bpPicked();
-      var n = (bp.result.wouldAdd||[]).length + (bp.allowOverlap ? (bp.result.overlapping||[]).length : 0);
+      var n = (bp.result.wouldAdd||[]).length + (bp.allowOverlap ? (bp.result.overlapping||[]).length : 0) + (bp.allowCourse ? (bp.result.outOfCourse||[]).length : 0);
       if(!n){ toast("Nothing to add."); return; }
       if(!window.confirm("Add this posting to "+n+" "+(n===1?"account":"accounts")+"? It goes on their record, and is logged against their account.")) return;
       try{
-        var res = await dBulkPostings("apply", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap);
+        var res = await dBulkPostings("apply", who, bp.unit, bp.startDate, bp.endDate, bp.allowOverlap, bp.allowCourse);
         bp.result = res;
         // Clear only the people who were actually written. Anyone held back
         // for an overlap stays ticked, so the obvious next move -- tick
@@ -6257,7 +6318,9 @@
       adminCreateUser({
         username: (el("nu-username")||{}).value, password: (el("nu-password")||{}).value,
         displayName: (el("nu-displayName")||{}).value, role: state.newUserRole || "resident",
-        pgYear: (el("nu-pgYear")||{}).value, designation: (el("nu-designation")||{}).value, unit: (el("nu-unit")||{}).value
+        pgYear: (el("nu-pgYear")||{}).value, designation: (el("nu-designation")||{}).value, unit: (el("nu-unit")||{}).value,
+        courseId: (el("nu-course")||{}).value, joinedYm: (el("nu-joined")||{}).value,
+        email: (el("nu-email")||{}).value, phone: (el("nu-phone")||{}).value
       });
     };
 
@@ -6356,6 +6419,1318 @@
       };
     });
   }
+
+  /* ============================================================
+     v7.4  --  PERMISSIONS, USERS, ALERTS, COURSES, BACKUPS
+     ============================================================
+     One self-contained block. It owns its own state (V), its own views
+     ("dev-permissions", "dev-user-edit", "dev-alerts", "dev-courses",
+     "dev-backups") and ONE delegated click/input/change listener keyed on
+     data-v / data-vin attributes. Delegation matters here: render()
+     replaces the whole DOM on every state change, so per-element handlers
+     would have to be re-attached each time, and a text box that re-renders
+     on every keystroke loses the cursor. Text fields therefore write into
+     V on "input" WITHOUT re-rendering, and anything that must stay in step
+     (a live availability check, a computed year of study) updates just its
+     own small element.
+  ============================================================ */
+  var V = {
+    courses: [],            // public list, for sign-up and the create form
+    alerts: { items: [], unread: 0, open: false, loaded: false },
+    p: { tab: "roles", cat: null, people: null, tpl: null, tplDraft: null, who: null, whoData: null, draft: {}, audit: null, q: "", err: "" },
+    u: { q: "", role: "", status: "" },
+    ue: null,               // per-user edit page
+    c: { list: null, edit: null, people: null, peopleFor: null, joined: {} },
+    b: { status: null, preview: null, file: null, busy: false, pw: "", word: "" },
+    a: { manage: null, rules: null, draft: null, preview: null, editing: null }
+  };
+  state.v74 = V;
+
+  var V_VIEWS = ["dev-permissions","dev-user-edit","dev-alerts","dev-courses","dev-backups"];
+
+  function hasPerm(key){
+    var caps = state.capabilities || {};
+    if(caps.isDeveloper && key!=="accounts.decide_trainee_closure") return true;
+    return !!(caps.permissions && caps.permissions[key]);
+  }
+  function permUnits(key){
+    var p = ((state.capabilities||{}).permissions||{})[key];
+    return p ? p : null;
+  }
+  function vget(path){
+    var o = V, parts = path.split(".");
+    for(var i=0;i<parts.length;i++){ if(o==null) return undefined; o = o[parts[i]]; }
+    return o;
+  }
+  function vset(path, val){
+    var o = V, parts = path.split(".");
+    for(var i=0;i<parts.length-1;i++){
+      if(o[parts[i]]==null || typeof o[parts[i]]!=="object") o[parts[i]] = {};
+      o = o[parts[i]];
+    }
+    o[parts[parts.length-1]] = val;
+  }
+  function vtext(path, label, opts){
+    opts = opts || {};
+    var v = vget(path);
+    return '<div class="field'+(opts.cls?" "+opts.cls:"")+'">'+(label?'<label for="'+esc(opts.id||path)+'">'+label+'</label>':'')+
+      '<input id="'+esc(opts.id||path)+'" type="'+(opts.type||"text")+'" data-vin="'+esc(path)+'" value="'+esc(v==null?"":v)+'"'+
+      (opts.ph?' placeholder="'+esc(opts.ph)+'"':"")+(opts.disabled?" disabled":"")+(opts.max?' maxlength="'+opts.max+'"':"")+
+      (opts.extra||"")+'>'+(opts.hint?'<div class="hint">'+opts.hint+'</div>':"")+'</div>';
+  }
+  function vsel(path, label, options, opts){
+    opts = opts || {};
+    var v = vget(path);
+    return '<div class="field">'+(label?'<label for="'+esc(opts.id||path)+'">'+label+'</label>':'')+
+      '<select id="'+esc(opts.id||path)+'" data-vin="'+esc(path)+'"'+(opts.disabled?" disabled":"")+'>'+
+      options.map(function(o){
+        var val = Array.isArray(o)?o[0]:o, lab = Array.isArray(o)?o[1]:o;
+        return '<option value="'+esc(val)+'"'+(String(val)===String(v==null?"":v)?" selected":"")+'>'+esc(lab)+'</option>';
+      }).join("")+'</select>'+(opts.hint?'<div class="hint">'+opts.hint+'</div>':"")+'</div>';
+  }
+  function vcheck(path, label, opts){
+    opts = opts || {};
+    return '<label class="v-check"><input type="checkbox" data-vin="'+esc(path)+'" data-vtype="bool"'+(vget(path)?" checked":"")+(opts.disabled?" disabled":"")+'> <span>'+label+'</span></label>';
+  }
+  function chipHtml(text, cls){ return '<span class="chip '+(cls||"chip-grey")+'">'+esc(text)+'</span>'; }
+  function unitKeys(){ return ((state.config&&state.config.units)||[]).map(function(u){ return u.key; }); }
+  function unitChecklist(pathPrefix, selected, opts){
+    opts = opts || {};
+    var sel = selected || [];
+    return '<div class="v-units">'+((state.config&&state.config.units)||[]).map(function(u){
+      return '<label class="v-check"><input type="checkbox" data-v-unit="'+esc(pathPrefix)+'" value="'+esc(u.key)+'"'+(sel.indexOf(u.key)!==-1?" checked":"")+(opts.disabled?" disabled":"")+'> <span>'+esc(u.shortForm)+' <span class="muted">'+esc(u.fullName)+'</span></span></label>';
+    }).join("")+'</div>';
+  }
+  function vlist(arr){ return (arr||[]).map(function(x){ return esc(x); }).join(", "); }
+  function plural(n, one, many){ return n+" "+(n===1?one:(many||one+"s")); }
+  function vErr(msg){ return msg ? '<div class="error-banner">'+esc(msg)+'</div>' : ""; }
+  function scopeChip(scope, units){
+    if(!scope) return '<span class="muted">—</span>';
+    if(scope==="all") return chipHtml("All units","chip-teal");
+    if(scope==="on") return chipHtml("Yes","chip-teal");
+    return chipHtml("Unit: "+((units&&units.length)?units.map(unitShort).join(", "):"none set"), (units&&units.length)?"chip-teal":"chip-amber");
+  }
+
+  /* ------------ year of study (must equal courses.progress in the backend) ---- */
+  function studyProgress(course, joinedYm, today){
+    var m = /^(\d{4})-(\d{2})$/.exec(joinedYm||"");
+    if(!course || !m) return null;
+    var jy = +m[1], jm = +m[2];
+    if(jm<1 || jm>12) return null;
+    var t = today instanceof Date ? today : new Date();
+    var months = (t.getFullYear()-jy)*12 + ((t.getMonth()+1)-jm);
+    var total = course.durationMonths;
+    var years = Math.max(1, Math.ceil(total/12));
+    var endTotal = jy*12 + (jm-1) + total;
+    var endYm = String(Math.floor(endTotal/12)).padStart(4,"0")+"-"+String((endTotal%12)+1).padStart(2,"0");
+    var labels = course.yearLabels || [];
+    var status, year;
+    if(months<0){ status="not_started"; year=0; }
+    else if(months>=total){ status="completed"; year=years; }
+    else { status="in_progress"; year=Math.floor(months/12)+1; }
+    var label = null;
+    if(year>=1) label = (year-1<labels.length && labels[year-1]) ? labels[year-1] : "Year "+year;
+    return { year:year, years:years, label:label, status:status, joinedYm:joinedYm, expectedEndYm:endYm,
+             monthsIn:Math.max(0,months), monthsLeft:Math.max(0,total-Math.max(0,months)) };
+  }
+  window.__entlog_studyProgress = studyProgress;   // exercised by the parity test
+  function ymLabel(ym){
+    var m = /^(\d{4})-(\d{2})$/.exec(ym||""); if(!m) return ym||"—";
+    return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1]+" "+m[1];
+  }
+  function studyLine(course, joinedYm){
+    if(!course) return '<span class="muted">Pick a course.</span>';
+    if(!joinedYm) return '<span class="muted">Enter the month and year of joining and the year of study is worked out for you.</span>';
+    var p = studyProgress(course, joinedYm);
+    if(!p) return '<span class="muted">Use a year (2025) or a month and year (2025-08).</span>';
+    var line;
+    if(p.status==="not_started") line = "Starts "+ymLabel(joinedYm)+" — not yet begun.";
+    else if(p.status==="completed") line = "Course completed ("+ymLabel(p.expectedEndYm)+").";
+    else line = "<b>"+esc(p.label)+"</b> — year "+p.year+" of "+p.years+", "+plural(p.monthsLeft,"month")+" to go (ends "+ymLabel(p.expectedEndYm)+").";
+    return '<span class="v-study v-study-'+p.status+'">'+line+'</span>';
+  }
+  function courseById(id){
+    for(var i=0;i<V.courses.length;i++) if(V.courses[i].id===id) return V.courses[i];
+    var m = V.c.list;
+    if(m) for(var j=0;j<m.length;j++) if(m[j].id===id) return m[j];
+    return null;
+  }
+  function coursesForRole(role){ return V.courses.filter(function(c){ return c.role===role; }); }
+  async function vLoadCourses(){
+    try{ V.courses = (await api("GET","/courses")).courses || []; }catch(e){ V.courses = V.courses || []; }
+  }
+  // Month input value -> what the API takes. A browser <input type=month>
+  // gives "2025-08"; a typed year is accepted too.
+  function normJoin(v){ v = String(v||"").trim(); return v; }
+
+  /* ------------ alerts: bell, panel, urgent banner ---------------------------- */
+  var ALERT_SEV = { urgent:["Urgent","chip-red"], warning:["Attention","chip-amber"], info:["Note","chip-teal"] };
+  async function vLoadAlerts(quiet){
+    if(!state.user) return;
+    try{
+      var r = await api("GET","/alerts");
+      V.alerts.items = r.alerts || []; V.alerts.unread = r.unread || 0; V.alerts.loaded = true;
+      if(!quiet) render();
+      else if(!state.wiz) { var b = el("v-bell-n"); if(b){ b.textContent = V.alerts.unread; b.style.display = V.alerts.unread?"":"none"; } }
+    }catch(e){}
+  }
+  function vBell(){
+    var n = V.alerts.unread;
+    return '<button type="button" class="theme-btn v-bell" data-v="bell" title="Alerts" aria-label="Alerts'+(n?" ("+n+" unread)":"")+'">'+
+      '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12l-1.6-2.2V10a4.4 4.4 0 0 0-8.8 0v4.8L6 17z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>'+
+      '<span class="alert-count v-bell-n" id="v-bell-n" style="'+(n?"":"display:none;")+'">'+n+'</span></button>';
+  }
+  function alertTarget(a){
+    var role = state.user.role, caps = state.capabilities||{};
+    switch(a.linkView){
+      case "postings": return isTraineeRole(role) ? "resident-postings" : null;
+      case "bulkPostings": return role==="developer" ? "developer-users" : (hasPerm("postings.assign_others") ? "manage-users" : null);
+      case "appointments": return role==="developer" ? "developer-roles" : null;
+      case "backup": return role==="developer" ? "dev-backups" : null;
+    }
+    return null;
+  }
+  function vAlertPanel(){
+    if(!V.alerts.open) return "";
+    var items = V.alerts.items;
+    return '<div class="v-panel-wrap" data-v="bell-close-bg"><div class="v-panel" role="dialog" aria-label="Alerts" data-v-stop="1">'+
+      '<div class="v-panel-head"><b>Alerts</b>'+
+        (V.alerts.unread ? '<button type="button" class="link-btn" data-v="alert-readall">Mark all read</button>' : '<span class="muted" style="font-size:12px;">All read</span>')+
+        '<button type="button" class="reminder-dismiss" data-v="bell-close" aria-label="Close">×</button></div>'+
+      (items.length===0 ? '<div class="v-panel-empty">Nothing needs your attention.</div>' :
+        '<div class="v-panel-list">'+items.map(function(a){
+          var sev = ALERT_SEV[a.severity] || ALERT_SEV.info, tgt = alertTarget(a);
+          return '<div class="v-alert'+(a.read?" read":"")+' sev-'+esc(a.severity)+'">'+
+            '<div class="v-alert-top">'+chipHtml(sev[0], sev[1])+(a.kind==="system"?' <span class="muted v-auto">automatic</span>':'')+
+              '<span class="muted v-alert-when">'+fmtDate((a.createdAt||"").slice(0,10))+'</span></div>'+
+            '<div class="v-alert-title">'+esc(a.title)+'</div>'+
+            (a.body ? '<div class="v-alert-body">'+esc(a.body)+'</div>' : '')+
+            '<div class="v-alert-actions">'+
+              (tgt ? '<button type="button" class="btn btn-sm" data-v="alert-go" data-id="'+a.id+'" data-view="'+tgt+'">Open</button>' : '')+
+              (a.read ? '' : '<button type="button" class="btn btn-sm btn-ghost" data-v="alert-read" data-id="'+a.id+'">Mark read</button>')+
+              '<button type="button" class="btn btn-sm btn-ghost" data-v="alert-dismiss" data-id="'+a.id+'">Dismiss</button>'+
+            '</div></div>';
+        }).join("")+'</div>')+
+    '</div></div>';
+  }
+  function vUrgentBanner(){
+    if(state.view!=="dashboard") return "";
+    var u = V.alerts.items.filter(function(a){ return a.severity==="urgent" && !a.read; });
+    if(!u.length) return "";
+    return u.slice(0,2).map(function(a){
+      return '<div class="error-banner v-urgent"><span><b>'+esc(a.title)+'</b>'+(a.body?' — '+esc(a.body):'')+'</span>'+
+        '<button type="button" class="btn btn-sm" data-v="alert-read" data-id="'+a.id+'">Got it</button></div>';
+    }).join("");
+  }
+  async function vAlertAct(id, what){
+    try{ await api("POST","/alerts/"+id+"/"+what); }catch(e){}
+    await vLoadAlerts();
+  }
+
+  /* ------------ PERMISSIONS (Developer) -------------------------------------- */
+  async function vLoadPerms(){
+    V.p.err = "";
+    try{
+      V.p.cat = await api("GET","/permissions/catalogue");
+      V.p.people = (await api("GET","/permissions/people")).people;
+      if(!V.p.tpl && V.p.cat.templates.length) vPickTemplate(V.p.cat.templates[0].key);
+    }catch(e){ V.p.err = e.message || "Could not load permissions."; }
+  }
+  function vPickTemplate(key){
+    V.p.tpl = key;
+    var t = V.p.cat.templates.filter(function(x){ return x.key===key; })[0];
+    V.p.tplDraft = Object.assign({}, t ? t.perms : {});
+  }
+  function permByGroup(){
+    var by = {};
+    V.p.cat.permissions.forEach(function(p){ (by[p.group] = by[p.group] || []).push(p); });
+    return by;
+  }
+  function permScopeOptions(p, isFellowTpl){
+    if(p.reserved) return [["off","Developer only"]];
+    if(isFellowTpl && V.p.cat.fellowOk.indexOf(p.key)===-1) return [["off","Not for fellows"]];
+    return p.scoped ? [["off","Off"],["unit","Own / appointed unit"],["all","All units"]] : [["off","Off"],["all","On"]];
+  }
+  function vPermTabs(){
+    var tabs = [["roles","Roles & bundles"],["people","People"],["audit","Change log"]];
+    return '<div class="v-tabs" role="tablist">'+tabs.map(function(t){
+      return '<button type="button" role="tab" class="v-tab'+(V.p.tab===t[0]?" active":"")+'" data-v="perm-tab" data-tab="'+t[0]+'">'+t[1]+'</button>';
+    }).join("")+'</div>';
+  }
+  function renderDevPermissions(){
+    if(!V.p.cat) return V.p.err ? vErr(V.p.err) : skeletonTable(6);
+    var body = V.p.tab==="people" ? vPermPeople() : (V.p.tab==="audit" ? vPermAudit() : vPermRoles());
+    return '<div class="card"><span class="eyebrow">Developer</span><h2>Permissions</h2>'+
+      '<p class="muted" style="margin:6px 0 14px; font-size:13px;">What each kind of person may see and do. Each appointment (HOD, Coordinator, Head of Unit) and each kind of account is a <b>bundle</b> you can edit; any individual can then be given extra permissions or have one taken away. A Developer always holds everything except the trainee-closure decision, which stays with the Head of Department. Every change is recorded.</p>'+
+      vPermTabs()+'</div>'+ vErr(V.p.err) + body;
+  }
+  function vPermRoles(){
+    var cat = V.p.cat, tpl = cat.templates.filter(function(t){ return t.key===V.p.tpl; })[0];
+    if(!tpl) return "";
+    var draft = V.p.tplDraft || {}, saved = tpl.perms || {};
+    var isFellowTpl = tpl.key==="fellow";
+    var dirty = JSON.stringify(sortObj(draft))!==JSON.stringify(sortObj(saved));
+    var by = permByGroup();
+    var list = '<div class="v-tpl-list">'+cat.templates.map(function(t){
+      return '<button type="button" class="v-tpl'+(t.key===V.p.tpl?" active":"")+'" data-v="perm-tpl" data-key="'+t.key+'">'+
+        '<span class="v-tpl-name">'+esc(t.label)+'</span>'+(t.modified?'<span class="chip chip-amber">Edited</span>':'')+
+        '<span class="muted v-tpl-n">'+Object.keys(t.perms).length+' permissions</span></button>';
+    }).join("")+'</div>';
+    var groups = cat.groups.filter(function(g){ return by[g.key]; }).map(function(g){
+      return '<div class="v-pgroup"><div class="form-section-title">'+esc(g.label)+'</div>'+
+        by[g.key].map(function(p){
+          var cur = draft[p.key] || "off", def = (tpl.default||{})[p.key] || "off";
+          var locked = p.reserved || (isFellowTpl && cat.fellowOk.indexOf(p.key)===-1);
+          return '<div class="v-prow'+(locked?" locked":"")+'"><div class="v-pinfo"><div class="v-plabel">'+esc(p.label)+
+              (cur!==def && !locked ? ' <span class="chip chip-amber">changed</span>':'')+'</div><div class="muted v-phelp">'+esc(p.help)+'</div></div>'+
+            '<select class="v-pscope" data-v-tplperm="'+esc(p.key)+'"'+(locked?" disabled":"")+'>'+
+              permScopeOptions(p, isFellowTpl).map(function(o){ return '<option value="'+o[0]+'"'+(o[0]===cur?" selected":"")+'>'+esc(o[1])+'</option>'; }).join("")+
+            '</select></div>';
+        }).join("")+'</div>';
+    }).join("");
+    return '<div class="v-split"><div class="v-side">'+list+'</div><div class="v-main card">'+
+      '<div class="section-head"><div><h2 style="font-size:17px;">'+esc(tpl.label)+'</h2><div class="muted" style="font-size:12.5px;">'+esc(tpl.description)+'</div></div>'+
+        '<div class="v-btns"><button class="btn btn-sm" data-v="tpl-reset"'+(tpl.modified?"":" disabled")+'>Reset to default</button> '+
+        '<button class="btn btn-sm btn-primary" data-v="tpl-save"'+(dirty?"":" disabled")+'>Save changes</button></div></div>'+
+      (tpl.key==="professor" ? '<p class="hint" style="margin-bottom:12px;">Applies to every consultant whose designation is exactly “Professor”, for their home unit.</p>' : '')+
+      groups+'</div></div>';
+  }
+  function sortObj(o){ var r = {}; Object.keys(o||{}).sort().forEach(function(k){ r[k]=o[k]; }); return r; }
+
+  function vPermPeople(){
+    var rows = (V.p.people||[]).filter(function(p){
+      var q = (V.p.q||"").toLowerCase();
+      return !q || p.displayName.toLowerCase().indexOf(q)!==-1 || p.username.toLowerCase().indexOf(q)!==-1;
+    });
+    var list = '<div class="card v-side-card"><div class="field"><input type="search" id="v-pq" data-vin="p.q" data-vlist="v-perm-list" placeholder="Search people…" value="'+esc(V.p.q)+'"></div>'+
+      '<div class="v-people" id="v-perm-list">'+vPermPeopleRows(rows)+'</div></div>';
+    return '<div class="v-split">'+list+'<div class="v-main">'+vPermPerson()+'</div></div>';
+  }
+  function vPermPeopleRows(rows){
+    if(!rows.length) return '<div class="muted" style="padding:10px;">Nobody matches.</div>';
+    return rows.map(function(p){
+      return '<button type="button" class="v-person'+(V.p.who===p.username?" active":"")+'" data-v="perm-who" data-u="'+esc(p.username)+'">'+
+        '<span class="v-pname">'+esc(p.displayName)+'</span>'+
+        '<span class="muted v-pmeta">'+esc(roleLabel(p.role))+(p.unit?" · "+esc(unitShort(p.unit)):"")+'</span>'+
+        '<span class="v-pchips">'+p.appointments.map(function(a){ return chipHtml(ROLE_ASSIGNMENT_LABEL[a.role]||a.role,"chip-teal"); }).join("")+
+          (p.overrides?chipHtml(p.overrides+" individual","chip-amber"):"")+'</span></button>';
+    }).join("");
+  }
+  async function vOpenPerson(u){
+    V.p.who = u; V.p.whoData = null; V.p.draft = {}; V.p.err = ""; render();
+    try{ V.p.whoData = await api("GET","/permissions/people/"+encodeURIComponent(u)); }catch(e){ V.p.err = e.message; }
+    render();    // On a phone the person's panel sits BELOW the whole list.
+    if(window.innerWidth<=900){ var pane = document.querySelector(".v-split .v-main"); if(pane && pane.scrollIntoView) pane.scrollIntoView({block:"start"}); }
+  }
+  function vDraftCount(){ return Object.keys(V.p.draft).length; }
+  function vPermPerson(){
+    var d = V.p.whoData;
+    if(!V.p.who) return '<div class="card"><div class="empty-state">Pick someone to see what they can do, and to add or take away individual permissions.</div></div>';
+    if(!d) return '<div class="card">'+skeletonTable(5)+'</div>';
+    var u = d.user, by = permByGroup();
+    var fromBundle = 0, added = 0, removed = 0;
+    d.permissions.forEach(function(p){
+      var o = p.override;
+      if(o && o.effect==="grant") added++;
+      else if(o && o.effect==="deny") removed++;
+      else if(p.effective) fromBundle++;
+    });
+    var head = '<div class="card"><div class="section-head"><div><h2 style="font-size:17px;">'+esc(u.displayName)+'</h2>'+
+      '<div class="muted" style="font-size:12.5px;">'+esc(roleLabel(u.role))+(u.designation?" · "+esc(u.designation):"")+(u.unit?" · "+unitShortHtml(u.unit):"")+
+        ' · <span class="mono">'+esc(u.username)+'</span></div></div>'+
+      '<button class="btn btn-sm" data-v="goto-user" data-u="'+esc(u.username)+'">Edit details</button></div>'+
+      '<div class="v-sum"><div><b>'+fromBundle+'</b><span>from appointments &amp; role</span></div>'+
+        '<div class="plus"><b>+'+added+'</b><span>added individually</span></div>'+
+        '<div class="minus"><b>−'+removed+'</b><span>taken away</span></div></div>'+
+      '<div class="v-appts">'+(u.appointments.length ? u.appointments.map(function(a){ return chipHtml((ROLE_ASSIGNMENT_LABEL[a.role]||a.role)+(a.unit?" · "+unitShort(a.unit):""),"chip-teal"); }).join(" ")
+         : '<span class="muted" style="font-size:12.5px;">No appointment. Appointments are made under Units &amp; Roles.</span>')+'</div></div>';
+    var dc = vDraftCount();
+    var groups = V.p.cat.groups.filter(function(g){ return by[g.key]; }).map(function(g){
+      return '<div class="card v-pcard"><div class="form-section-title">'+esc(g.label)+'</div>'+
+        by[g.key].map(function(meta){
+          var p = d.permissions.filter(function(x){ return x.key===meta.key; })[0];
+          if(!p) return "";
+          var dr = V.p.draft[p.key];
+          var o = p.override;
+          var mode = dr ? dr.effect : (o ? o.effect : "inherit");
+          var scope = dr ? dr.scope : (o && o.scope) || (meta.scoped ? "unit" : "all");
+          var units = dr ? dr.units : (o && o.units) || [];
+          var note = dr ? dr.note : (o && o.note) || "";
+          if(meta.reserved){
+            return '<div class="v-prow locked"><div class="v-pinfo"><div class="v-plabel">'+esc(meta.label)+'</div><div class="muted v-phelp">'+esc(meta.help)+'</div></div><span class="chip chip-grey">Developer only</span></div>';
+          }
+          var eligible = p.eligible;
+          var eff = mode==="grant" ? (scope==="all"?"all":(meta.scoped?"unit":"all")) : mode==="deny" ? null : p.effective;
+          var sources = p.sources && p.sources.length ? p.sources.join(" + ") : "";
+          var ctl = eligible ? '<select class="v-pmode" data-v-pmode="'+esc(p.key)+'">'+
+              '<option value="inherit"'+(mode==="inherit"?" selected":"")+'>As the bundles say</option>'+
+              '<option value="grant"'+(mode==="grant"?" selected":"")+'>Add</option>'+
+              '<option value="deny"'+(mode==="deny"?" selected":"")+'>Take away</option></select>'
+            : '<span class="chip chip-grey" title="This kind of account cannot hold it">Not available</span>';
+          var extra = "";
+          if(eligible && mode==="grant"){
+            extra = '<div class="v-pextra">'+
+              (meta.scoped ? '<select data-v-pscope="'+esc(p.key)+'"><option value="unit"'+(scope==="unit"?" selected":"")+'>Own / appointed unit</option><option value="all"'+(scope==="all"?" selected":"")+'>All units</option></select>' : '')+
+              (meta.scoped && scope==="unit" ? '<div class="v-pu"><div class="hint">Leave all unticked for their own / appointed unit, or choose the units:</div>'+unitChecklist("ppu:"+p.key, units)+'</div>' : '')+
+              '<input type="text" class="v-pnote" data-v-pnote="'+esc(p.key)+'" placeholder="Why? (optional, kept in the log)" maxlength="300" value="'+esc(note)+'"></div>';
+          } else if(eligible && mode==="deny"){
+            extra = '<div class="v-pextra"><input type="text" class="v-pnote" data-v-pnote="'+esc(p.key)+'" placeholder="Why? (optional, kept in the log)" maxlength="300" value="'+esc(note)+'"></div>';
+          }
+          return '<div class="v-prow'+(dr?" pending":"")+'"><div class="v-pinfo"><div class="v-plabel">'+esc(meta.label)+
+              (o && !dr ? (o.effect==="grant" ? ' <span class="chip chip-green">added</span>' : ' <span class="chip chip-red">taken away</span>') : '')+
+              (dr ? ' <span class="chip chip-amber">unsaved</span>' : '')+'</div>'+
+            '<div class="muted v-phelp">'+esc(meta.help)+'</div>'+
+            '<div class="v-psrc">'+(eff ? scopeChip(eff, mode==="grant" && dr ? units : p.units) : '<span class="muted">Not held</span>')+
+              (sources && mode==="inherit" ? ' <span class="muted">· '+esc(sources)+'</span>' : '')+'</div></div>'+
+            '<div class="v-pctl">'+ctl+extra+'</div></div>';
+        }).join("")+'</div>';
+    }).join("");
+    var audit = '<div class="card"><h3 style="font-size:14px; margin-bottom:8px;">Recent changes for this person</h3>'+
+      (d.audit.length ? '<div class="v-log">'+d.audit.map(function(a){ return '<div><span class="muted">'+fmtDateTime(a.at)+'</span> · '+esc(a.byName||a.by)+' · '+esc(auditText(a))+'</div>'; }).join("")+'</div>' : '<div class="muted" style="font-size:13px;">Nothing yet.</div>')+'</div>';
+    var bar = '<div class="v-savebar'+(dc?" show":"")+'"><span>'+plural(dc,"unsaved change")+'</span>'+
+      '<button class="btn btn-sm" data-v="pperson-discard">Discard</button> <button class="btn btn-sm btn-primary" data-v="pperson-save">Save '+dc+'</button></div>';
+    return head+groups+audit+bar;
+  }
+  function auditText(a){
+    var d = a.detail||{}, lab = function(k){ var m = V.p.cat && V.p.cat.permissions.filter(function(p){ return p.key===k; })[0]; return m?m.label:k; };
+    if(a.action==="override_grant") return "Added “"+lab(d.perm)+"”"+(d.scope==="unit"?" ("+((d.units&&d.units.length)?d.units.join(", "):"own unit")+")":"")+(d.note?" — "+d.note:"");
+    if(a.action==="override_deny") return "Took away “"+lab(d.perm)+"”"+(d.note?" — "+d.note:"");
+    if(a.action==="override_cleared") return "Returned “"+lab(d.perm)+"” to the bundles";
+    if(a.action==="template_changed") return "Edited the bundle: "+Object.keys(d).map(function(k){ return lab(k)+" "+(d[k].from||"off")+" → "+(d[k].to||"off"); }).join("; ");
+    if(a.action==="template_reset") return "Reset the bundle to its defaults";
+    return a.action;
+  }
+  function vPermAudit(){
+    if(!V.p.audit) return '<div class="card">'+skeletonTable(6)+'</div>';
+    return '<div class="card"><h2 style="font-size:16px; margin-bottom:10px;">Change log</h2>'+
+      (V.p.audit.length ? '<div class="table-wrap"><table><thead><tr><th>When</th><th>By</th><th>What</th><th>Whose</th></tr></thead><tbody>'+
+        V.p.audit.map(function(a){ return '<tr><td class="tabular">'+fmtDateTime(a.at)+'</td><td>'+esc(a.byName||a.by)+'</td><td>'+esc(auditText(a))+'</td><td>'+esc(a.targetName||a.target)+(a.kind==="template"?' <span class="chip chip-grey">bundle</span>':'')+'</td></tr>'; }).join("")+
+      '</tbody></table></div>' : '<div class="empty-state">No permission has been changed yet.</div>')+'</div>';
+  }
+  async function vSaveTemplate(){
+    try{
+      var r = await api("PUT","/permissions/templates/"+V.p.tpl, { perms: V.p.tplDraft });
+      await vLoadPerms(); vPickTemplate(V.p.tpl); render();
+      toast(Object.keys(r.changed).length ? "Bundle saved — it applies to everyone who holds it, from their next request." : "Nothing changed.");
+    }catch(e){ toast(e.message || "Could not save."); }
+  }
+  async function vResetTemplate(){
+    if(!confirm("Put this bundle back to the shipped defaults?")) return;
+    try{ await api("POST","/permissions/templates/"+V.p.tpl+"/reset"); await vLoadPerms(); vPickTemplate(V.p.tpl); render(); toast("Bundle reset."); }
+    catch(e){ toast(e.message || "Could not reset."); }
+  }
+  async function vSavePerson(){
+    var changes = Object.keys(V.p.draft).map(function(k){
+      var d = V.p.draft[k];
+      var c = { perm:k, effect: d.effect==="inherit" ? "clear" : d.effect, scope:d.scope, note:d.note||null };
+      if(d.effect==="grant" && d.scope==="unit" && d.units && d.units.length) c.units = d.units;
+      return c;
+    });
+    if(!changes.length) return;
+    try{
+      V.p.whoData = await api("PUT","/permissions/people/"+encodeURIComponent(V.p.who), { changes: changes });
+      V.p.draft = {};
+      V.p.people = (await api("GET","/permissions/people")).people;
+      var again = await api("GET","/permissions/people/"+encodeURIComponent(V.p.who)); V.p.whoData = again;
+      render(); toast("Saved.");
+    }catch(e){ toast(e.message || "Could not save."); }
+  }
+  // A draft entry starts from whatever is saved, so changing one control
+  // does not reset the others on the same permission.
+  function vDraftFor(key){
+    if(!V.p.draft[key]){
+      var p = V.p.whoData.permissions.filter(function(x){ return x.key===key; })[0], o = p && p.override;
+      var meta = V.p.cat.permissions.filter(function(x){ return x.key===key; })[0];
+      V.p.draft[key] = { effect: o ? o.effect : "inherit", scope: (o && o.scope) || (meta.scoped?"unit":"all"), units: (o && o.units) ? o.units.slice() : [], note: (o && o.note) || "" };
+    }
+    return V.p.draft[key];
+  }
+  function vDraftPrune(key){
+    var p = V.p.whoData.permissions.filter(function(x){ return x.key===key; })[0], o = p && p.override, d = V.p.draft[key];
+    if(!d) return;
+    var same = (d.effect==="inherit" && !o) ||
+      (o && d.effect===o.effect && d.scope===o.scope && (d.note||"")===(o.note||"") &&
+       JSON.stringify((d.units||[]).slice().sort())===JSON.stringify((o.units||[]).slice().sort()));
+    if(same) delete V.p.draft[key];
+  }
+
+  /* ------------ USERS: concise list, then a per-person page ------------------- */
+  function userListSource(){ return state.view==="developer-users" ? state.devUsers : state.manageUsers; }
+  function userMatches(u){
+    var q = (V.u.q||"").trim().toLowerCase();
+    if(q){
+      var hay = (u.username+" "+u.displayName+" "+(u.unit||"")+" "+(u.courseName||"")+" "+(u.pgYear||"")).toLowerCase();
+      if(hay.indexOf(q)===-1) return false;
+    }
+    if(V.u.role && u.role!==V.u.role) return false;
+    var st = userStateKey(u);
+    if(V.u.status && st!==V.u.status) return false;
+    return true;
+  }
+  function userStateKey(u){
+    if(u.approvalStatus==="pending") return "pending";
+    if(u.lifecycle==="deleted") return "closed";
+    if(u.lifecycle==="pending_deletion") return "pending_deletion";
+    return u.active===false ? "inactive" : "active";
+  }
+  function userStateChip(u){
+    var k = userStateKey(u);
+    return k==="active" ? chipHtml("Active","chip-green") : k==="inactive" ? chipHtml("Deactivated","chip-red")
+      : k==="pending" ? chipHtml("Awaiting approval","chip-amber") : k==="pending_deletion" ? chipHtml("Closing","chip-amber") : chipHtml("Closed","chip-grey");
+  }
+  function userPlacement(u){
+    var bits = [];
+    if(isTraineeRole(u.role)){
+      if(u.courseName) bits.push(esc(u.courseName));
+      if(u.pgYear) bits.push('<b>'+esc(u.pgYear)+'</b>');
+      if(u.study && u.study.status==="completed") bits.push('<span class="muted">completed</span>');
+      if(u.role==="fellow" && u.unit) bits.push(unitShortHtml(u.unit));
+    } else if(u.role==="consultant"){
+      if(u.designation) bits.push(esc(u.designation));
+      if(u.unit) bits.push(unitShortHtml(u.unit));
+    } else bits.push('<span class="muted">All units</span>');
+    return bits.join(' · ') || '<span class="muted">—</span>';
+  }
+  function userListRows(){
+    var rows = userListSource().filter(userMatches).sort(function(a,b){ return (a.displayName||a.username).localeCompare(b.displayName||b.username); });
+    if(!rows.length) return '<div class="empty-state">No one matches.</div>';
+    return '<div class="table-wrap"><table class="v-utable"><thead><tr><th>Name</th><th>Kind</th><th>Course · year · unit</th><th>Status</th><th></th></tr></thead><tbody>'+
+      rows.map(function(u){
+        return '<tr class="v-urow" data-v="user-open" data-u="'+esc(u.username)+'" tabindex="0">'+
+          '<td><div class="v-uname">'+esc(u.displayName)+'</div><div class="mono muted v-uuser">'+esc(u.username)+'</div></td>'+
+          '<td>'+chipHtml(roleLabel(u.role),"chip-grey")+'</td><td>'+userPlacement(u)+'</td><td>'+userStateChip(u)+'</td>'+
+          '<td class="v-go">Open ›</td></tr>';
+      }).join("")+'</tbody></table></div>';
+  }
+  function userListCard(title){
+    var src = userListSource();
+    var roles = [["","All kinds"],["resident","PG Residents"],["senior_resident","Senior Residents"],["fellow","Fellows"],["consultant","Consultants"],["developer","Developers"]];
+    var stats = [["","Any status"],["active","Active"],["inactive","Deactivated"],["pending","Awaiting approval"],["pending_deletion","Closing"],["closed","Closed"]];
+    return '<div class="card"><div class="section-head"><h2>'+esc(title)+' <span class="muted" style="font-weight:500;">('+src.length+')</span></h2></div>'+
+      '<div class="v-filters"><input type="search" id="v-uq" data-vin="u.q" data-vlist="v-ulist" placeholder="Search name, username, unit, course…" value="'+esc(V.u.q)+'">'+
+        '<select data-vin="u.role" data-vlist="v-ulist" aria-label="Kind">'+roles.map(function(r){ return '<option value="'+r[0]+'"'+(V.u.role===r[0]?" selected":"")+'>'+r[1]+'</option>'; }).join("")+'</select>'+
+        '<select data-vin="u.status" data-vlist="v-ulist" aria-label="Status">'+stats.map(function(r){ return '<option value="'+r[0]+'"'+(V.u.status===r[0]?" selected":"")+'>'+r[1]+'</option>'; }).join("")+'</select></div>'+
+      '<div id="v-ulist">'+userListRows()+'</div></div>';
+  }
+  function renderUsersConcise(){
+    if(state.loading) return skeletonTable(5);
+    var dev = state.view==="developer-users";
+    return (dev ? renderCreateUserForm() : "")+
+      (dev || hasPerm("postings.assign_others") ? renderBulkPostings() : "")+
+      userListCard(dev ? "People" : "People you manage")+
+      (dev ? '' : '<p class="muted" style="font-size:12.5px;">Opening a person lets you edit what your permissions allow. Name, contact details, role and password stay with the Developer.</p>');
+  }
+
+  /* ---- per-person page ---- */
+  async function vOpenUser(username){
+    V.ue = { username: username, detail: null, draft: null, err: "", rename: { open:false, value:"", status:null, detail:"", busy:false }, busy:false };
+    V.ueFrom = state.view;
+    navPush("view", V.ueFrom==="dev-permissions" ? "Back to permissions" : "Back to people", function(){ state.view = V.ueFrom || "developer-users"; setTimeout(loadForView, 0); });
+    state.view = "dev-user-edit"; render();
+    try{
+      var d = await api("GET","/users/"+encodeURIComponent(username)+"/detail");
+      V.ue.detail = d; vResetUserDraft(); 
+    }catch(e){ V.ue.err = e.message || "Could not open this person."; }
+    render();
+  }
+  function vResetUserDraft(){
+    var u = V.ue.detail.user;
+    V.ue.draft = { displayName: u.displayName||"", email: u.email||"", phone: u.phone||"", role: u.role, unit: u.unit||"",
+      designation: u.designation||"", courseId: u.courseId||"", joinedYm: u.joinedYm||"", pgYear: u.pgYear||"",
+      restamp:false, reason:"" };
+    V.ue.base = JSON.parse(JSON.stringify(V.ue.draft));
+  }
+  function ueChanged(){
+    var d = V.ue.draft, b = V.ue.base, out = {};
+    Object.keys(d).forEach(function(k){ if(k!=="restamp" && k!=="reason" && d[k]!==b[k]) out[k]=true; });
+    return out;
+  }
+  function renderUserEdit(){
+    var ue = V.ue;
+    if(!ue) return "";
+    if(ue.err) return vErr(ue.err);
+    if(!ue.detail) return skeletonDash();
+    var d = ue.detail, u = d.user, dr = ue.draft, dev = !!(state.capabilities||{}).isDeveloper;
+    var isTrainee = isTraineeRole(dr.role), isSelf = u.username===state.user.username;
+    var course = courseById(dr.courseId);
+    var ch = ueChanged(), nChanged = Object.keys(ch).length;
+    var identity = '<div class="card"><div class="section-head"><div><span class="eyebrow">'+esc(roleLabel(u.role))+'</span><h2>'+esc(u.displayName)+'</h2></div>'+
+        '<div>'+userStateChip(u)+(isSelf?' '+chipHtml("You","chip-teal"):"")+'</div></div>'+
+      '<div class="row2">'+
+        vtext("ue.draft.displayName","Display name",{disabled:!dev, max:120, hint: dev?"Shown on every entry, roster and sign-off.":"Only the Developer edits names."})+
+        '<div class="field"><label>Username</label><div class="v-username"><span class="mono">'+esc(u.username)+'</span>'+
+          (dev ? ' <button type="button" class="btn btn-sm" data-v="rename-open">Change…</button>' : '')+'</div>'+
+          '<div class="hint">The sign-in name. Records are tied to it, so changing it moves everything with it.</div></div>'+
+      '</div>'+
+      (dev ? '<div class="row2">'+vtext("ue.draft.email","Email",{type:"email", max:200, ph:"name@hospital.org", hint:"Only the Developer can see this. For future reminders."})+
+        vtext("ue.draft.phone","Phone",{max:40, ph:"+91 …", hint:"Only the Developer can see this."})+'</div>' : '')+
+      '</div>';
+    var rename = ue.rename.open ? vRenameCard() : "";
+    var kind = "";
+    if(dev){
+      kind = '<div class="card"><div class="form-section-title">Kind of account</div><div class="row2">'+
+        vsel("ue.draft.role","Role",["resident","senior_resident","fellow","consultant","developer"].map(function(r){ return [r, roleLabel(r)]; }),{disabled:isSelf && u.role==="developer", hint: isSelf?"You cannot change your own role.":"Changing a trainee to another kind moves them to that kind’s default course."})+
+        (dr.role==="consultant" ? vsel("ue.draft.designation","Designation",state.config.consultantDesignations,{hint:"“Professor” gives a unit-wide roster. Edit exactly what it allows under Permissions."}) : '')+
+      '</div></div>';
+    }
+    var placement = "";
+    if(dr.role==="developer"){
+      placement = "";
+    } else {
+      var canUnit = dev || hasPerm("accounts.edit_profile");
+      var unitField = (dr.role==="consultant" || dr.role==="fellow" || isTrainee)
+        ? '<div class="field"><label for="ue-unit">'+(dr.role==="fellow"?"Parent / home unit":(dr.role==="consultant"?"Home unit":"Home unit (optional)"))+'</label>'+
+          '<select id="ue-unit" data-vin="ue.draft.unit"'+(canUnit?"":" disabled")+'><option value="">— none —</option>'+unitOptions(dr.unit)+'</select>'+
+          (isTrainee && dr.role!=="fellow" ? '<div class="hint">Where they are today comes from their postings; this is only a default.</div>' : '')+'</div>' : '';
+      var courseBlock = "";
+      if(isTrainee){
+        var courses = coursesForRole(dr.role);
+        if(dr.courseId && !courses.some(function(c){ return c.id===dr.courseId; }) && course) courses = courses.concat([course]);
+        var canCourse = dev || hasPerm("accounts.edit_profile");
+        var changedCourse = (dr.courseId||"")!==(ue.base.courseId||"");
+        courseBlock = '<div class="row2">'+
+          '<div class="field"><label for="ue-course">Course</label><select id="ue-course" data-vin="ue.draft.courseId" data-vcalc="ue"'+(canCourse?"":" disabled")+'>'+
+            '<option value="">— none —</option>'+courses.map(function(c){ return '<option value="'+esc(c.id)+'"'+(c.id===dr.courseId?" selected":"")+'>'+esc(c.name)+(c.active===false?" (retired)":"")+' · '+c.durationMonths+' months</option>'; }).join("")+'</select>'+
+            (course ? '<div class="hint">'+(course.scope==="department"?"Rotates through the whole department":"Belongs to "+((course.units&&course.units.length)?course.units.map(unitShort).join(", "):"the person’s own unit"))+
+               (course.allowPeripheral?", with peripheral postings":"")+'.</div>' : '')+'</div>'+
+          '<div class="field"><label for="ue-joined">Joined (month and year)</label><input id="ue-joined" type="month" data-vin="ue.draft.joinedYm" data-vcalc="ue" value="'+esc(/^\d{4}-\d{2}$/.test(dr.joinedYm)?dr.joinedYm:"")+'"'+(canCourse?"":" disabled")+'>'+
+            '<div class="hint" id="ue-study">'+studyLine(course, dr.joinedYm)+'</div></div></div>'+
+          (changedCourse ? '<div class="v-note">'+vcheck("ue.draft.restamp","Also move this person’s <b>existing entries</b> to the new course. Leave unticked if they simply moved on to it — their earlier entries then stay with the course they were logged under.")+'</div>' : '')+
+          (!dr.joinedYm ? '<div class="field"><label for="ue-pgyear">Batch label (used only until a joining month is set)</label><select id="ue-pgyear" data-vin="ue.draft.pgYear"'+(canCourse?"":" disabled")+'>'+opts_(state.config.pgYears, dr.pgYear)+'</select></div>' : '')+
+          (d.course && d.allowedUnits ? '<p class="hint">Allowed postings for this course: '+(d.allowedUnits.length?d.allowedUnits.map(unitShort).join(", "):"none")+'. '+
+            (d.course.allowPeripheral && d.peripheralDays ? 'Peripheral time so far: about '+(d.peripheralDays/30.4).toFixed(1)+' months'+(d.course.maxPeripheralMonths?' of '+d.course.maxPeripheralMonths:'')+'.':'')+'</p>' : '');
+      }
+      placement = '<div class="card"><div class="form-section-title">Placement</div>'+unitField+courseBlock+'</div>';
+    }
+    var counts = d.entryCounts||{}, nEntries = Object.keys(counts).reduce(function(a,k){ return a+counts[k]; },0);
+    var status = '<div class="card"><div class="form-section-title">Account</div>'+
+      '<div class="v-facts">'+kv("Opened", fmtDate((u.createdAt||"").slice(0,10)))+kv("Last signed in", u.lastSeenAt?fmtDateTime(u.lastSeenAt):"")+kv("Entries logged", String(nEntries))+(isTrainee?kv("Postings", String((d.postings||[]).length)):"")+'</div>'+
+      (isSelf ? '<p class="muted" style="font-size:12.5px;">This is your own account; switching it off or closing it is done from My Account.</p>' :
+        '<div class="v-btns" style="margin-top:12px;">'+
+          '<button type="button" class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-v="user-active" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> '+
+          (hasPerm("accounts.delete") || dev ? '<button type="button" class="btn btn-sm btn-danger" data-v="user-delete">Delete…</button>' : '')+'</div>')+
+    '</div>';
+    var appts = '<div class="card"><div class="form-section-title">Appointments &amp; permissions</div>'+
+      ((d.appointments||[]).length ? '<div class="table-wrap"><table><thead><tr><th>Appointment</th><th>Unit</th><th>From</th><th>To</th><th></th></tr></thead><tbody>'+
+        d.appointments.map(function(a){ return '<tr><td>'+esc(ROLE_ASSIGNMENT_LABEL[a.role]||a.role)+'</td><td>'+(a.unit?unitShortHtml(a.unit):'<span class="muted">All</span>')+'</td><td class="tabular">'+fmtDate((a.startAt||"").slice(0,10))+'</td><td class="tabular">'+(a.endAt?fmtDate((a.endAt||"").slice(0,10)):'<span class="muted">open</span>')+'</td><td>'+chipHtml(a.active?"In force":"Lapsed",a.active?"chip-green":"chip-grey")+'</td></tr>'; }).join("")+'</tbody></table></div>'
+        : '<p class="muted" style="font-size:13px;">No appointment on file.</p>')+
+      (dev && (u.role==="consultant"||u.role==="fellow") ? '<div class="btn-row" style="margin-top:10px;"><button type="button" class="btn btn-sm" data-v="goto-perms" data-u="'+esc(u.username)+'">Permissions'+(d.overrides?" ("+d.overrides+" individual)":"")+' ›</button> '+
+        '<button type="button" class="btn btn-sm" data-v="goto-roles">Appointments ›</button></div>' : '')+'</div>';
+    var events = (d.events||[]).length ? '<div class="card"><div class="form-section-title">History</div><div class="v-log">'+d.events.map(function(e){
+        return '<div><span class="muted">'+fmtDateTime(e.createdAt)+'</span> · <b>'+esc(e.action.replace(/_/g," "))+'</b>'+(e.actorName?' · '+esc(e.actorName):'')+(e.detail?' — '+esc(e.detail):'')+'</div>'; }).join("")+'</div></div>' : '';
+    var bar = '<div class="v-savebar'+(nChanged?" show":"")+'"><span>'+plural(nChanged,"unsaved change")+'</span>'+
+      '<button class="btn btn-sm" data-v="user-discard">Discard</button> <button class="btn btn-sm btn-primary" data-v="user-save"'+(ue.busy?" disabled":"")+'>Save changes</button></div>';
+    return identity+rename+kind+placement+status+appts+events+bar;
+  }
+  function vRenameCard(){
+    var r = V.ue.rename, u = V.ue.detail.user, d = V.ue.detail;
+    var nEntries = Object.keys(d.entryCounts||{}).reduce(function(a,k){ return a+d.entryCounts[k]; },0);
+    var st = r.status, msg = "";
+    if(st==="free") msg = '<span class="v-ok">✓ Available</span>';
+    else if(st==="closed") msg = '<span class="v-warn">Held by a closed account. Its records will be set aside under another name, so the new holder inherits none of them. '+esc(r.detail||"")+'</span>';
+    else if(st==="taken") msg = '<span class="v-bad">✕ Not available — '+esc(r.detail||"")+'</span>';
+    else if(st==="invalid") msg = '<span class="v-bad">'+esc(r.detail||"")+'</span>';
+    else if(st==="same") msg = '<span class="muted">That is the current username.</span>';
+    var can = (st==="free" || st==="closed") && !r.busy;
+    return '<div class="card v-rename"><div class="form-section-title">Change username</div>'+
+      '<p style="font-size:13px; margin-bottom:10px;">Everything this person has done — '+plural(nEntries,"entry","entries")+(d.postings&&d.postings.length?', '+plural(d.postings.length,"posting"):'')+', their sign-offs, edit history, appointments, permissions and the account log — is moved to the new name in one step, or not at all. '+
+        '<b>They will be signed out</b> and must sign in with the new username; their password is unchanged. Unfinished forms saved in their browser under the old name are not carried over.</p>'+
+      '<div class="field"><label for="ue-newname">New username</label><input id="ue-newname" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-vin="ue.rename.value" data-vcheck="rename" maxlength="40" value="'+esc(r.value)+'" placeholder="letters, numbers, . _ -">'+
+        '<div class="hint" id="ue-rename-msg">'+msg+'</div></div>'+
+      '<div class="btn-row"><button type="button" class="btn" data-v="rename-cancel">Cancel</button> <button type="button" class="btn btn-primary" id="ue-rename-go" data-v="rename-go"'+(can?"":" disabled")+'>Change username</button></div></div>';
+  }
+  var __renameTimer = null;
+  function vRenameCheck(){
+    var r = V.ue.rename, name = (r.value||"").trim();
+    clearTimeout(__renameTimer);
+    if(!name){ r.status = null; vPaintRename(); return; }
+    r.status = "checking"; vPaintRename();
+    __renameTimer = setTimeout(async function(){
+      var asked = name;
+      try{
+        var res = await api("GET","/usernames/check?name="+encodeURIComponent(asked)+"&for="+encodeURIComponent(V.ue.username));
+        if((V.ue.rename.value||"").trim()!==asked) return;
+        V.ue.rename.status = res.status; V.ue.rename.detail = res.detail || "";
+      }catch(e){ V.ue.rename.status = "invalid"; V.ue.rename.detail = e.message; }
+      vPaintRename();
+    }, 280);
+  }
+  function vPaintRename(){
+    var m = el("ue-rename-msg"), b = el("ue-rename-go"); if(!m || !b) return;
+    var r = V.ue.rename, st = r.status, html = "";
+    if(st==="checking") html = '<span class="muted">Checking…</span>';
+    else if(st==="free") html = '<span class="v-ok">✓ Available</span>';
+    else if(st==="closed") html = '<span class="v-warn">Held by a closed account. Its records will be set aside under another name, so the new holder inherits none of them. '+esc(r.detail||"")+'</span>';
+    else if(st==="taken") html = '<span class="v-bad">✕ Not available — '+esc(r.detail||"")+'</span>';
+    else if(st==="invalid") html = '<span class="v-bad">'+esc(r.detail||"")+'</span>';
+    else if(st==="same") html = '<span class="muted">That is the current username.</span>';
+    m.innerHTML = html;
+    b.disabled = !((st==="free"||st==="closed") && !r.busy);
+  }
+  async function vDoRename(){
+    var r = V.ue.rename, old = V.ue.username, nw = (r.value||"").trim().toLowerCase();
+    if(!confirm("Change “"+old+"” to “"+nw+"”?\n\nEverything they have done moves with the name. They will be signed out and must sign in with the new username.")) return;
+    r.busy = true; vPaintRename();
+    try{
+      var res = await api("POST","/users/"+encodeURIComponent(old)+"/rename",{ username: nw });
+      if(res.signedOut){
+        toast("Username changed. Sign in again as “"+res.new+"”.");
+        state.user = null; state.capabilities = null; navFrames.length = 0; render(); return;
+      }
+      V.ue.username = res.new; r.open = false; r.value = ""; r.status = null; r.busy = false;
+      toast("Username changed to “"+res.new+"” — "+plural(res.rowsUpdated,"record")+" updated.");
+      var d = await api("GET","/users/"+encodeURIComponent(res.new)+"/detail"); V.ue.detail = d; vResetUserDraft();
+      render();
+    }catch(e){ r.busy = false; r.status = "invalid"; r.detail = e.message || "Could not change it."; render(); }
+  }
+  async function vSaveUser(){
+    var ue = V.ue, d = ue.draft, b = ue.base, ch = ueChanged(), patch = {};
+    if(!Object.keys(ch).length) return;
+    var dev = !!(state.capabilities||{}).isDeveloper;
+    if(ch.displayName) patch.displayName = d.displayName;
+    if(ch.email) patch.email = d.email;
+    if(ch.phone) patch.phone = d.phone;
+    if(ch.role) patch.role = d.role;
+    if(ch.designation) patch.designation = d.designation;
+    if(ch.unit) patch.unit = d.unit;
+    if(ch.courseId) patch.courseId = d.courseId || null;
+    if(ch.joinedYm) patch.joinedYm = normJoin(d.joinedYm);
+    if(ch.pgYear && !d.joinedYm) patch.pgYear = d.pgYear;
+    if(d.restamp && ch.courseId) patch.restampEntries = true;
+    ue.busy = true; render();
+    try{
+      await api("PATCH","/users/"+encodeURIComponent(ue.username), patch);
+      var det = await api("GET","/users/"+encodeURIComponent(ue.username)+"/detail");
+      ue.detail = det; vResetUserDraft(); ue.busy = false;
+      render(); toast("Saved.");
+    }catch(e){ ue.busy = false; render(); toast(e.message || "Could not save."); }
+  }
+  async function vUserActive(next){
+    var ue = V.ue, who = ue.username;
+    if(!next && !confirm("Deactivate "+who+"? They will be signed out and cannot sign in until reactivated.")) return;
+    try{
+      await api("PATCH","/users/"+encodeURIComponent(who), { active: next });
+      var det = await api("GET","/users/"+encodeURIComponent(who)+"/detail"); ue.detail = det; vResetUserDraft(); render();
+      toast(next ? "Reactivated." : "Deactivated.");
+    }catch(e){ toast(e.message || "Could not change that."); }
+  }
+  async function vUserDelete(){
+    var who = V.ue.username;
+    if(!confirm("Delete "+who+"’s account? This cannot be undone. Accounts with logged entries can’t be deleted this way — deactivate them instead.")) return;
+    try{
+      await api("DELETE","/users/"+encodeURIComponent(who));
+      toast("Account deleted."); navBack();
+    }catch(e){ toast(e.message || "Could not delete this account."); }
+  }
+
+  /* ------------ COURSE CREATOR (Developer) ------------------------------------ */
+  var MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  async function vLoadCourseList(){
+    try{ V.c.list = (await api("GET","/courses/manage")).courses; V.courses = V.c.list.filter(function(c){ return c.active; }); }
+    catch(e){ V.c.err = e.message; }
+  }
+  function blankCourse(){
+    var periph = ((state.config&&state.config.units)||[]).filter(function(u){ return u.group==="Peripheral Postings"; }).map(function(u){ return u.key; });
+    return { id:null, name:"", shortName:"", role:"resident", durationMonths:36, scope:"department", units:[], allowPeripheral:true,
+             peripheralUnits:periph, maxPeripheralMonths:"", yearLabelsText:"", startMonth:1, notes:"", active:true, users:0, entries:0 };
+  }
+  function courseToEdit(c){
+    var e = JSON.parse(JSON.stringify(c)); e.yearLabelsText = (c.yearLabels||[]).join("\n");
+    if(e.maxPeripheralMonths==null) e.maxPeripheralMonths = "";
+    return e;
+  }
+  function courseSummary(c){
+    var scope = c.scope==="department" ? "Rotates through every unit" : ("Belongs to "+((c.units&&c.units.length)?c.units.map(unitShort).join(", "):"the trainee’s own unit"));
+    return scope+(c.allowPeripheral ? " + peripheral postings"+(c.maxPeripheralMonths?" (up to "+c.maxPeripheralMonths+" months)":"") : "")+" · "+c.durationMonths+" months";
+  }
+  function renderDevCourses(){
+    if(!V.c.list) return V.c.err ? vErr(V.c.err) : skeletonTable(4);
+    var ed = V.c.edit;
+    var list = '<div class="card"><div class="section-head"><div><span class="eyebrow">Developer</span><h2>Courses</h2></div>'+
+      '<button class="btn btn-sm btn-primary" data-v="course-new">+ New course</button></div>'+
+      '<p class="muted" style="font-size:13px; margin-bottom:14px;">A course says how long a programme runs, which units it rotates through, whether it has peripheral postings, and what each year is called. Trainees are enrolled on one and enter the month they joined; their year of study is then worked out, never typed. The three below were set up as <b>starting points</b> — confirm the durations match your programmes.</p>'+
+      (V.c.list.length ? '<div class="v-courses">'+V.c.list.map(function(c){
+        return '<div class="v-course'+(ed&&ed.id===c.id?" active":"")+(c.active?"":" retired")+'"><div class="v-course-main"><div class="v-course-name">'+esc(c.name)+' '+chipHtml(roleLabel(c.role),"chip-grey")+(c.active?"":" "+chipHtml("Retired","chip-amber"))+'</div>'+
+          '<div class="muted" style="font-size:12.5px;">'+esc(courseSummary(c))+'</div>'+
+          '<div class="muted" style="font-size:12.5px;">'+plural(c.users,"person","people")+' · '+plural(c.entries,"entry","entries")+'</div></div>'+
+          '<div class="v-btns"><button class="btn btn-sm" data-v="course-people" data-id="'+esc(c.id)+'">People</button> <button class="btn btn-sm" data-v="course-edit" data-id="'+esc(c.id)+'">Edit</button></div></div>';
+      }).join("")+'</div>' : '<div class="empty-state">No courses yet.</div>')+'</div>';
+    return list + (ed ? vCourseEditor(ed) : "") + (V.c.peopleFor ? vCoursePeople() : "");
+  }
+  function vCourseEditor(ed){
+    var isNew = !ed.id;
+    var people = ed.users||0;
+    var labelsN = (ed.yearLabelsText||"").split("\n").filter(function(x){ return x.trim(); }).length;
+    var years = Math.max(1, Math.ceil((+ed.durationMonths||0)/12));
+    return '<div class="card v-editor"><div class="section-head"><h2>'+(isNew?"New course":"Edit “"+esc(ed.name)+"”")+'</h2><button class="btn btn-sm" data-v="course-cancel">Close</button></div>'+
+      vErr(V.c.err)+
+      (people ? '<div class="notice-banner">'+plural(people,"person","people")+' '+(people===1?"is":"are")+' enrolled. Changes to length, labels or scope apply to them straight away — their year of study and the postings check are recalculated. Entries they have already logged keep the course stamp they were saved with.</div>' : '')+
+      '<div class="row2">'+vtext("c.edit.name","Course name",{max:120, ph:"e.g. PG Residency (MS ENT)"})+vtext("c.edit.shortName","Short name",{max:30, ph:"e.g. PG"})+'</div>'+
+      '<div class="row3">'+vsel("c.edit.role","For",[["resident","PG Residents"],["senior_resident","Senior Residents"],["fellow","Fellows"]],{disabled:people>0, hint:people>0?"Fixed while people are enrolled.":""})+
+        vtext("c.edit.durationMonths","Duration (months)",{type:"number", extra:' min="1" max="120" step="1"', hint:"= "+years+" year"+(years===1?"":"s")})+
+        vsel("c.edit.startMonth","Intake month",MONTHS.map(function(m,i){ return [i+1,m]; }),{hint:"Used when someone gives only a year of joining."})+'</div>'+
+      '<div class="field"><label>Where do they train?</label><div class="radio-group">'+
+        '<label class="radio-card"><input type="radio" name="c-scope" data-vin="c.edit.scope" value="department"'+(ed.scope==="department"?" checked":"")+'><span><span class="t">The whole department</span><br><span class="d">Rotates through every unit (the PG pattern).</span></span></label>'+
+        '<label class="radio-card"><input type="radio" name="c-scope" data-vin="c.edit.scope" value="units"'+(ed.scope==="units"?" checked":"")+'><span><span class="t">Particular units</span><br><span class="d">Belongs to specific units (the Fellowship pattern). Tick none to mean “the trainee’s own unit”.</span></span></label>'+
+      '</div></div>'+
+      (ed.scope==="units" ? '<div class="field"><label>Units this course belongs to</label>'+unitChecklist("cedit:units", ed.units)+'</div>' : '')+
+      '<div class="field">'+vcheck("c.edit.allowPeripheral","Includes <b>peripheral postings</b>")+'</div>'+
+      '<div class="field"><label>Which units count as peripheral</label>'+unitChecklist("cedit:peripheralUnits", ed.peripheralUnits)+
+        '<div class="hint">Kept even when peripheral postings are switched off — it is how the app knows which postings to question.</div></div>'+
+      (ed.allowPeripheral ? vtext("c.edit.maxPeripheralMonths","Most peripheral time (months)",{type:"number", extra:' min="1" step="1"', ph:"no limit", hint:"Leave blank for no limit. Going over is flagged, not blocked."}) : '')+
+      '<div class="field"><label for="c-labels">Name each year <span class="muted">(one per line, '+years+' expected'+(labelsN&&labelsN!==years?"; you have "+labelsN:"")+')</span></label>'+
+        '<textarea id="c-labels" rows="'+Math.min(6,Math.max(2,years))+'" data-vin="c.edit.yearLabelsText" placeholder="JR-1&#10;JR-2&#10;JR-3">'+esc(ed.yearLabelsText||"")+'</textarea><div class="hint">Blank lines fall back to “Year 1”, “Year 2”…</div></div>'+
+      vtext("c.edit.notes","Notes (shown to the Developer only)",{max:600})+
+      '<div class="field">'+vcheck("c.edit.active","Open for new enrolments")+'</div>'+
+      '<div class="btn-row"><button class="btn btn-primary" data-v="course-save">'+(isNew?"Create course":"Save changes")+'</button>'+
+        (!isNew ? ' <button class="btn btn-danger" data-v="course-delete">Delete…</button>' : '')+'</div></div>';
+  }
+  function courseBody(ed){
+    var labels = (ed.yearLabelsText||"").split("\n").map(function(x){ return x.trim(); });
+    while(labels.length && !labels[labels.length-1]) labels.pop();
+    return { name: ed.name, shortName: ed.shortName, role: ed.role, durationMonths: +ed.durationMonths, scope: ed.scope,
+      units: ed.scope==="units" ? ed.units : [], allowPeripheral: !!ed.allowPeripheral, peripheralUnits: ed.peripheralUnits,
+      maxPeripheralMonths: ed.maxPeripheralMonths===""||ed.maxPeripheralMonths==null ? null : +ed.maxPeripheralMonths,
+      yearLabels: labels, startMonth: +ed.startMonth, notes: ed.notes, active: !!ed.active };
+  }
+  async function vSaveCourse(){
+    var ed = V.c.edit; V.c.err = "";
+    try{
+      var r = ed.id ? await api("PATCH","/courses/"+encodeURIComponent(ed.id), courseBody(ed)) : await api("POST","/courses", courseBody(ed));
+      await vLoadCourseList();
+      var saved = V.c.list.filter(function(c){ return c.id===r.course.id; })[0];
+      V.c.edit = saved ? courseToEdit(saved) : null;
+      if(V.c.peopleFor===r.course.id) await vLoadCoursePeople(r.course.id);
+      render(); toast(ed.id ? "Course saved." : "Course created.");
+    }catch(e){ V.c.err = e.message || "Could not save."; render(); }
+  }
+  async function vDeleteCourse(){
+    var ed = V.c.edit;
+    if(!confirm("Delete “"+ed.name+"”? This cannot be undone. A course people are enrolled on can only be retired.")) return;
+    try{ await api("DELETE","/courses/"+encodeURIComponent(ed.id)); V.c.edit = null; await vLoadCourseList(); render(); toast("Course deleted."); }
+    catch(e){ V.c.err = e.message; render(); }
+  }
+  async function vLoadCoursePeople(id){
+    V.c.peopleFor = id; V.c.people = null; V.c.joined = {}; render();
+    try{ V.c.people = await api("GET","/courses/"+encodeURIComponent(id)+"/people"); }catch(e){ V.c.err = e.message; }
+    render();
+  }
+  function vCoursePeople(){
+    var d = V.c.people;
+    if(!d) return '<div class="card">'+skeletonTable(4)+'</div>';
+    var c = d.course, dirty = Object.keys(V.c.joined).length;
+    return '<div class="card"><div class="section-head"><h2>People on “'+esc(c.name)+'” <span class="muted" style="font-weight:500;">('+d.people.length+')</span></h2><button class="btn btn-sm" data-v="course-people-close">Close</button></div>'+
+      '<p class="muted" style="font-size:13px; margin-bottom:12px;">Set when each person joined; the year is worked out. A highlighted unit is a posting outside this course’s scope — it is shown, not removed.</p>'+
+      (d.people.length ? '<div class="table-wrap"><table class="v-ptable"><thead><tr><th>Name</th><th>Joined</th><th>Now</th><th>Postings outside scope</th><th>Peripheral</th></tr></thead><tbody>'+
+        d.people.map(function(p){
+          var jv = V.c.joined.hasOwnProperty(p.username) ? V.c.joined[p.username] : (p.joinedYm||"");
+          var live = studyProgress(c, jv);
+          return '<tr><td><div>'+esc(p.displayName)+(p.active?"":" "+chipHtml("off","chip-red"))+'</div><div class="mono muted v-uuser">'+esc(p.username)+'</div></td>'+
+            '<td><input type="month" class="v-month" data-v-joined="'+esc(p.username)+'" value="'+esc(/^\d{4}-\d{2}$/.test(jv)?jv:"")+'"></td>'+
+            '<td class="v-now" data-v-now="'+esc(p.username)+'">'+(live ? (live.status==="completed"?'<span class="muted">completed</span>':live.status==="not_started"?'<span class="muted">not started</span>':'<b>'+esc(live.label)+'</b>') : '<span class="muted">—</span>')+
+              (p.typedYear && !p.joinedYm ? ' <span class="muted">(typed: '+esc(p.typedYear)+')</span>' : '')+'</td>'+
+            '<td>'+(p.postingsOutside.length ? p.postingsOutside.map(function(u){ return chipHtml(unitShort(u),"chip-amber"); }).join(" ") : '<span class="muted">—</span>')+'</td>'+
+            '<td class="tabular">'+(p.peripheralDays ? (p.peripheralDays/30.4).toFixed(1)+" mo" : '<span class="muted">—</span>')+'</td></tr>';
+        }).join("")+'</tbody></table></div>'+
+        '<div class="btn-row"><button class="btn btn-primary" data-v="course-joined-save"'+(dirty?"":" disabled")+'>Save '+(dirty?plural(dirty,"joining date"):"joining dates")+'</button></div>'
+        : '<div class="empty-state">Nobody is enrolled on this course.</div>')+'</div>';
+  }
+  async function vSaveJoined(){
+    var ups = Object.keys(V.c.joined).map(function(u){ return { username:u, joinedYm: V.c.joined[u] }; }).filter(function(x){ return x.joinedYm; });
+    if(!ups.length){ toast("Enter a month for at least one person."); return; }
+    try{
+      var r = await api("POST","/courses/joined",{ updates: ups });
+      var msg = plural(r.updated.length,"joining date")+" saved"+(r.errors.length?"; "+r.errors.length+" refused ("+r.errors.map(function(e){ return e.username+": "+e.error; }).join("; ")+")":"")+".";
+      await vLoadCoursePeople(V.c.peopleFor); await vLoadCourseList(); render(); toast(msg);
+    }catch(e){ toast(e.message || "Could not save."); }
+  }
+
+  /* ------------ BACKUPS (Developer) ------------------------------------------- */
+  async function vLoadBackup(){
+    try{ V.b.status = await api("GET","/backup/status"); V.b.err = ""; }catch(e){ V.b.err = e.message; }
+  }
+  function ago(iso){
+    if(!iso) return "never";
+    var days = Math.floor((Date.now()-new Date(iso).getTime())/86400000);
+    return days<=0 ? "today" : days===1 ? "yesterday" : days+" days ago";
+  }
+  function fmtBytes(n){ if(n==null) return "—"; if(n<1024) return n+" B"; if(n<1048576) return (n/1024).toFixed(1)+" KB"; return (n/1048576).toFixed(1)+" MB"; }
+  function renderDevBackups(){
+    var s = V.b.status;
+    if(!s) return V.b.err ? vErr(V.b.err) : skeletonDash();
+    var dl = s.lastDownload, rule = s.rule || {};
+    var overdue = !dl || (rule.everyDays && (Date.now()-new Date(dl.at).getTime())/86400000 >= rule.everyDays);
+    var status = '<div class="card"><span class="eyebrow">Developer</span><h2>Backups</h2>'+
+      '<div class="v-backup-state '+(overdue?"due":"ok")+'"><b>'+(dl ? "Last backup downloaded "+ago(dl.at) : "No backup has ever been downloaded")+'</b>'+
+        (dl ? '<span class="muted"> · '+fmtDateTime(dl.at)+' · '+esc(dl.by||"")+' · '+fmtBytes(dl.sizeBytes)+'</span>' : '')+
+        (overdue ? '<div style="margin-top:4px;">Download one now and keep it somewhere other than this server.</div>' : '')+'</div>'+
+      '<div class="v-facts" style="margin:14px 0;">'+kv("Live database", fmtBytes(s.databaseBytes))+kv("People", String(s.counts.users))+kv("Entries", String(s.counts.entries))+kv("Sign-off records", String(s.counts.approvals))+'</div>'+
+      '<p style="font-size:13px; margin-bottom:12px;">The download is the <b>whole logbook as one file</b>: every entry, every sign-off, and every account including password hashes. Treat it like the logbook itself — keep it on a computer or drive you control, not in a shared folder or an email. Live sign-ins are left out of it.</p>'+
+      '<button class="btn btn-primary" data-v="backup-download"'+(V.b.busy==="dl"?" disabled":"")+'>'+(V.b.busy==="dl"?"Preparing…":"Download a backup now")+'</button> '+
+      '<span class="muted" style="font-size:12.5px;">A reminder appears here and on your dashboard '+(rule.everyDays?"every "+rule.everyDays+" days":"(switched off)")+' — change it under Alerts.</span>'+
+      '<p class="hint" style="margin-top:12px;">Nothing here copies data anywhere by itself: this app has no scheduler and no storage outside its own disk. If the disk is lost, the file you last downloaded is the only copy.</p></div>';
+    var restore = '<div class="card"><h2 style="font-size:16px;">Restore from a backup file</h2>'+
+      '<p style="font-size:13px; margin-bottom:12px;">Use this if the server’s disk was wiped, or something was deleted that should not have been. Restoring <b>replaces everything</b> — people, entries, sign-offs, settings — with what was in the file, so anything entered after that backup is lost. You see a comparison before anything changes, and the current data is copied aside first so a mistaken restore can itself be undone.</p>'+
+      '<p class="hint" style="margin-bottom:12px;">If the whole disk was lost and the site shows a sign-up page: the first person to sign up becomes the Developer. Do that, then restore here — the accounts in the backup replace the temporary one.</p>'+
+      '<div class="field"><label for="b-file">Backup file (.db)</label><input id="b-file" type="file" accept=".db,.sqlite,.sqlite3,application/octet-stream" data-v-file="1"></div>'+
+      '<button class="btn" data-v="backup-check"'+(V.b.file&&V.b.busy!=="chk"?"":" disabled")+'>'+(V.b.busy==="chk"?"Checking…":"Check this file")+'</button>'+
+      vErr(V.b.restoreErr)+ (V.b.preview ? vBackupPreview() : "")+'</div>';
+    var safety = (s.safetyCopies||[]).length ? '<div class="card"><h2 style="font-size:16px;">Safety copies</h2><p class="muted" style="font-size:13px; margin-bottom:10px;">Taken automatically just before each restore. They live on the same disk as the database, so they undo a mistaken restore but do not protect against losing the disk. The last five are kept.</p>'+
+      '<div class="table-wrap"><table><thead><tr><th>File</th><th>Taken</th><th>Size</th><th></th></tr></thead><tbody>'+s.safetyCopies.map(function(c){
+        return '<tr><td class="mono">'+esc(c.name)+'</td><td class="tabular">'+fmtDateTime(c.at)+'</td><td class="tabular">'+fmtBytes(c.sizeBytes)+'</td><td style="white-space:nowrap;"><a class="btn btn-sm" href="/api/backup/safety/'+encodeURIComponent(c.name)+'" download>Download</a> <button class="btn btn-sm" data-v="backup-safety" data-name="'+esc(c.name)+'">Restore this…</button></td></tr>'; }).join("")+'</tbody></table></div></div>' : '';
+    var hist = (s.history||[]).length ? '<div class="card"><h2 style="font-size:16px;">History</h2><div class="v-log">'+s.history.map(function(h){
+      return '<div><span class="muted">'+fmtDateTime(h.at)+'</span> · <b>'+esc(h.kind)+'</b> · '+esc(h.by||"")+(h.filename?' · '+esc(h.filename):'')+(h.sizeBytes?' · '+fmtBytes(h.sizeBytes):'')+(h.detail?' — '+esc(h.detail):'')+'</div>'; }).join("")+'</div></div>' : '';
+    return status+restore+safety+hist;
+  }
+  function vBackupPreview(){
+    var p = V.b.preview, b = p.backup, l = p.live;
+    function row(label, k){ var a = b[k], c = l[k]; return '<tr><td>'+label+'</td><td class="tabular">'+(a==null?"—":a)+'</td><td class="tabular">'+(c==null?"—":c)+'</td></tr>'; }
+    var warns = [];
+    if(p.olderThanLive) warns.push("This backup is <b>older</b> than the data on the server — entries made since will be lost.");
+    if(p.fewerEntriesThanLive) warns.push("It holds <b>fewer entries</b> ("+b.entries+") than the server now has ("+l.entries+").");
+    if((p.olderSchema||[]).length) warns.push("It was made by an older version of the app. It will be brought up to date automatically as it is restored.");
+    var origin = p.matchesDownload ? '<div class="v-ok">✓ This is a file this app produced — downloaded '+fmtDateTime(p.matchesDownload.at)+' by '+esc(p.matchesDownload.by||"")+'.</div>'
+      : '<div class="v-warn">This file was not downloaded from this server (or the record of it is gone). It passed every structural check, but make sure it is the one you mean.</div>';
+    return '<div class="v-preview"><div class="form-section-title">What would change</div>'+origin+
+      '<div class="table-wrap" style="margin-top:10px;"><table><thead><tr><th></th><th>In the file</th><th>On the server now</th></tr></thead><tbody>'+
+        row("People","users")+row("Entries","entries")+row("Postings","postings")+row("Sign-off records","approvals")+
+        '<tr><td>Newest entry saved</td><td class="tabular">'+(b.newestEntryAt?fmtDateTime(b.newestEntryAt):"—")+'</td><td class="tabular">'+(l.newestEntryAt?fmtDateTime(l.newestEntryAt):"—")+'</td></tr></tbody></table></div>'+
+      warns.map(function(w){ return '<div class="notice-banner">'+w+'</div>'; }).join("")+
+      '<div class="v-confirm"><div class="form-section-title">Confirm</div>'+
+        '<div class="row2"><div class="field"><label for="b-pw">Your password</label><input id="b-pw" type="password" autocomplete="current-password" data-vin="b.pw"></div>'+
+        '<div class="field"><label for="b-word">Type RESTORE</label><input id="b-word" type="text" autocomplete="off" data-vin="b.word" data-vcalc="restore" placeholder="RESTORE"></div></div>'+
+        '<p class="hint" style="margin-bottom:10px;">Everyone is signed out when it finishes, including you. The file’s own accounts replace the current ones.</p>'+
+        '<div class="btn-row"><button class="btn" data-v="backup-cancel">Cancel</button> <button class="btn btn-danger" id="b-apply" data-v="backup-apply" disabled>Replace everything with this backup</button></div></div></div>';
+  }
+  async function vBackupDownload(){
+    V.b.busy = "dl"; render();
+    try{
+      var res = await fetch("/api/backup/download",{ method:"POST", credentials:"same-origin" });
+      if(!res.ok){ var j = null; try{ j = await res.json(); }catch(e){} throw new Error((j&&(j.detail||j.error))||("Download failed ("+res.status+")")); }
+      var blob = await res.blob(), name = res.headers.get("X-Backup-Name") || "ent-logbook-backup.db";
+      var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+      await vLoadBackup(); V.b.busy = false; render(); toast("Backup downloaded — "+name+". Keep it somewhere safe.");
+    }catch(e){ V.b.busy = false; render(); toast(e.message || "Could not download."); }
+  }
+  async function vBackupCheck(){
+    var f = V.b.file; if(!f) return;
+    V.b.busy = "chk"; V.b.restoreErr = ""; V.b.preview = null; V.b.pw = ""; V.b.word = ""; render();
+    try{
+      var fd = new FormData(); fd.append("file", f, f.name);
+      var res = await fetch("/api/backup/restore/preview",{ method:"POST", body: fd, credentials:"same-origin" });
+      var data = null; try{ data = await res.json(); }catch(e){}
+      if(!res.ok) throw new Error((data&&(data.error||data.detail))||("Could not read that file ("+res.status+")"));
+      V.b.preview = data.preview;
+    }catch(e){ V.b.restoreErr = e.message; }
+    V.b.busy = false; render();
+  }
+  async function vBackupSafety(name){
+    V.b.restoreErr = ""; V.b.preview = null; V.b.pw = ""; V.b.word = "";
+    try{ V.b.preview = (await api("POST","/backup/restore/preview",{ safety: name })).preview; }catch(e){ V.b.restoreErr = e.message; }
+    render();
+    var c = el("b-pw"); if(c && c.scrollIntoView) c.scrollIntoView({ block:"center" });
+  }
+  async function vBackupApply(){
+    var p = V.b.preview; if(!p) return;
+    V.b.busy = "apply"; render();
+    try{
+      var r = await api("POST","/backup/restore/apply",{ token: p.token, password: V.b.pw, confirm: V.b.word });
+      V.b = { status:null, preview:null, file:null, busy:false, pw:"", word:"" };
+      state.user = null; state.capabilities = null; navFrames.length = 0; state.authMode = "login"; render();
+      toast("Restored. The previous state was kept as “"+r.safetyCopy+"”. Sign in again.");
+    }catch(e){ V.b.busy = false; V.b.restoreErr = e.message || "Could not restore."; V.b.pw = ""; render(); }
+  }
+
+  /* ------------ ALERTS (Developer: compose, manage, automatic rules) ----------- */
+  var AUD_ROLES = [["resident","PG Residents"],["senior_resident","Senior Residents"],["fellow","Fellows"],["consultant","Consultants"],
+                   ["hod","Head of Department"],["coordinator","Course Coordinators"],["head_of_unit","Heads of Unit"],["developer","Developers"]];
+  var RULE_ORDER = ["posting_ending","unposted","appointment_ending","vacancies","course_ending","backup_due"];
+  async function vLoadAlertsManage(){
+    try{
+      var r = await api("GET","/alerts/manage"); V.a.manage = r.alerts; V.a.rules = r.rules; V.a.err = "";
+      if(!V.a.draft) V.a.draft = blankAlert();
+      if(!state.devUsersLoaded){ await loadDevUsers(); }
+      if(!V.p.cat){ try{ V.p.cat = await api("GET","/permissions/catalogue"); }catch(e){} }
+      vAudPreviewSoon();
+    }catch(e){ V.a.err = e.message || "Could not load alerts."; }
+  }
+  function blankAlert(){ return { id:null, title:"", body:"", severity:"info", kind:"all", roles:[], units:[], users:[], perm:"", startsAt:"", expiresAt:"", userQ:"" }; }
+  function audOf(d){
+    if(d.kind==="all") return { all:true };
+    if(d.kind==="group") return { roles:d.roles, units:d.units };
+    if(d.kind==="users") return { users:d.users };
+    return { perm:d.perm };
+  }
+  function audToDraft(a, d){
+    if(a.all) d.kind = "all";
+    else if(a.users && !a.roles && !a.units && !a.perm){ d.kind = "users"; d.users = a.users.slice(); }
+    else if(a.perm){ d.kind = "perm"; d.perm = a.perm; }
+    else { d.kind = "group"; d.roles = (a.roles||[]).slice(); d.units = (a.units||[]).slice(); }
+  }
+  function audSummary(a){
+    if(a.all) return "Everyone";
+    var parts = [];
+    if(a.roles && a.roles.length) parts.push(a.roles.map(function(r){ var m = AUD_ROLES.filter(function(x){ return x[0]===r; })[0]; return m?m[1]:r; }).join(", "));
+    if(a.units && a.units.length) parts.push("in "+a.units.map(unitShort).join(", "));
+    if(a.users && a.users.length) parts.push(a.users.length<=3 ? a.users.join(", ") : a.users.length+" named people");
+    if(a.perm){ var m = V.p.cat && V.p.cat.permissions.filter(function(p){ return p.key===a.perm; })[0]; parts.push("holders of “"+(m?m.label:a.perm)+"”"); }
+    return parts.join(" · ") || "—";
+  }
+  var __audTimer = null;
+  function vAudPreviewSoon(){
+    clearTimeout(__audTimer);
+    var d = V.a.draft; if(!d) return;
+    var empty = (d.kind==="group" && !d.roles.length && !d.units.length) || (d.kind==="users" && !d.users.length) || (d.kind==="perm" && !d.perm);
+    if(empty){ V.a.preview = null; V.a.previewErr = "Choose who this is for."; var b0 = el("v-aud-preview"); if(b0) b0.innerHTML = audPreviewHtml(); return; }
+    __audTimer = setTimeout(async function(){
+      try{ V.a.preview = await api("POST","/alerts/audience-preview",{ audience: audOf(d) }); V.a.previewErr = ""; }
+      catch(e){ V.a.preview = null; V.a.previewErr = e.message; }
+      var box = el("v-aud-preview"); if(box) box.innerHTML = audPreviewHtml();
+    }, 250);
+  }
+  function audPreviewHtml(){
+    if(V.a.previewErr) return '<span class="muted">'+esc(V.a.previewErr)+'</span>';
+    if(!V.a.preview) return '<span class="muted">Counting…</span>';
+    var p = V.a.preview;
+    return '<b>'+plural(p.count,"person","people")+'</b> will see this'+(p.sample.length?' <span class="muted">— '+p.sample.slice(0,6).map(function(s){ return esc(s.displayName); }).join(", ")+(p.count>6?", …":"")+'</span>':'');
+  }
+  function renderDevAlerts(){
+    if(!V.a.manage) return V.a.err ? vErr(V.a.err) : skeletonTable(5);
+    var d = V.a.draft || blankAlert();
+    var userMatches = (state.devUsers||[]).filter(function(u){
+      var q = (d.userQ||"").toLowerCase();
+      return u.approvalStatus!=="pending" && u.lifecycle!=="deleted" && (!q || (u.displayName+" "+u.username).toLowerCase().indexOf(q)!==-1) && d.users.indexOf(u.username)===-1;
+    }).slice(0,8);
+    var perms = V.p.cat ? V.p.cat.permissions.filter(function(p){ return !p.reserved; }) : [];
+    var audience = '<div class="field"><label>Who should see it?</label><div class="v-aud-kinds">'+
+      [["all","Everyone"],["group","A group"],["users","Particular people"],["perm","People who can…"]].map(function(k){
+        return '<label class="v-pill'+(d.kind===k[0]?" on":"")+'"><input type="radio" name="a-kind" data-vin="a.draft.kind" data-vaud="1" value="'+k[0]+'"'+(d.kind===k[0]?" checked":"")+'>'+k[1]+'</label>'; }).join("")+'</div></div>'+
+      (d.kind==="group" ? '<div class="field"><label>Roles <span class="muted">(leave all unticked for any role)</span></label><div class="v-units">'+AUD_ROLES.map(function(r){
+          return '<label class="v-check"><input type="checkbox" data-v-aud-role="'+r[0]+'"'+(d.roles.indexOf(r[0])!==-1?" checked":"")+'> <span>'+r[1]+'</span></label>'; }).join("")+'</div></div>'+
+        '<div class="field"><label>Units <span class="muted">(narrows the roles to people in those units — their home unit, or where a trainee is posted today)</span></label>'+unitChecklist("aud:units", d.units)+'</div>' : '')+
+      (d.kind==="users" ? '<div class="field"><label for="a-uq">Add people</label><input id="a-uq" type="search" data-vin="a.draft.userQ" data-vrefresh="a-ulist" placeholder="Type a name…" value="'+esc(d.userQ)+'" autocomplete="off">'+
+          '<div class="v-pick" id="a-ulist">'+vAudUserOptions(userMatches)+'</div>'+
+          '<div class="v-chosen">'+d.users.map(function(u){ var m = (state.devUsers||[]).filter(function(x){ return x.username===u; })[0]; return '<span class="v-tag">'+esc(m?m.displayName:u)+' <button type="button" data-v="aud-user-del" data-u="'+esc(u)+'" aria-label="Remove">×</button></span>'; }).join("")+'</div></div>' : '')+
+      (d.kind==="perm" ? vsel("a.draft.perm","Everyone who holds this permission",[["","Choose…"]].concat(perms.map(function(p){ return [p.key,p.label]; })),{id:"a-perm"})+'<div class="hint">Follows the Permissions panel, so it stays right as people’s rights change.</div>' : '')+
+      '<div class="v-aud-preview" id="v-aud-preview">'+audPreviewHtml()+'</div>';
+    var composer = '<div class="card"><div class="section-head"><div><span class="eyebrow">Developer</span><h2>'+(d.id?"Edit alert":"New alert")+'</h2></div>'+(d.id?'<button class="btn btn-sm" data-v="alert-new">Cancel edit</button>':'')+'</div>'+
+      vErr(V.a.formErr)+
+      vtext("a.draft.title","Headline",{max:160, ph:"e.g. Logbook will be offline on Sunday 2–4 am"})+
+      '<div class="field"><label for="a-body">Details <span class="muted">(optional)</span></label><textarea id="a-body" rows="3" maxlength="2000" data-vin="a.draft.body">'+esc(d.body)+'</textarea></div>'+
+      '<div class="row3">'+vsel("a.draft.severity","Importance",[["info","Note"],["warning","Attention"],["urgent","Urgent — shown as a banner"]])+
+        vtext("a.draft.startsAt","Show from",{type:"date", hint:"Blank = now."})+vtext("a.draft.expiresAt","Hide after",{type:"date", hint:"Blank = until you remove it."})+'</div>'+
+      audience+
+      '<div class="btn-row"><button class="btn btn-primary" data-v="alert-send">'+(d.id?"Save changes":"Send alert")+'</button></div></div>';
+    var rows = V.a.manage.filter(function(a){ return a.kind==="manual"; });
+    var autos = V.a.manage.filter(function(a){ return a.kind==="system" && !a.resolvedAt; });
+    function stateChip(a){ return {live:["Live","chip-green"],scheduled:["Scheduled","chip-teal"],expired:["Ended","chip-grey"],muted:["Muted","chip-amber"],resolved:["Cleared","chip-grey"]}[a.state] || ["","chip-grey"]; }
+    function alertRow(a){
+      var sc = stateChip(a);
+      return '<tr><td><div><b>'+esc(a.title)+'</b></div><div class="muted v-uuser">'+esc(audSummary(a.audience))+'</div></td><td>'+chipHtml(ALERT_SEV[a.severity][0],ALERT_SEV[a.severity][1])+'</td><td>'+chipHtml(sc[0],sc[1])+'</td>'+
+        '<td class="tabular">'+a.read+' / '+a.recipients+'</td><td style="white-space:nowrap;">'+
+        (a.kind==="manual" ? '<button class="btn btn-sm" data-v="alert-edit" data-id="'+a.id+'">Edit</button> ' : '')+
+        '<button class="btn btn-sm" data-v="alert-mute" data-id="'+a.id+'" data-next="'+(a.active?"false":"true")+'">'+(a.active?"Mute":"Unmute")+'</button>'+
+        (a.kind==="manual" ? ' <button class="btn btn-sm btn-danger" data-v="alert-del" data-id="'+a.id+'">Delete</button>' : '')+'</td></tr>';
+    }
+    var manual = '<div class="card"><h2 style="font-size:16px; margin-bottom:10px;">Alerts you have written</h2>'+
+      (rows.length ? '<div class="table-wrap"><table class="v-stack"><thead><tr><th>Alert</th><th>Importance</th><th>State</th><th>Read</th><th></th></tr></thead><tbody>'+rows.map(alertRow).join("")+'</tbody></table></div>' : '<div class="empty-state">None yet.</div>')+'</div>';
+    var rules = V.a.rules, RL = {
+      posting_ending: "A trainee’s posting is about to end", unposted: "A trainee has no current posting",
+      appointment_ending: "An HOD / Coordinator / Head of Unit appointment is about to end", vacancies: "A post is vacant (HOD, Coordinator, a unit’s Head)",
+      course_ending: "A trainee’s course is about to finish", backup_due: "No backup downloaded recently (to the Developer)" };
+    var rulesCard = '<div class="card"><div class="section-head"><h2 style="font-size:16px;">Automatic alerts</h2><button class="btn btn-sm" data-v="rules-sweep">Check now</button></div>'+
+      '<p class="muted" style="font-size:13px; margin-bottom:12px;">These raise and clear themselves from what is in the logbook. They are worked out whenever someone uses the app (at most every few minutes), so if nobody opens it, nothing is raised until somebody does.</p>'+
+      '<div class="v-rules">'+RULE_ORDER.map(function(k){
+        var r = rules[k]; if(!r) return "";
+        return '<div class="v-rule"><label class="v-check"><input type="checkbox" data-v-rule="'+k+'" data-f="enabled"'+(r.enabled?" checked":"")+'> <span>'+esc(RL[k])+'</span></label>'+
+          (r.leadDays!=null ? '<span class="v-rule-n">warn <input type="number" min="1" max="365" data-v-rule="'+k+'" data-f="leadDays" value="'+r.leadDays+'"> days ahead</span>' : '')+
+          (r.everyDays!=null ? '<span class="v-rule-n">every <input type="number" min="0" max="365" data-v-rule="'+k+'" data-f="everyDays" value="'+r.everyDays+'"> days</span>' : '')+'</div>';
+      }).join("")+'</div>'+
+      (autos.length ? '<h3 style="font-size:13.5px; margin:16px 0 8px;">Raised right now ('+autos.length+')</h3><div class="table-wrap"><table class="v-stack"><thead><tr><th>Alert</th><th>Importance</th><th>State</th><th>Read</th><th></th></tr></thead><tbody>'+autos.map(alertRow).join("")+'</tbody></table></div>'
+        : '<p class="muted" style="font-size:13px; margin-top:12px;">Nothing is being raised at the moment.</p>')+'</div>';
+    return composer+manual+rulesCard;
+  }
+  function vAudUserOptions(list){
+    return list.length ? list.map(function(u){ return '<button type="button" class="v-opt" data-v="aud-user-add" data-u="'+esc(u.username)+'">'+esc(u.displayName)+' <span class="muted">'+esc(roleLabel(u.role))+'</span></button>'; }).join("") : '<div class="muted" style="padding:6px 2px; font-size:12.5px;">No one else matches.</div>';
+  }
+  async function vSendAlert(){
+    var d = V.a.draft; V.a.formErr = "";
+    var body = { title:d.title, body:d.body, severity:d.severity, audience:audOf(d), startsAt:d.startsAt||null, expiresAt:d.expiresAt||null };
+    try{
+      if(d.id) await api("PATCH","/alerts/"+d.id, body); else await api("POST","/alerts", body);
+      V.a.draft = blankAlert(); await vLoadAlertsManage(); await vLoadAlerts(true); render(); toast(d.id ? "Alert updated." : "Alert sent.");
+    }catch(e){ V.a.formErr = e.message || "Could not send."; render(); }
+  }
+
+  /* ------------ view dispatch + loading --------------------------------------- */
+  function vRenderView(){
+    switch(state.view){
+      case "dev-permissions": return renderDevPermissions();
+      case "dev-user-edit": return renderUserEdit();
+      case "dev-alerts": return renderDevAlerts();
+      case "dev-courses": return renderDevCourses();
+      case "dev-backups": return renderDevBackups();
+    }
+    return "";
+  }
+  async function vLoadView(v){
+    state.loading = false;
+    render();
+    if(v==="dev-permissions"){
+      await vLoadPerms();
+      if(V.p.tab==="audit") await vLoadAudit();
+      if(V.p.who && !V.p.whoData){ V.p.whoData = null; try{ V.p.whoData = await api("GET","/permissions/people/"+encodeURIComponent(V.p.who)); }catch(e){} }
+    }
+    else if(v==="dev-courses"){ await vLoadCourseList(); if(!V.c.edit) V.c.err = ""; }
+    else if(v==="dev-backups"){ await vLoadBackup(); }
+    else if(v==="dev-alerts"){ await vLoadAlertsManage(); }
+    else if(v==="dev-user-edit" && !V.ue){ state.view = "developer-users"; loadForView(); return; }
+    render();
+  }
+  async function vLoadAudit(){ try{ V.p.audit = (await api("GET","/permissions/audit")).audit; }catch(e){ V.p.audit = []; } }
+  var __lastAlertPull = 0;
+  function vTick(){
+    if(!state.user) return;
+    if(Date.now()-__lastAlertPull < 45000) return;
+    __lastAlertPull = Date.now();
+    vLoadAlerts(false);
+  }
+  function vNavActive(key){
+    if(state.view==="dev-user-edit") return key===(V.ueFrom==="dev-permissions" ? "dev-permissions" : (V.ueFrom||"developer-users"));
+    return state.view===key;
+  }
+  setInterval(function(){
+    if(state.user && !document.hidden){ __lastAlertPull = Date.now(); vLoadAlerts(true); }
+  }, 300000);
+
+  /* ------------ the one delegated listener ------------------------------------- */
+  var RERENDER_ON_CHANGE = { "c.edit.scope":1, "c.edit.allowPeripheral":1, "c.edit.durationMonths":1, "ue.draft.courseId":1, "ue.draft.role":1,
+                              "a.draft.kind":1, "a.draft.severity":0 };
+  function vReadInput(t){
+    var type = t.getAttribute("type");
+    if(t.getAttribute("data-vtype")==="bool" || type==="checkbox") return !!t.checked;
+    if(type==="number"){ return t.value; }
+    return t.value;
+  }
+  function vPaintUe(){
+    var ue = V.ue; if(!ue || !ue.draft) return;
+    var s = el("ue-study"); if(s) s.innerHTML = studyLine(courseById(ue.draft.courseId), ue.draft.joinedYm);
+    var n = Object.keys(ueChanged()).length, bar = document.querySelector(".v-savebar");
+    if(bar){ bar.classList.toggle("show", n>0); var sp = bar.querySelector("span"); if(sp) sp.textContent = plural(n,"unsaved change"); }
+  }
+  function vPaintPersonBar(){
+    var n = vDraftCount(), bar = document.querySelector(".v-savebar");
+    if(bar){ bar.classList.toggle("show", n>0); var sp = bar.querySelector("span"); if(sp) sp.textContent = plural(n,"unsaved change");
+      var sv = bar.querySelector('[data-v="pperson-save"]'); if(sv) sv.textContent = "Save "+n; }
+  }
+  // Course + joining month on the sign-up and create-account forms. Nothing
+  // is kept in state there (the forms read the DOM on submit), so the
+  // computed line is painted straight into its own element.
+  function vCourseFields(prefix, role){
+    var cs = coursesForRole(role);
+    var cur = cs.length ? cs[0] : null;
+    return '<div class="row2"><div class="field"><label for="'+prefix+'-course">Course</label><select id="'+prefix+'-course" data-vcalcx="'+prefix+'">'+
+        (cs.length ? cs.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+' · '+c.durationMonths+' months</option>'; }).join("") : '<option value="">— none set up —</option>')+'</select></div>'+
+      '<div class="field"><label for="'+prefix+'-joined">Joined (month and year)</label><input id="'+prefix+'-joined" type="month" data-vcalcx="'+prefix+'" placeholder="2025-08"></div></div>'+
+      '<div class="hint" id="'+prefix+'-study" style="margin:-6px 0 12px;">'+studyLine(cur, "")+'</div>'+
+      '<div class="field"><label for="'+prefix+'-pgYear">Batch label <span class="muted">(only used until a joining month is given)</span></label><select id="'+prefix+'-pgYear">'+opts_(state.config.pgYears, state.config.pgYears[0])+'</select></div>';
+  }
+  function vPaintCourseFields(prefix){
+    var c = el(prefix+"-course"), j = el(prefix+"-joined"), out = el(prefix+"-study");
+    if(!out) return;
+    out.innerHTML = studyLine(courseById(c && c.value), j && j.value);
+  }
+  document.addEventListener("input", function(ev){
+    var t = ev.target;
+    if(t.matches && t.matches("[data-vcalcx]")){ vPaintCourseFields(t.getAttribute("data-vcalcx")); return; }
+    if(t.matches && t.matches("[data-vin]")){
+      var path = t.getAttribute("data-vin");
+      if(t.type==="radio" || t.type==="checkbox" || t.tagName==="SELECT") return;     // handled on "change"
+      vset(path, vReadInput(t));
+      vAfterInput(t, path, false);
+    }
+    else if(t.matches && t.matches("[data-v-pnote]")){
+      var k = t.getAttribute("data-v-pnote"); vDraftFor(k).note = t.value; vPaintPersonBar();
+    }
+    else if(t.matches && t.matches("[data-v-joined]")){
+      V.c.joined[t.getAttribute("data-v-joined")] = t.value; vPaintJoined(t);
+    }
+  });
+  function vAfterInput(t, path, fromChange){
+    var list = t.getAttribute("data-vlist");
+    // A text box fires "change" when it loses focus -- i.e. on the mousedown of
+    // the very row the person is about to click. Repainting the list then
+    // swaps that row out from under the click and the click is lost. "input"
+    // has already repainted by this point, so a blur needs nothing.
+    if(fromChange && t.tagName!=="SELECT" && t.type!=="radio" && t.type!=="checkbox") list = null;
+    if(list==="v-ulist"){ var box = el("v-ulist"); if(box) box.innerHTML = userListRows(); }
+    else if(list==="v-perm-list"){
+      var rows = (V.p.people||[]).filter(function(p){ var q = (V.p.q||"").toLowerCase(); return !q || p.displayName.toLowerCase().indexOf(q)!==-1 || p.username.toLowerCase().indexOf(q)!==-1; });
+      var b2 = el("v-perm-list"); if(b2) b2.innerHTML = vPermPeopleRows(rows);
+    }
+    if(t.getAttribute("data-vcalc")==="ue") vPaintUe();
+    else if(path && path.indexOf("ue.draft.")===0) vPaintUe();
+    if(t.getAttribute("data-vcheck")==="rename") vRenameCheck();
+    if(t.getAttribute("data-vcalc")==="restore"){ var b = el("b-apply"); if(b) b.disabled = !(V.b.word==="RESTORE" && V.b.pw); }
+    if(path==="b.pw"){ var b3 = el("b-apply"); if(b3) b3.disabled = !(V.b.word==="RESTORE" && V.b.pw); }
+    if(t.getAttribute("data-vrefresh")==="a-ulist" && !(fromChange && t.tagName!=="SELECT")){
+      var d = V.a.draft, q = (d.userQ||"").toLowerCase();
+      var m = (state.devUsers||[]).filter(function(u){ return u.approvalStatus!=="pending" && u.lifecycle!=="deleted" && (!q || (u.displayName+" "+u.username).toLowerCase().indexOf(q)!==-1) && d.users.indexOf(u.username)===-1; }).slice(0,8);
+      var bx = el("a-ulist"); if(bx) bx.innerHTML = vAudUserOptions(m);
+    }
+  }
+  /* A text box fires "change" when it loses focus, and a click on a button
+     starts by taking focus -- so "change" lands BETWEEN the mouse going down
+     and coming up. Anything it repaints or disables (the Save button, a row
+     of a list) is then not what the mouse comes back up on, and the click is
+     silently lost: type a duration, press Save, nothing happens. So while a
+     pointer is held down, the change is held too and handled just after the
+     click completes. */
+  var __ptrDown = false;
+  document.addEventListener("pointerdown", function(){ __ptrDown = true; }, true);
+  document.addEventListener("pointerup", function(){ setTimeout(function(){ __ptrDown = false; }, 0); }, true);
+  document.addEventListener("pointercancel", function(){ __ptrDown = false; }, true);
+  document.addEventListener("change", function(ev){
+    var tt = ev.target, tag = tt && tt.tagName, ty = tt && tt.type;
+    var typed = tag==="TEXTAREA" || (tag==="INPUT" && /^(text|search|email|tel|url|number|password)$/.test(ty||"text"));
+    if(!__ptrDown || !typed){ vOnChange(ev); return; }
+    var done = false;
+    function run(){ if(done) return; done = true; document.removeEventListener("click", onClick, true); setTimeout(function(){ vOnChange(ev); }, 0); }
+    function onClick(){ run(); }
+    document.addEventListener("click", onClick, true);
+    setTimeout(run, 1500);     // a press that never becomes a click (drag away)
+  });
+  function vOnChange(ev){
+    var t = ev.target; if(!t.matches) return;
+    if(t.matches("[data-vcalcx]")){ vPaintCourseFields(t.getAttribute("data-vcalcx")); return; }
+    if(t.matches("[data-vin]")){
+      var path = t.getAttribute("data-vin");
+      if(t.type==="radio" && !t.checked) return;
+      vset(path, vReadInput(t));
+      vAfterInput(t, path, true);
+      if(t.getAttribute("data-vaud")){ render(); vAudPreviewSoon(); }
+      else if(RERENDER_ON_CHANGE[path]){ render(); }
+      if(path==="a.draft.perm") vAudPreviewSoon();
+      if(path==="ue.draft.courseId" || path==="ue.draft.role"){ /* render happened above */ }
+    }
+    else if(t.matches("[data-v-tplperm]")){
+      var k = t.getAttribute("data-v-tplperm"); if(t.value==="off") delete V.p.tplDraft[k]; else V.p.tplDraft[k] = t.value; render();
+    }
+    else if(t.matches("[data-v-pmode]")){
+      var key = t.getAttribute("data-v-pmode"), d = vDraftFor(key); d.effect = t.value;
+      if(d.effect==="deny"){ d.units = []; }
+      vDraftPrune(key); render();
+    }
+    else if(t.matches("[data-v-pscope]")){
+      var key2 = t.getAttribute("data-v-pscope"); vDraftFor(key2).scope = t.value; vDraftPrune(key2); render();
+    }
+    else if(t.matches("[data-v-unit]")){
+      var pre = t.getAttribute("data-v-unit"), val = t.value, on = t.checked;
+      function toggle(arr){ var i = arr.indexOf(val); if(on && i===-1) arr.push(val); if(!on && i!==-1) arr.splice(i,1); return arr; }
+      if(pre.indexOf("ppu:")===0){ var pk = pre.slice(4); var dd = vDraftFor(pk); toggle(dd.units); vDraftPrune(pk); vPaintPersonBar(); }
+      else if(pre==="cedit:units") toggle(V.c.edit.units);
+      else if(pre==="cedit:peripheralUnits") toggle(V.c.edit.peripheralUnits);
+      else if(pre==="aud:units"){ toggle(V.a.draft.units); vAudPreviewSoon(); }
+    }
+    else if(t.matches("[data-v-aud-role]")){
+      var role = t.getAttribute("data-v-aud-role"), arr = V.a.draft.roles, i = arr.indexOf(role);
+      if(t.checked && i===-1) arr.push(role); if(!t.checked && i!==-1) arr.splice(i,1); vAudPreviewSoon();
+    }
+    else if(t.matches("[data-v-rule]")){ vSaveRule(t); }
+    else if(t.matches("[data-v-file]")){ V.b.file = t.files && t.files[0] || null; V.b.preview = null; V.b.restoreErr = ""; render(); }
+    else if(t.matches("[data-v-joined]")){ V.c.joined[t.getAttribute("data-v-joined")] = t.value; vPaintJoined(t, true); }
+  }
+  function vPaintJoined(t, full){
+    var u = t.getAttribute("data-v-joined"), c = V.c.people && V.c.people.course;
+    var cell = document.querySelector('[data-v-now="'+u+'"]');
+    var live = studyProgress(c, t.value);
+    if(cell) cell.innerHTML = live ? (live.status==="completed"?'<span class="muted">completed</span>':live.status==="not_started"?'<span class="muted">not started</span>':'<b>'+esc(live.label)+'</b>') : '<span class="muted">—</span>';
+    var n = Object.keys(V.c.joined).length, b = document.querySelector('[data-v="course-joined-save"]');
+    if(b){ b.disabled = !n; b.textContent = "Save "+(n?plural(n,"joining date"):"joining dates"); }
+  }
+  async function vSaveRule(t){
+    var k = t.getAttribute("data-v-rule"), f = t.getAttribute("data-f"), body = {}; body[k] = {};
+    body[k][f] = f==="enabled" ? !!t.checked : parseInt(t.value,10);
+    try{
+      var r = await api("PUT","/alerts/rules",{ rules: body }); V.a.rules = r.rules; await vLoadAlertsManage(); await vLoadAlerts(true); render(); toast("Saved.");
+    }catch(e){ toast(e.message || "Could not save."); await vLoadAlertsManage(); render(); }
+  }
+
+  var CLICK = {
+    "bell": function(){
+      if(V.alerts.open){ navBack(); return; }
+      navOpenOverlay(function(){ V.alerts.open = true; }, function(){ V.alerts.open = false; });
+      vLoadAlerts(false);
+    },
+    "bell-close": function(){ navBack(); },
+    "alert-readall": async function(){ try{ await api("POST","/alerts/read-all"); }catch(e){} await vLoadAlerts(); },
+    "alert-read": function(t){ vAlertAct(t.getAttribute("data-id"), "read"); },
+    "alert-dismiss": function(t){ vAlertAct(t.getAttribute("data-id"), "dismiss"); },
+    "alert-go": function(t){
+      var id = t.getAttribute("data-id"), view = t.getAttribute("data-view");
+      api("POST","/alerts/"+id+"/read").catch(function(){});
+      goView(view);
+    },
+    // permissions
+    "perm-tab": async function(t){ V.p.tab = t.getAttribute("data-tab"); if(V.p.tab==="audit") await vLoadAudit(); render(); },
+    "perm-tpl": function(t){ vPickTemplate(t.getAttribute("data-key")); render(); },
+    "tpl-save": vSaveTemplate, "tpl-reset": vResetTemplate,
+    "perm-who": function(t){ vOpenPerson(t.getAttribute("data-u")); },
+    "pperson-save": vSavePerson,
+    "pperson-discard": function(){ V.p.draft = {}; render(); },
+    "goto-user": function(t){ vOpenUser(t.getAttribute("data-u")); },
+    "goto-perms": function(t){ var u = t.getAttribute("data-u"); V.p.tab = "people"; V.p.who = u; V.p.whoData = null; V.p.draft = {}; goView("dev-permissions"); },
+    "goto-roles": function(){ goView("developer-roles"); },
+    // users
+    "user-open": function(t){ vOpenUser(t.getAttribute("data-u")); },
+    "rename-open": function(){ V.ue.rename = { open:true, value:"", status:null, detail:"", busy:false }; render(); var i = el("ue-newname"); if(i) i.focus(); },
+    "rename-cancel": function(){ V.ue.rename.open = false; render(); },
+    "rename-go": vDoRename,
+    "user-save": vSaveUser,
+    "user-discard": function(){ vResetUserDraft(); render(); },
+    "user-active": function(t){ vUserActive(t.getAttribute("data-next")==="true"); },
+    "user-delete": vUserDelete,
+    // courses
+    "course-new": function(){ V.c.edit = blankCourse(); V.c.err = ""; render(); },
+    "course-edit": function(t){ var c = V.c.list.filter(function(x){ return x.id===t.getAttribute("data-id"); })[0]; if(c){ V.c.edit = courseToEdit(c); V.c.err = ""; render(); var e = document.querySelector(".v-editor"); if(e && e.scrollIntoView) e.scrollIntoView({block:"start"}); } },
+    "course-cancel": function(){ V.c.edit = null; V.c.err = ""; render(); },
+    "course-save": vSaveCourse, "course-delete": vDeleteCourse,
+    "course-people": function(t){ vLoadCoursePeople(t.getAttribute("data-id")); },
+    "course-people-close": function(){ V.c.peopleFor = null; V.c.people = null; render(); },
+    "course-joined-save": vSaveJoined,
+    // backups
+    "backup-download": vBackupDownload, "backup-check": vBackupCheck,
+    "backup-cancel": function(){ V.b.preview = null; V.b.pw = ""; V.b.word = ""; render(); },
+    "backup-apply": vBackupApply,
+    "backup-safety": function(t){ vBackupSafety(t.getAttribute("data-name")); },
+    // alerts (developer)
+    "alert-new": function(){ V.a.draft = blankAlert(); V.a.formErr = ""; vAudPreviewSoon(); render(); },
+    "alert-send": vSendAlert,
+    "alert-edit": function(t){
+      var a = V.a.manage.filter(function(x){ return String(x.id)===t.getAttribute("data-id"); })[0]; if(!a) return;
+      var d = blankAlert(); d.id = a.id; d.title = a.title; d.body = a.body; d.severity = a.severity;
+      d.startsAt = (a.startsAt||"").slice(0,10); d.expiresAt = (a.expiresAt||"").slice(0,10); audToDraft(a.audience, d);
+      V.a.draft = d; V.a.formErr = ""; vAudPreviewSoon(); render(); window.scrollTo(0,0);
+    },
+    "alert-mute": async function(t){ try{ await api("PATCH","/alerts/"+t.getAttribute("data-id"), { active: t.getAttribute("data-next")==="true" }); await vLoadAlertsManage(); await vLoadAlerts(true); render(); }catch(e){ toast(e.message); } },
+    "alert-del": async function(t){ if(!confirm("Delete this alert for everyone?")) return; try{ await api("DELETE","/alerts/"+t.getAttribute("data-id")); await vLoadAlertsManage(); await vLoadAlerts(true); render(); }catch(e){ toast(e.message); } },
+    "aud-user-add": function(t){ var u = t.getAttribute("data-u"); if(V.a.draft.users.indexOf(u)===-1) V.a.draft.users.push(u); V.a.draft.userQ = ""; vAudPreviewSoon(); render(); },
+    "aud-user-del": function(t){ var u = t.getAttribute("data-u"), a = V.a.draft.users, i = a.indexOf(u); if(i!==-1) a.splice(i,1); vAudPreviewSoon(); render(); },
+    "rules-sweep": async function(){ try{ var r = await api("POST","/alerts/sweep"); await vLoadAlertsManage(); await vLoadAlerts(true); render(); toast("Checked — "+r.sweep.live+" condition"+(r.sweep.live===1?"":"s")+" live."); }catch(e){ toast(e.message); } }
+  };
+  document.addEventListener("click", function(ev){
+    var t = ev.target && ev.target.closest ? ev.target.closest("[data-v]") : null;
+    if(!t) return;
+    var a = t.getAttribute("data-v");
+    if(a==="bell-close-bg"){ if(ev.target===t) navBack(); return; }
+    if(CLICK[a]){ ev.preventDefault(); CLICK[a](t, ev); }
+  });
+  document.addEventListener("keydown", function(ev){
+    if((ev.key==="Enter" || ev.key===" ") && ev.target && ev.target.classList && ev.target.classList.contains("v-urow")){
+      ev.preventDefault(); vOpenUser(ev.target.getAttribute("data-u"));
+    }
+  });
 
   boot();
 })();
