@@ -55,7 +55,7 @@ DEFAULT_RULES = {
 }
 
 SWEEP_EVERY_SECONDS = 300
-_last_sweep = 0.0
+_last_sweep = None      # None = never swept in this process (monotonic() can be small just after a boot)
 
 
 def _now():
@@ -445,7 +445,7 @@ def sweep(db, force=False):
     """Bring the system alerts in line with the facts. Safe to call from two
     workers at once (dedupe_key is UNIQUE). Returns counts."""
     global _last_sweep
-    if not force and time.monotonic() - _last_sweep < SWEEP_EVERY_SECONDS:
+    if not force and _last_sweep is not None and time.monotonic() - _last_sweep < SWEEP_EVERY_SECONDS:
         return None
     _last_sweep = time.monotonic()
     rules = get_rules(db)

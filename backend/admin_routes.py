@@ -455,9 +455,23 @@ def alert_sweep_now():
 # ===================================================================
 @admin.get("/courses")
 def courses_public():
-    # Public, like /config: the sign-up form needs it before anyone has a
-    # session, and it is dropdown metadata.
-    return jsonify({"courses": courses_mod.list_courses(get_db(), active_only=True)})
+    # Needed before anyone has a session: the sign-up form offers a course and a
+    # joining month. So an ANONYMOUS caller gets only what that form uses -- no
+    # internal notes, no unit lists, and above all not who last edited a course
+    # (that is a Developer's username, handed to the whole internet).
+    # A signed-in caller gets the full definition, minus the editor's identity
+    # unless they may manage courses.
+    db = get_db()
+    rows = courses_mod.list_courses(db, active_only=True)
+    user = current_user()
+    if not user:
+        keep = ("id", "name", "shortName", "role", "durationMonths", "yearLabels", "startMonth", "active", "sort")
+        return jsonify({"courses": [{k: c[k] for k in keep} for c in rows]})
+    if not perms.can(user["username"], "courses.manage"):
+        for c in rows:
+            c.pop("updatedBy", None)
+            c.pop("updatedAt", None)
+    return jsonify({"courses": rows})
 
 
 @admin.get("/courses/manage")
