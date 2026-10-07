@@ -4958,6 +4958,15 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.4.1", date: "2026-10-07", title: "Two fixes found in the first diagnostics run",
+      note: "No database change. Replace backend/admin_routes.py, backend/alerts.py and static/app.js.",
+      changes: [
+        ["fixed", "<b>The course list shown on the sign-up page no longer carries internal fields.</b> Before sign-in it now returns only what the sign-up form uses. It used to include each course's internal notes, its unit lists, and the username of whoever last edited it."],
+        ["fixed", "<b>Automatic alerts could be skipped for the first five minutes after the server started.</b> The five-minute pause between checks was measured from machine start-up instead of from the last check. Rare in practice, but it delayed the first alerts after a restart."],
+        ["fixed", "<b>The person page always shows the course's full definition</b> (units and scope), not the trimmed list fetched before sign-in."]
+      ]
+    },
+    {
       version: "7.4", date: "2026-10-07", title: "Permissions, people, alerts, courses and backups",
       note: "Five Developer tools in one release. Nothing changes for anyone until the Developer changes it: the shipped permissions reproduce exactly what each role could already do, with one deliberate exception noted below.",
       changes: [
@@ -6928,6 +6937,9 @@
     navPush("view", V.ueFrom==="dev-permissions" ? "Back to permissions" : "Back to people", function(){ state.view = V.ueFrom || "developer-users"; setTimeout(loadForView, 0); });
     state.view = "dev-user-edit"; render();
     try{
+      // The course list fetched before sign-in is the trimmed public one; the
+      // full definition (units, scope) is what this page describes.
+      await vLoadCourses();
       var d = await api("GET","/users/"+encodeURIComponent(username)+"/detail");
       V.ue.detail = d; vResetUserDraft(); 
     }catch(e){ V.ue.err = e.message || "Could not open this person."; }
