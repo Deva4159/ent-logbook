@@ -18,6 +18,8 @@ from auth import (
     clear_session_cookie, verify_password,
 )
 from db import get_db
+import courses as courses_mod
+import perms
 
 api = Blueprint("api", __name__, url_prefix="/api")
 
@@ -172,21 +174,43 @@ CONSULTANT_ROLE_ASSIGNMENTS = {"head_of_unit", "coordinator", "hod"}
 
 
 # ---------------------------------------------------------------- helpers
-def row_to_user(row):
+def _course_map():
+    """Courses by id, loaded once per request."""
+    if not hasattr(g, "_course_map"):
+        g._course_map = {c["id"]: c for c in courses_mod.list_courses(get_db())}
+    return g._course_map
+
+
+def row_to_user(row, contact=False):
     if row is None:
         return None
     d = dict(row)
-    return {
+    course = _course_map().get(d.get("course_id")) if d.get("course_id") else None
+    study = courses_mod.progress(course, d.get("joined_ym")) if course else None
+    out = {
         "username": d["username"],
         "role": d["role"],
         "displayName": d["display_name"],
-        "pgYear": d["pg_year"],
+        # Once a joining month is on file the year of study is computed from
+        # it and the course, so every screen that shows "PG year" shows the
+        # live figure; the typed label is only the fallback.
+        "pgYear": (study["label"] if study and study["year"] >= 1 else d["pg_year"]),
         "designation": d["designation"],
         "unit": d["unit"],
         "active": bool(d.get("active", 1)),
         "approvalStatus": d.get("approval_status", "approved"),
         "createdAt": d["created_at"],
+        "lifecycle": d.get("lifecycle") or "active",
+        "lastSeenAt": d.get("last_seen_at"),
+        "courseId": d.get("course_id"),
+        "courseName": course["name"] if course else None,
+        "joinedYm": d.get("joined_ym"),
+        "study": study,
     }
+    if contact:
+        out["email"] = d.get("email")
+        out["phone"] = d.get("phone")
+    return out
 
 
 def get_config():
@@ -341,6 +365,7 @@ def entry_row_to_dict(row):
         "approvalState": d.get("approval_state") or "not_submitted",
         "approverUsername": d.get("approver_username"),
         "status": d.get("status") or "final",
+        "courseId": d.get("course_id"),
     }
 
 
@@ -348,7 +373,7 @@ def entry_row_to_dict(row):
 # changes, and createdAt is set once at insert and never touched by an edit.
 # rowVersion and the lock columns are transport, not content -- without
 # this every save would log "rowVersion changed 3 -> 4" as an edit.
-ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt", "rowVersion", "lock"}
+ENTRY_HISTORY_IGNORE = {"id", "authorUsername", "createdAt", "rowVersion", "lock", "courseId"}
 
 # ---------------------------------------------------------- approvals
 # Only operative records and case write-ups are signed off. Academic and
@@ -409,27 +434,34 @@ def _log_approval(db, entry_id, action, actor, comment=None,
 
 
 def _delegate_for(user, entry_row):
-    """A Head of Unit for this entry's unit, a Coordinator or the HOD may act
-    when the nominated consultant cannot. Without this, one consultant
-    leaving the department strands every pending record naming them, for
-    good. Recorded as a delegate action, never as the consultant's own.
+    """Someone holding "sign off for an absent approver" for this entry's unit
+    -- by default a Head of Unit (their units), a Coordinator or the HOD (any
+    unit) -- may act when the nominated consultant cannot. Without this, one
+    consultant leaving the department strands every pending record naming
+    them, for good. Recorded as a delegate action, never as the consultant's
+    own. A Developer never signs off.
     """
-    if user["role"] != "consultant":
+    if user["role"] == "developer":
         return False
-    caps = user_capabilities(user["username"])
-    if caps["isHod"] or caps["isCoordinator"]:
-        return True
-    if caps["isHeadOfUnit"]:
-        return entry_row["unit"] in consultant_scope(user["username"])["units"]
-    return False
+    return perms.in_scope(user["username"], "signoff.delegate", entry_row["unit"])
 
 
 def _can_decide(user, entry_row):
-    """(allowed, on_behalf_of). A trainee can never approve -- not their own
-    record, not anyone's, regardless of who is set as approver."""
-    if user["role"] != "consultant":
+    """(allowed, on_behalf_of). Nobody decides their own record, whatever
+    they hold. A trainee can only be the nominated approver if the Developer
+    has individually given a Fellow the sign-off permission, and then only on
+    a Resident's or Senior Resident's record -- never a fellow's."""
+    if user["role"] == "developer":
         return False, None
-    if entry_row["approver_username"] == user["username"]:
+    if entry_row["author_username"] == user["username"]:
+        return False, None
+    if entry_row["approver_username"] == user["username"] \
+            and perms.can(user["username"], "signoff.approve"):
+        if user["role"] == "fellow":
+            a = get_db().execute("SELECT role FROM users WHERE username = ?",
+                                 (entry_row["author_username"],)).fetchone()
+            if not a or a["role"] not in ("resident", "senior_resident"):
+                return False, None
         return True, None
     if _delegate_for(user, entry_row):
         return True, entry_row["approver_username"]
@@ -439,10 +471,13 @@ def _can_decide(user, entry_row):
 def _valid_approver(db, username):
     if not isinstance(username, str) or not username:
         return None
-    return db.execute(
-        "SELECT username FROM users WHERE username = ? AND role = 'consultant'"
+    row = db.execute(
+        "SELECT username FROM users WHERE username = ? AND role IN ('consultant','fellow')"
         " AND active = 1 AND approval_status = 'approved'", (username,)
     ).fetchone()
+    if not row or not perms.can(username, "signoff.approve"):
+        return None
+    return row
 
 
 # Sentinel for "clear the approver", distinct from approver=None meaning
@@ -480,9 +515,9 @@ def _entry_can_set_paper_status(user, entry_row):
 
 def _consultant_may_see_user(db, consultant, target):
     """The same rule the roster uses: full scope sees everyone; a
-    unit-scoped consultant sees a trainee posted to (or logging in) one of
+    unit-scoped holder sees a trainee posted to (or logging in) one of
     their units, and a consultant whose home unit is one of theirs."""
-    scope = consultant_scope(consultant)
+    scope = perms.scope_for(consultant, "view.records")
     if scope["full"]:
         return True
     units = set(scope["units"])
@@ -500,96 +535,74 @@ def _consultant_may_see_user(db, consultant, target):
     return bool(seen & units)
 
 
-def is_assignment_active(a):
-    """Is this appointment in force today?
-
-    Compared by DATE, in the server's local timezone, with the end date
-    inclusive. Two bugs sat in the old string comparison of the full
-    timestamp against datetime.utcnow():
-
-    1. The frontend sends a <input type="datetime-local"> value, which is
-       the admin's own wall clock with no timezone on it. Comparing that to
-       UTC put every appointment out by the local offset -- in IST, a Head
-       of Unit appointed "from now" had no scope at all for five and a half
-       hours, and kept it for five and a half hours after it lapsed.
-    2. A date-only end of "2026-09-25" lost to "2026-09-25T04:11:07Z" from
-       one minute past midnight, so an appointment ending today expired a
-       day early.
-
-    Taking the first 10 characters handles both the date-only and the
-    datetime-local shapes, and an appointment measured in whole days is
-    what these actually are -- nobody appoints a Head of Unit until 4pm.
-    """
-    today = datetime.date.today().isoformat()
-    start = (a.get("start_at") or "")[:10]
-    end = (a.get("end_at") or "")[:10]
-    if start and start > today:
-        return False
-    if end and end < today:
-        return False
-    return True
+# Appointments and what they confer now live in perms.py.
+is_assignment_active = perms.is_assignment_active
 
 
 def _active_role_assignments(username):
-    db = get_db()
-    rows = db.execute("SELECT * FROM role_assignments WHERE consultant_username = ?", (username,)).fetchall()
-    return [dict(r) for r in rows if is_assignment_active(dict(r))]
+    return perms.active_role_assignments(username)
 
 
-# Who can see a trainee's (PG / Senior Resident / Fellow) progress:
-#  - HOD or Course Coordinator: everyone, every unit ("full").
-#  - Head of Unit: everyone in the unit(s) they're Head of -- this is what
-#    "same rights as HOD/Coordinator" means for them: they don't need to be
-#    a Professor to see their own unit, they just aren't org-wide like HOD/
-#    Coordinator are.
-#  - A Professor-designation consultant: their own home unit only.
-#  - Any other consultant (Assistant/Associate Professor, no role
-#    assignment): nothing. This is a deliberate tightening -- every
-#    consultant with a home unit used to get that unit's roster for free.
-def consultant_scope(username):
-    db = get_db()
+def consultant_scope(username, perm="view.records"):
+    """What `perm` covers for this person: {"full": every unit, "units": [...]}.
+    Kept under its old name because the frontend's scope banner reads it;
+    the answer now comes from the permission engine, so a Head of Unit, a
+    Professor and a consultant who was individually granted the permission
+    are all the same case.
+    """
+    sc = perms.scope_for(username, perm)
     mine = _active_role_assignments(username)
-    full = any(a["assignment_role"] in ("hod", "coordinator") for a in mine)
-    hou_units = set(a["unit"] for a in mine if a["assignment_role"] == "head_of_unit" and a["unit"])
-    user = db.execute("SELECT unit, designation FROM users WHERE username = ?", (username,)).fetchone()
-    prof_units = set()
-    if user and user["unit"] and (user["designation"] or "").strip().lower() == "professor":
-        prof_units.add(user["unit"])
-    # The frontend's scope banner names which role(s) actually granted full
-    # ("as Head of Department & Course Coordinator") -- it was already
-    # written to read this (renderScopeBanner in app.js), but this endpoint
-    # never actually sent it, so that banner has been throwing (undefined
-    # .filter) and stuck the whole consultant dashboard on "Loading..." for
-    # any HOD/Coordinator ever since. `role` here (not the raw column name
-    # assignment_role) is what that existing frontend code reads.
     return {
-        "full": full,
-        "units": list(hou_units | prof_units),
+        "full": sc["full"],
+        "units": sc["units"],
         "activeAssignments": [{"role": a["assignment_role"], "unit": a["unit"]} for a in mine],
     }
 
 
 def user_capabilities(username):
+    """Flags the browser uses to decide which screens to offer. Advisory only
+    -- every endpoint re-checks. isHod/isCoordinator/isHeadOfUnit say which
+    APPOINTMENTS the person holds (for labels); what they may DO is in
+    `permissions`."""
     if not username:
-        return {"isDeveloper": False, "isHod": False, "isCoordinator": False, "isHeadOfUnit": False, "canApprove": False, "canManageProfiles": False}
+        return {"isDeveloper": False, "isHod": False, "isCoordinator": False, "isHeadOfUnit": False,
+                "canApprove": False, "canManageProfiles": False, "permissions": {}}
     db = get_db()
     row = db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
-    is_developer = bool(row and row["role"] == "developer")
     mine = _active_role_assignments(username)
-    is_hod = any(a["assignment_role"] == "hod" for a in mine)
-    is_coordinator = any(a["assignment_role"] == "coordinator" for a in mine)
-    is_head_of_unit = any(a["assignment_role"] == "head_of_unit" for a in mine)
+    pm = perms.public_map(username)
     return {
-        "isDeveloper": is_developer,
-        "isHod": is_hod,
-        "isCoordinator": is_coordinator,
-        "isHeadOfUnit": is_head_of_unit,
-        # Developer/HOD/Coordinator approve every new account; Head of Unit
-        # only ever sees fellow signups in the actual list/approve endpoints.
-        "canApprove": is_developer or is_hod or is_coordinator or is_head_of_unit,
-        # Batch/designation edits and account deletion: Developer + HOD only.
-        "canManageProfiles": is_developer or is_hod,
+        "isDeveloper": bool(row and row["role"] == "developer"),
+        "isHod": any(a["assignment_role"] == "hod" for a in mine),
+        "isCoordinator": any(a["assignment_role"] == "coordinator" for a in mine),
+        "isHeadOfUnit": any(a["assignment_role"] == "head_of_unit" for a in mine),
+        # Anyone who may approve at least one kind of sign-up.
+        "canApprove": any(k in pm for k in ("accounts.approve_trainees", "accounts.approve_fellows",
+                                            "accounts.approve_consultants")),
+        # The Manage Users list and its edits.
+        "canManageProfiles": "accounts.view_directory" in pm,
+        "permissions": pm,
     }
+
+
+def require_perm(*keys, any_of=False):
+    """Route guard: signed in AND holding the permission(s). Same JSON 401 /
+    403 shapes as login_required."""
+    def deco(fn):
+        import functools
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            user = current_user()
+            if not user:
+                return jsonify({"error": "not_authenticated"}), 401
+            held = [perms.can(user["username"], k) for k in keys]
+            if not (any(held) if any_of else all(held)):
+                return jsonify({"error": "forbidden"}), 403
+            g.user = user
+            return fn(*args, **kwargs)
+        return wrapped
+    return deco
 
 
 # ------------------------------------------------------------------ auth
@@ -614,7 +627,9 @@ def signup():
         return jsonify({"error": "Passwords do not match."}), 400
 
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+    import usernames
+    # Case-insensitive and against every account, closed ones included.
+    if usernames.holder_of(db, username):
         return jsonify({"error": "That username is already taken."}), 409
 
     is_first_user = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0
@@ -636,12 +651,17 @@ def signup():
         return bad_unit_response(unit)
 
     now = datetime.datetime.utcnow().isoformat() + "Z"
-    pg_year = body.get("pgYear") if final_role in TRAINEE_ROLES else None
-    designation = body.get("designation") if final_role == "consultant" else None
+    pg_year = _text(body.get("pgYear"), 80) if final_role in TRAINEE_ROLES else None
+    designation = _text(body.get("designation"), 80) if final_role == "consultant" else None
+    course_id, joined_ym, cerr = _trainee_profile(db, final_role, unit, body)
+    if cerr:
+        return jsonify({"error": cerr}), 400
 
     db.execute(
-        "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active, approval_status, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)",
-        (username, hash_password(password), final_role, display_name, pg_year, designation, unit, approval_status, now),
+        "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active,"
+        " approval_status, created_at, course_id, joined_ym) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)",
+        (username, hash_password(password), final_role, display_name, pg_year, designation, unit,
+         approval_status, now, course_id, joined_ym),
     )
     db.commit()
 
@@ -871,6 +891,14 @@ def add_posting():
                 "detail": "This overlaps a posting you have already logged.",
                 "overlaps": clash,
             }), 409
+    if not body.get("allowOutOfCourse"):
+        flags = _course_flags(db, g.user["username"], unit, start_date, end_date)
+        if flags:
+            return jsonify({
+                "error": "posting_out_of_course",
+                "detail": " ".join(flags),
+                "flags": flags,
+            }), 409
     db.execute(
         "INSERT INTO postings (username, unit, start_date, end_date) VALUES (?,?,?,?)",
         (g.user["username"], unit, start_date, end_date),
@@ -894,8 +922,22 @@ BULK_POSTING_MAX = 120
 
 
 def _may_assign_postings(username):
-    caps = user_capabilities(username)
-    return bool(caps["isHod"] or caps["isCoordinator"] or caps["isDeveloper"])
+    return perms.can(username, "postings.assign_others")
+
+
+def _course_flags(db, username, unit, start_date, end_date):
+    """Reasons this posting sits outside the person's course (see courses.py).
+    [] when there is no course or the posting is fine."""
+    row = db.execute("SELECT role, unit, course_id FROM users WHERE username = ?", (username,)).fetchone()
+    if not row or not row["course_id"]:
+        return []
+    course = courses_mod.get_course(db, row["course_id"])
+    if not course:
+        return []
+    labels = {u["key"]: u.get("shortForm") or u["key"] for u in (get_config().get("units") or [])
+              if isinstance(u, dict) and isinstance(u.get("key"), str)}
+    return courses_mod.posting_flags(course, row["unit"], known_unit_keys(),
+                                     get_postings(username), unit, start_date, end_date, labels)
 
 
 @api.post("/postings/bulk")
@@ -939,7 +981,8 @@ def bulk_add_postings():
 
     db = get_db()
     allow_overlap = bool(body.get("allowOverlap"))
-    ready, skipped, overlapping = [], [], []
+    allow_course = bool(body.get("allowOutOfCourse"))
+    ready, skipped, overlapping, off_course = [], [], [], []
     for u in names:
         row = db.execute("SELECT username, display_name, role, approval_status, lifecycle"
                          " FROM users WHERE username = ?", (u,)).fetchone()
@@ -961,13 +1004,17 @@ def bulk_add_postings():
         clash = _overlapping_postings(db, u, start_date, end_date)
         item = {"username": u, "displayName": row["display_name"],
                 "overlaps": clash}
+        flags = [] if allow_course else _course_flags(db, u, unit, start_date, end_date)
         if clash and not allow_overlap:
             overlapping.append(item)
+        elif flags:
+            item["flags"] = flags
+            off_course.append(item)
         else:
             ready.append(item)
 
     if mode == "preview":
-        return jsonify({"wouldAdd": ready, "overlapping": overlapping,
+        return jsonify({"wouldAdd": ready, "overlapping": overlapping, "outOfCourse": off_course,
                         "skipped": skipped, "added": []})
 
     added = []
@@ -983,8 +1030,8 @@ def bulk_add_postings():
                        detail="%s from %s%s" % (unit, start_date,
                                                 " to " + end_date if end_date else " (ongoing)"))
     db.commit()
-    return jsonify({"added": added, "overlapping": overlapping, "skipped": skipped,
-                    "wouldAdd": []})
+    return jsonify({"added": added, "overlapping": overlapping, "outOfCourse": off_course,
+                    "skipped": skipped, "wouldAdd": []})
 
 
 @api.get("/postings/candidates")
@@ -1083,8 +1130,9 @@ def create_entry():
             diagnoses_secondary, comorbidities, laterality, role_level, consultant,
             consultant_username, assistants, comments, case_report, linked_from_id,
             history, examination, academic_type, academic_type_other, seminar_type,
-            seminar_type_other, topic, venue, details, paper_status, procedure_blocks, status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            seminar_type_other, topic, venue, details, paper_status, procedure_blocks, status,
+            course_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             g.user["username"], entry_type, unit, entry_date, now,
             # site/procedures/laterality/role_level stay unset for a
@@ -1105,6 +1153,10 @@ def create_entry():
             body.get("history"), body.get("examination"), body.get("academicType"),
             body.get("academicTypeOther"), body.get("seminarType"), body.get("seminarTypeOther"),
             body.get("topic"), body.get("venue"), body.get("details"), paper_status, procedure_blocks_json, status,
+            # The course the author is on now, frozen onto the entry so a
+            # later change of course does not rewrite what this was logged under.
+            db.execute("SELECT course_id FROM users WHERE username = ?",
+                       (g.user["username"],)).fetchone()["course_id"],
         ),
     )
     db.commit()
@@ -1174,6 +1226,22 @@ def reminders():
     return jsonify({"reminders": out})
 
 
+TEACHING_TYPES = {"academic", "seminar"}
+
+
+def _may_read_entry_row(user, d):
+    """Somebody else's entry: the unit it was logged under must be in the
+    scope of "open a trainee's records", and a teaching entry (Academic,
+    Seminar) additionally needs the teaching permission. Enforced here, on
+    the server -- until v7.4 the Head of Unit's teaching-free view was only
+    hidden on screen."""
+    if not perms.in_scope(user["username"], "view.records", d.get("unit")):
+        return False
+    if d.get("entry_type") in TEACHING_TYPES and not perms.can(user["username"], "view.teaching"):
+        return False
+    return True
+
+
 @api.get("/entries/<int:entry_id>")
 @login_required()
 def get_entry(entry_id):
@@ -1192,10 +1260,8 @@ def get_entry(entry_id):
         return jsonify({"error": "forbidden"}), 403
     if g.user["role"] == "developer":
         return jsonify({"entry": entry_row_to_dict(row)})
-    if g.user["role"] == "consultant":
-        scope = consultant_scope(g.user["username"])
-        if scope["full"] or d["unit"] in scope["units"]:
-            return jsonify({"entry": entry_row_to_dict(row)})
+    if _may_read_entry_row(g.user, d):
+        return jsonify({"entry": entry_row_to_dict(row)})
     return jsonify({"error": "forbidden"}), 403
 
 
@@ -1203,10 +1269,10 @@ def get_entry(entry_id):
 @login_required()
 def delete_entry(entry_id):
     db = get_db()
-    row = db.execute("SELECT author_username, approval_state FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    row = db.execute("SELECT author_username, approval_state, unit, status FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not row:
         return jsonify({"error": "not_found"}), 404
-    if row["author_username"] != g.user["username"] and g.user["role"] != "developer":
+    if not _may_edit_entry(g.user, row):
         return jsonify({"error": "forbidden"}), 403
     # Nobody hard-deletes an attested record -- not the author, not a
     # developer. entry_approvals is ON DELETE CASCADE, so a delete here does
@@ -1240,7 +1306,7 @@ def update_entry(entry_id):
     existing = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not existing:
         return jsonify({"error": "not_found"}), 404
-    if existing["author_username"] != g.user["username"] and g.user["role"] != "developer":
+    if not _may_edit_entry(g.user, existing):
         return jsonify({"error": "forbidden"}), 403
 
     body = _sanitise_entry_body(request.get_json(force=True, silent=True) or {})
@@ -1478,15 +1544,7 @@ def _can_view_entry_history(user, entry_row):
         return False
     if user["role"] == "developer":
         return True
-    if user["role"] != "consultant":
-        return False
-    caps = user_capabilities(user["username"])
-    if caps["isHod"] or caps["isCoordinator"]:
-        return True
-    if caps["isHeadOfUnit"]:
-        scope = consultant_scope(user["username"])
-        return entry_row["unit"] in scope["units"]
-    return False
+    return perms.in_scope(user["username"], "view.history", entry_row["unit"])
 
 
 @api.get("/entries/<int:entry_id>/history")
@@ -1508,18 +1566,31 @@ def entry_history(entry_id):
 
 
 @api.get("/entries/roster")
-@login_required(role="consultant")
+@login_required()
 def roster_entries():
-    scope = consultant_scope(g.user["username"])
+    # Every consultant may open the roster -- with no scope it is simply
+    # empty, as it always was. A Fellow (or anyone else) needs the permission.
+    if not (g.user["role"] == "consultant"
+            or (g.user["role"] == "fellow" and perms.can(g.user["username"], "view.roster"))):
+        return jsonify({"error": "forbidden"}), 403
+    scope = consultant_scope(g.user["username"], "view.roster")
+    rec_scope = perms.scope_for(g.user["username"], "view.records")
+    see_teaching = perms.can(g.user["username"], "view.teaching")
     db = get_db()
     placeholders = ",".join("?" * len(TRAINEE_ROLES))
     users = [dict(r) for r in db.execute(f"SELECT * FROM users WHERE role IN ({placeholders})", tuple(TRAINEE_ROLES)).fetchall()]
     # Drafts are a resident's private scratch space -- hidden from the
     # roster (and everywhere else consultant/HOD-facing) until finalized.
     all_entries = [e for e in (entry_row_to_dict(r) for r in db.execute("SELECT * FROM entries").fetchall()) if e["status"] != "draft"]
-    if not scope["full"]:
-        allowed = set(scope["units"])
+    # Who is LISTED follows the roster scope only; kept before the narrowing below.
+    listed_pairs = {(e["authorUsername"], e["unit"]) for e in all_entries}
+    # What of each trainee's work this person may READ is "open a trainee's
+    # records", which can be narrower than who they may LIST.
+    if not rec_scope["full"]:
+        allowed = set(rec_scope["units"])
         all_entries = [e for e in all_entries if e["unit"] in allowed]
+    if not see_teaching:
+        all_entries = [e for e in all_entries if e["entryType"] not in TEACHING_TYPES]
     # Postings travel with the user. The roster's "Current unit" column has
     # always read them off user.postings, and row_to_user has never carried
     # them, so that column has shown a dash for every trainee since it was
@@ -1545,6 +1616,8 @@ def roster_entries():
         all_postings = postings_by_user.get(u["username"], [])
         mine = [e for e in all_entries if e["authorUsername"] == u["username"]]
 
+        if u["username"] == g.user["username"]:
+            continue    # a Fellow with roster rights is not on their own roster
         if scope["full"]:
             visible_postings = all_postings
             include = True
@@ -1560,7 +1633,7 @@ def roster_entries():
             # carries this unit without a matching posting is never orphaned
             # out of the only view that would surface it.
             visible_postings = [p for p in all_postings if p["unit"] in allowed_units]
-            include = bool(visible_postings or mine)
+            include = bool(visible_postings or any((u["username"], x) in listed_pairs for x in allowed_units))
 
         if not include:
             continue
@@ -1582,7 +1655,7 @@ def roster_entries():
 
 
 @api.get("/entries/all")
-@login_required(role="developer")
+@require_perm("data.export_all")
 def all_entries():
     rows = get_db().execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
     # Same "hidden until finalized" rule as the roster: a draft is the
@@ -1597,19 +1670,21 @@ def all_entries():
 @login_required()
 def entries_by_author(username):
     db = get_db()
-    if g.user["username"] == username or g.user["role"] == "developer":
+    me = g.user["username"]
+    scoped = False
+    if me == username or g.user["role"] == "developer":
         pass
-    elif g.user["role"] == "consultant":
+    elif g.user["role"] == "consultant" or perms.can(me, "view.records"):
         # Was previously wide open to any logged-in consultant, regardless of
         # scope -- the roster UI just never linked to it for someone outside
         # their scope. Enforce the same unit-scope rule the roster itself
-        # uses, now that scope is deliberately restrictive (Professor
-        # designation, or a Head of Unit/HOD/Coordinator assignment).
+        # uses.
         target = db.execute("SELECT role, unit FROM users WHERE username = ?", (username,)).fetchone()
         if not target:
             return jsonify({"error": "not_found"}), 404
-        scope = consultant_scope(g.user["username"])
+        scope = perms.scope_for(me, "view.records")
         if not scope["full"]:
+            scoped = True
             if target["role"] == "consultant":
                 # A consultant profile's own "unit" is their home unit -- the
                 # only case where that column is meaningful.
@@ -1619,7 +1694,9 @@ def entries_by_author(username):
                 # set for consultants) -- their unit lives on each logged
                 # entry via the posting active on that date, exactly as
                 # roster_entries() computes it. Mirror that here: in scope if
-                # they've logged anything under a unit this caller can see.
+                # they've logged anything under a unit this caller can see,
+                # or hold a posting in one -- the roster lists trainees by
+                # posting, so every row it shows has to be openable.
                 entry_units = {
                     r["unit"] for r in db.execute(
                         "SELECT DISTINCT unit FROM entries WHERE author_username = ?", (username,)
@@ -1630,9 +1707,6 @@ def entries_by_author(username):
                         "SELECT DISTINCT unit FROM postings WHERE username = ?", (username,)
                     ).fetchall()
                 }
-                # A posting into this unit is enough on its own: the roster
-                # now lists trainees by posting, so every row it shows has to
-                # be openable, including one who has logged nothing yet.
                 in_scope = bool((entry_units | posting_units) & set(scope["units"]))
             if not in_scope:
                 return jsonify({"error": "forbidden"}), 403
@@ -1643,26 +1717,23 @@ def entries_by_author(username):
         "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (username,)
     ).fetchall()
     entries = [entry_row_to_dict(r) for r in rows]
-    if g.user["username"] != username:
+    if me != username:
         # Looking at someone else's entries (consultant/developer drill-down)
         # -- their drafts are private to them, same rule as the roster.
         entries = [e for e in entries if e["status"] != "draft"]
 
-    # Scope the ENTRIES, not just the door. This previously checked whether
-    # the caller could open the trainee at all and then returned every entry
-    # that trainee had ever logged -- so a Head of Unit who could see one
-    # case of theirs could read their rotations through every other unit
-    # too. A unit-scoped consultant sees only what was logged under a unit
-    # they oversee, which (because an entry's unit is stamped from the
-    # posting covering its date) is exactly the trainee's postings in their
-    # unit and nothing else.
+    # Scope the ENTRIES, not just the door. A unit-scoped viewer sees only
+    # what was logged under a unit they oversee, which (because an entry's
+    # unit is stamped from the posting covering its date) is exactly the
+    # trainee's postings in their unit and nothing else.
     postings = get_postings(username)
-    if (g.user["username"] != username and g.user["role"] == "consultant"):
-        scope = consultant_scope(g.user["username"])
-        if not scope["full"]:
-            allowed = set(scope["units"])
+    if me != username and g.user["role"] != "developer":
+        if scoped:
+            allowed = set(perms.scope_for(me, "view.records")["units"])
             entries = [e for e in entries if e["unit"] in allowed]
             postings = [p for p in postings if p["unit"] in allowed]
+        if not perms.can(me, "view.teaching"):
+            entries = [e for e in entries if e["entryType"] not in TEACHING_TYPES]
     return jsonify({"entries": entries, "postings": postings})
 
 
@@ -1695,7 +1766,7 @@ ENTRY_EXPORT_COLUMNS = [
 
 
 @api.get("/entries/export.csv")
-@login_required(role="developer")
+@require_perm("data.export_all")
 def export_entries_csv():
     # A CSV export is an official record, not a private workspace -- a draft
     # (even the exporting user's own, from export_my_entries_csv below)
@@ -1745,32 +1816,41 @@ EXPORT_COLUMN_ORDER = [k for k, _ in EXPORT_COLUMN_CATALOGUE]
 
 
 def _visible_entry_rows(db, user):
-    """Every entry this user is already allowed to see, drafts excluded.
+    """Every entry this user is already allowed to export, drafts excluded.
 
     Shared by the fixed export and the custom one so a filter can never be
     the thing that decides what someone may read -- the scope is applied
     first, and filters only ever narrow what is already permitted.
+
+    A trainee exports their own. Anyone holding "export records in scope"
+    additionally gets the scope they were given (a Fellow with it gets their
+    own plus that scope). Other people's Academic/Seminar entries are
+    withheld unless they hold the teaching permission.
     """
+    me = user["username"]
+    order = " ORDER BY entry_date DESC, id DESC"
     if user["role"] == "developer":
-        rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
-    elif user["role"] == "consultant":
-        scope = consultant_scope(user["username"])
-        if scope["full"]:
-            rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
-        elif scope["units"]:
-            placeholders = ",".join("?" * len(scope["units"]))
-            rows = db.execute(
-                f"SELECT * FROM entries WHERE unit IN ({placeholders}) ORDER BY entry_date DESC, id DESC",
-                tuple(scope["units"]),
-            ).fetchall()
-        else:
-            rows = []
-    else:
-        rows = db.execute(
-            "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC",
-            (user["username"],),
-        ).fetchall()
-    return [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]
+        return [e for e in (entry_row_to_dict(r) for r in
+                            db.execute("SELECT * FROM entries" + order).fetchall())
+                if e["status"] != "draft"]
+    rows = []
+    if user["role"] in TRAINEE_ROLES:
+        rows += db.execute("SELECT * FROM entries WHERE author_username = ?" + order, (me,)).fetchall()
+    scope = perms.scope_for(me, "export.scoped")
+    extra = []
+    if scope["full"]:
+        extra = db.execute("SELECT * FROM entries" + order).fetchall()
+    elif scope["units"]:
+        ph = ",".join("?" * len(scope["units"]))
+        extra = db.execute("SELECT * FROM entries WHERE unit IN (%s)%s" % (ph, order),
+                           tuple(scope["units"])).fetchall()
+    have = {r["id"] for r in rows}
+    rows += [r for r in extra if r["id"] not in have]
+    out = [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]
+    if not perms.can(me, "view.teaching"):
+        out = [e for e in out if e["authorUsername"] == me or e["entryType"] not in TEACHING_TYPES]
+    out.sort(key=lambda e: (e["date"] or "", e["id"]), reverse=True)
+    return out
 
 
 def _csv_list_arg(name):
@@ -1861,40 +1941,17 @@ def export_options():
 @login_required()
 def export_my_entries_csv():
     # Self-service export for everyone, not just the Developer: a trainee
-    # gets their own authored entries; a consultant gets whatever their
-    # consultant_scope() already lets them see (their unit, or everything for
-    # HOD/Coordinator/full-scope Head of Unit); the Developer gets the same
-    # everything the admin export gives them.
-    db = get_db()
+    # gets their own authored entries; anyone holding "export records in
+    # scope" gets that scope too; the Developer gets everything.
     user = g.user
-    if user["role"] == "developer":
-        rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
-    elif user["role"] == "consultant":
-        scope = consultant_scope(user["username"])
-        if scope["full"]:
-            rows = db.execute("SELECT * FROM entries ORDER BY entry_date DESC, id DESC").fetchall()
-        elif scope["units"]:
-            placeholders = ",".join("?" * len(scope["units"]))
-            rows = db.execute(
-                f"SELECT * FROM entries WHERE unit IN ({placeholders}) ORDER BY entry_date DESC, id DESC",
-                tuple(scope["units"]),
-            ).fetchall()
-        else:
-            rows = []
-    else:
-        rows = db.execute(
-            "SELECT * FROM entries WHERE author_username = ? ORDER BY entry_date DESC, id DESC", (user["username"],)
-        ).fetchall()
-    # Export is an official record -- exclude drafts even from a resident's
-    # own export of their own entries (see export_entries_csv above).
-    exportable = [e for e in (entry_row_to_dict(r) for r in rows) if e["status"] != "draft"]
+    exportable = _visible_entry_rows(get_db(), user)
     csv_text = _export_csv(exportable, ENTRY_EXPORT_COLUMNS)
     filename = f"ent-logbook-my-entries-{user['username']}.csv"
     return Response(csv_text, mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 @api.get("/users/export.csv")
-@login_required(role="developer")
+@require_perm("data.export_users")
 def export_users_csv():
     rows = [row_to_user(r) for r in get_db().execute("SELECT * FROM users").fetchall()]
     columns = [
@@ -1914,7 +1971,7 @@ def list_users():
     # canManageProfiles gate as editing/deleting a profile, so a Head of
     # Department who can act on an account can also see the full list it's
     # drawn from.
-    if not user_capabilities(g.user["username"])["canManageProfiles"]:
+    if not perms.can(g.user["username"], "accounts.view_directory"):
         return jsonify({"error": "forbidden"}), 403
     rows = get_db().execute("SELECT * FROM users ORDER BY created_at").fetchall()
     return jsonify({"users": [row_to_user(r) for r in rows]})
@@ -1930,11 +1987,22 @@ def list_consultants():
     # front of the whole department. _valid_approver refused the actual
     # submit, so this was disclosure rather than a way in -- but it is the
     # sort of thing that gets noticed in a demo.
+    # Consultants as before, plus any Fellow the Developer has individually
+    # made a sign-off approver. `canSignOff` is what the "send for sign-off"
+    # picker filters on; the server re-checks it on submit regardless.
     rows = get_db().execute(
-        "SELECT * FROM users WHERE role = 'consultant' AND active = 1"
+        "SELECT * FROM users WHERE role IN ('consultant','fellow') AND active = 1"
         " AND approval_status = 'approved' ORDER BY display_name"
     ).fetchall()
-    return jsonify({"users": [row_to_user(r) for r in rows]})
+    out = []
+    for r in rows:
+        can = perms.can(r["username"], "signoff.approve")
+        if r["role"] == "fellow" and not can:
+            continue
+        u = row_to_user(r)
+        u["canSignOff"] = can
+        out.append(u)
+    return jsonify({"users": out})
 
 
 @api.get("/units/<unit>/people")
@@ -1977,7 +2045,9 @@ def get_user(username):
     if g.user["username"] != username:
         if g.user["role"] == "developer":
             pass
-        elif g.user["role"] == "consultant" and _consultant_may_see_user(db, g.user["username"], username):
+        elif g.user["role"] in ("consultant", "fellow") and _consultant_may_see_user(db, g.user["username"], username):
+            pass
+        elif perms.can(g.user["username"], "accounts.view_directory"):
             pass
         else:
             return jsonify({"error": "forbidden"}), 403
@@ -1987,9 +2057,50 @@ def get_user(username):
     return jsonify({"user": row_to_user(row)})
 
 
+def _trainee_profile(db, role, unit, body, current=None):
+    """Course and joining month for a trainee account.
+    -> (course_id, joined_ym, error). Non-trainees have neither."""
+    if role not in TRAINEE_ROLES:
+        return None, None, None
+    cur = current or {}
+    cid = body.get("courseId") if "courseId" in body else cur.get("course_id")
+    if not cid:
+        cid = courses_mod.ROLE_DEFAULT_COURSE.get(role)
+    course = courses_mod.get_course(db, cid) if cid else None
+    if cid and not course:
+        # The default may have been removed; that is not the caller's mistake.
+        if "courseId" in body and body.get("courseId"):
+            return None, None, "Unknown course."
+        cid = None
+    if course and course["role"] != role:
+        return None, None, "%s is a course for %ss." % (course["name"], course["role"].replace("_", " ").title())
+    if course and course["scope"] == "units" and course["units"] and unit and unit not in course["units"]:
+        return None, None, "%s belongs to %s only." % (course["name"], ", ".join(course["units"]))
+    joined = body.get("joinedYm") if "joinedYm" in body else cur.get("joined_ym")
+    joined_n, err = courses_mod.normalise_join(joined, course["startMonth"] if course else 1)
+    if err:
+        return None, None, err
+    return (course["id"] if course else None), joined_n, None
+
+
+def _clean_contact(body):
+    """-> (email, phone, error) with None meaning 'not supplied'."""
+    email = phone = None
+    if "email" in body:
+        email = (_text(body.get("email"), 200) or "").strip()
+        if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            return None, None, "That does not look like an email address."
+    if "phone" in body:
+        phone = (_text(body.get("phone"), 40) or "").strip()
+        if phone and not re.fullmatch(r"[0-9 +()\-]{6,25}", phone):
+            return None, None, "Phone numbers use digits, spaces and + ( ) - only."
+    return email, phone, None
+
+
 @api.post("/users")
 @login_required(role="developer")
 def admin_create_user():
+    import usernames
     body = request.get_json(force=True, silent=True) or {}
     username = clean_username(body.get("username"))
     password = body.get("password") or ""
@@ -2001,151 +2112,237 @@ def admin_create_user():
     if role not in (TRAINEE_ROLES | {"consultant", "developer"}):
         return jsonify({"error": "Invalid role."}), 400
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+    # Case-insensitive, and against EVERY account including closed and
+    # deactivated ones: a username is somebody's identity on the records.
+    if usernames.holder_of(db, username):
         return jsonify({"error": "That username is already taken."}), 409
     unit = body.get("unit") if role in ("consultant", "fellow") else None
     if role == "fellow" and not unit:
         return jsonify({"error": "Fellows must have a parent unit."}), 400
     if unit and (not isinstance(unit, str) or unit not in known_unit_keys()):
         return bad_unit_response(unit)
+    course_id, joined_ym, cerr = _trainee_profile(db, role, unit, body)
+    if cerr:
+        return jsonify({"error": cerr}), 400
+    email, phone, perr = _clean_contact(body)
+    if perr:
+        return jsonify({"error": perr}), 400
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = body.get("pgYear") if role in TRAINEE_ROLES else None
     designation = body.get("designation") if role == "consultant" else None
+    display = (_text(body.get("displayName"), 120) or "").strip() or username
     # Admin-created accounts are pre-approved -- an admin creating the
     # account directly IS the approval.
     db.execute(
-        "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active, approval_status, created_at) VALUES (?,?,?,?,?,?,?,1,'approved',?)",
-        (username, hash_password(password), role, body.get("displayName") or username, pg_year, designation, unit, now),
+        "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active,"
+        " approval_status, created_at, course_id, joined_ym, email, phone)"
+        " VALUES (?,?,?,?,?,?,?,1,'approved',?,?,?,?,?)",
+        (username, hash_password(password), role, display, _text(pg_year, 80), _text(designation, 80), unit, now,
+         course_id, joined_ym, email or None, phone or None),
     )
+    _account_event(db, username, "created", g.user["username"], "Created by a Developer as %s" % role)
     db.commit()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    return jsonify({"user": row_to_user(row)})
+    return jsonify({"user": row_to_user(row, contact=True)})
+
+
+# Fields each permission lets someone change on another person's account.
+# Anything not listed here is the Developer's alone.
+_PROFILE_FIELDS = {"pgYear", "unit", "courseId", "joinedYm"}
 
 
 @api.patch("/users/<username>")
 @login_required()
 def update_user(username):
-    caps = user_capabilities(g.user["username"])
-    if not caps["canManageProfiles"]:
+    me = g.user["username"]
+    is_dev = g.user["role"] == "developer"
+    can_profile = perms.can(me, "accounts.edit_profile")
+    can_active = perms.can(me, "accounts.deactivate")
+    if not (is_dev or can_profile or can_active):
         return jsonify({"error": "forbidden"}), 403
     body = request.get_json(force=True, silent=True) or {}
     db = get_db()
-    target = db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+    target = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not target:
         return jsonify({"error": "not_found"}), 404
     # Only a developer may touch a developer account. Without this an HOD
-    # -- who has canManageProfiles -- could set active=false on the
-    # developer and lock out the one role that can manage config, accounts
-    # and role assignments. The role-change and password branches below
-    # were already fenced this way; the profile branches above them were
-    # not, and `active` is the one that locks someone out.
-    if target["role"] == "developer" and not caps["isDeveloper"]:
+    # could set active=false on the developer and lock out the one role that
+    # can manage config, accounts and appointments.
+    if target["role"] == "developer" and not is_dev:
         return jsonify({
             "error": "forbidden",
             "detail": "Only a Developer admin can change a Developer account.",
         }), 403
-    if "active" in body:
-        if not body["active"]:
-            blocked = _last_developer_block(db, username, "Deactivating")
+
+    def deny(detail):
+        return jsonify({"error": "forbidden", "detail": detail}), 403
+
+    # ---- everything is checked BEFORE anything is written, so a refusal
+    # can never leave half an edit behind.
+    if "active" in body and not (is_dev or can_active):
+        return deny("You can edit profiles but not switch accounts on or off.")
+    if any(k in body for k in _PROFILE_FIELDS) and not (is_dev or can_profile):
+        return deny("You can switch accounts on or off but not edit their course, batch or unit.")
+    # Designation is not merely descriptive: a "Professor" designation grants
+    # a unit's whole roster. Access grants are Developer-only and recorded.
+    if "designation" in body and not is_dev:
+        return deny("Designation decides which units a consultant can see, so only "
+                    "a Developer admin can change it.")
+    dev_only = [k for k in ("displayName", "email", "phone") if k in body]
+    if dev_only and not is_dev:
+        return deny("Only a Developer admin can edit a person's name or contact details.")
+    if "role" in body and _text(body.get("role"), 40) != target["role"] and not is_dev:
+        return deny("Only a Developer admin can change an account's role.")
+    if body.get("password") and not is_dev:
+        return deny("Only a Developer admin can set a password.")
+    if "username" in body and (body.get("username") or "") != username:
+        return jsonify({"error": "Use the rename action to change a username - it has to "
+                                 "rewrite every record that mentions it."}), 400
+
+    new_role = target["role"]
+    if is_dev and "role" in body and _text(body["role"], 40) in (TRAINEE_ROLES | {"consultant", "developer"}):
+        new_role = _text(body["role"], 40)
+        # Demoting the last developer empties the role just as surely as
+        # deleting the account does.
+        if new_role != "developer" and new_role != target["role"]:
+            blocked = _last_developer_block(db, username, "Changing the role of")
             if blocked:
-                db.rollback()
                 return blocked
-        db.execute("UPDATE users SET active = ?, lifecycle = ?, lifecycle_at = ?, lifecycle_by = ?"
-                   " WHERE username = ?",
-                   (1 if body["active"] else 0,
-                    LIFECYCLE_ACTIVE if body["active"] else LIFECYCLE_ADMIN,
-                    _now_iso(), g.user["username"], username))
-        _account_event(db, username, "activated" if body["active"] else "admin_deactivated",
-                       g.user["username"], _text(body.get("reason"), 500))
-        if not body["active"]:
-            destroy_all_sessions_for(username)
-    # Batch (PG Year) and designation -- the "dynamic profile changes" both
-    # Developer and HOD were given (a resident moving up a batch, a
-    # consultant getting promoted from Assistant to Associate Professor).
-    if "pgYear" in body:
-        db.execute("UPDATE users SET pg_year = ? WHERE username = ?", (_text(body.get("pgYear"), 80), username))
-    # Designation is not merely descriptive: consultant_scope() grants a
-    # Professor their home unit's entire roster and case records. That makes
-    # writing it an access grant, and access grants in this app are
-    # developer-only and recorded (POST /role-assignments carries assigned_by,
-    # assigned_at and an end date). Leaving it open to an HOD gave the same
-    # power through an unaudited, permanent side channel.
-    if "designation" in body:
-        if not caps["isDeveloper"]:
-            db.rollback()
-            return jsonify({
-                "error": "forbidden",
-                "detail": "Designation decides which units a consultant can see, so only "
-                          "a Developer admin can change it.",
-            }), 403
-        db.execute("UPDATE users SET designation = ? WHERE username = ?", (_text(body.get("designation"), 80), username))
-    # A Fellow's parent unit, or a consultant's home unit, can change too
-    # (a Fellow reassigned, a consultant transferred) -- same gate as batch/
-    # designation.
+    if body.get("active") is not None and not body["active"] and "active" in body:
+        blocked = _last_developer_block(db, username, "Deactivating")
+        if blocked:
+            return blocked
+    new_password = None
+    if is_dev and body.get("password"):
+        new_password = _text(body["password"], 200) or ""
+        if len(new_password) < 8:
+            return jsonify({"error": "New password must be at least 8 characters."}), 400
+
+    new_unit = target["unit"]
     if "unit" in body:
         new_unit = _text(body.get("unit"), 60) or None
         if new_unit is not None and (not isinstance(new_unit, str) or new_unit not in known_unit_keys()):
-            db.rollback()
             return bad_unit_response(new_unit)
         # Refused rather than quietly ignored: a Developer has no home unit,
         # and silently dropping the write would leave the caller believing
         # it had taken.
         if new_unit and target["role"] == "developer" and _text(body.get("role"), 40) != "consultant":
-            db.rollback()
-            return jsonify({"error": "A Developer account has no home unit — "
+            return jsonify({"error": "A Developer account has no home unit \u2014 "
                                      "a Developer already covers every unit."}), 400
-        db.execute("UPDATE users SET unit = ? WHERE username = ?", (new_unit, username))
-    # Role changes and password resets stay Developer-only -- broader than
-    # the specific batch/designation/delete powers HOD was given.
-    if caps["isDeveloper"]:
-        if "role" in body and _text(body["role"], 40) in (TRAINEE_ROLES | {"consultant", "developer"}):
-            # Demoting the last developer empties the role just as surely as
-            # deleting the account does.
-            if _text(body["role"], 40) != "developer":
-                blocked = _last_developer_block(db, username, "Changing the role of")
-                if blocked:
-                    db.rollback()
-                    return blocked
-            new_role = _text(body["role"], 40)
-            db.execute("UPDATE users SET role = ? WHERE username = ?", (new_role, username))
-            # A Developer administers every unit, so a "home unit" on the
-            # account is a claim about scope that nothing in the app reads
-            # and that leaves their own My Account looking half-filled.
-            # Promoting someone clears whatever they carried in from their
-            # previous role; the same is true of a designation, which only
-            # ever means something on a consultant.
-            if new_role == "developer":
-                db.execute("UPDATE users SET unit = NULL, designation = NULL WHERE username = ?",
-                           (username,))
-        if "password" in body and body["password"]:
-            if len(_text(body["password"], 200) or "") < 8:
-                # Roll back first: the role/active/profile UPDATEs above have
-                # already run on this thread-local connection, and without
-                # this they are committed by whatever request lands next.
-                db.rollback()
-                return jsonify({"error": "New password must be at least 8 characters."}), 400
-            db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(_text(body["password"], 200)), username))
+    if new_role == "fellow" and not new_unit:
+        return jsonify({"error": "Fellows must have a parent unit."}), 400
+
+    # Course / joining month, for anyone who is (or becomes) a trainee.
+    course_id, joined_ym = target["course_id"], target["joined_ym"]
+    role_changed = new_role != target["role"]
+    if new_role in TRAINEE_ROLES:
+        probe = dict(body)
+        if role_changed and "courseId" not in probe:
+            probe["courseId"] = None            # the new kind gets its own default course
+        course_id, joined_ym, cerr = _trainee_profile(db, new_role, new_unit, probe, dict(target))
+        if cerr:
+            return jsonify({"error": cerr}), 400
+    elif role_changed:
+        course_id, joined_ym = None, None
+
+    display = target["display_name"]
+    if is_dev and "displayName" in body:
+        display = (_text(body.get("displayName"), 120) or "").strip()
+        if not display:
+            return jsonify({"error": "Display name cannot be empty."}), 400
+    email, phone, perr = _clean_contact(body) if is_dev else (None, None, None)
+    if perr:
+        return jsonify({"error": perr}), 400
+
+    # ---- apply
+    changes = []
+
+    def note(field, old, new):
+        if (old or None) != (new or None):
+            changes.append("%s: %s \u2192 %s" % (field, old or "\u2014", new or "\u2014"))
+
+    if "active" in body:
+        want = bool(body["active"])
+        db.execute("UPDATE users SET active = ?, lifecycle = ?, lifecycle_at = ?, lifecycle_by = ?"
+                   " WHERE username = ?",
+                   (1 if want else 0, LIFECYCLE_ACTIVE if want else LIFECYCLE_ADMIN,
+                    _now_iso(), me, username))
+        _account_event(db, username, "activated" if want else "admin_deactivated", me,
+                       _text(body.get("reason"), 500))
+        if not want:
             destroy_all_sessions_for(username)
+    if "pgYear" in body:
+        new_py = _text(body.get("pgYear"), 80)
+        note("batch", target["pg_year"], new_py)
+        db.execute("UPDATE users SET pg_year = ? WHERE username = ?", (new_py, username))
+    if "designation" in body:
+        new_d = _text(body.get("designation"), 80)
+        note("designation", target["designation"], new_d)
+        db.execute("UPDATE users SET designation = ? WHERE username = ?", (new_d, username))
+    if "unit" in body:
+        note("unit", target["unit"], new_unit)
+        db.execute("UPDATE users SET unit = ? WHERE username = ?", (new_unit, username))
+    if is_dev and role_changed:
+        note("role", target["role"], new_role)
+        db.execute("UPDATE users SET role = ? WHERE username = ?", (new_role, username))
+        # A Developer administers every unit, so a "home unit" on the
+        # account is a claim about scope that nothing reads. Promoting
+        # someone clears whatever they carried in from their previous role.
+        if new_role == "developer":
+            db.execute("UPDATE users SET unit = NULL, designation = NULL WHERE username = ?", (username,))
+    if new_role in TRAINEE_ROLES or role_changed:
+        if (course_id, joined_ym) != (target["course_id"], target["joined_ym"]):
+            note("course", target["course_id"], course_id)
+            note("joined", target["joined_ym"], joined_ym)
+            db.execute("UPDATE users SET course_id = ?, joined_ym = ? WHERE username = ?",
+                       (course_id, joined_ym, username))
+        # Entries carry the course they were logged under. A change of course
+        # normally applies from now on; "apply to existing entries" re-stamps
+        # the person's whole logbook, for when the earlier course was a
+        # mistake rather than a stage they moved on from.
+        if body.get("restampEntries") and course_id != target["course_id"]:
+            n = db.execute("UPDATE entries SET course_id = ? WHERE author_username = ?",
+                           (course_id, username)).rowcount
+            changes.append("re-stamped %d entries to course %s" % (n, course_id or "none"))
+    if is_dev and "displayName" in body and display != target["display_name"]:
+        note("name", target["display_name"], display)
+        db.execute("UPDATE users SET display_name = ? WHERE username = ?", (display, username))
+        # Appointments carry a copy of the name for display.
+        db.execute("UPDATE role_assignments SET consultant_display_name = ? WHERE consultant_username = ?",
+                   (display, username))
+    if is_dev and "email" in body:
+        note("email", target["email"], email)
+        db.execute("UPDATE users SET email = ? WHERE username = ?", (email or None, username))
+    if is_dev and "phone" in body:
+        note("phone", target["phone"], phone)
+        db.execute("UPDATE users SET phone = ? WHERE username = ?", (phone or None, username))
+    if new_password:
+        db.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(new_password), username))
+        destroy_all_sessions_for(username)
+        changes.append("password reset")
+    if changes:
+        _account_event(db, username, "profile_edited", me, "; ".join(changes))
     db.commit()
+    perms.invalidate(username)
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    return jsonify({"user": row_to_user(row)})
+    return jsonify({"user": row_to_user(row, contact=is_dev)})
 
 
 @api.delete("/users/<username>")
 @login_required()
 def delete_user(username):
-    caps = user_capabilities(g.user["username"])
-    if not caps["canManageProfiles"]:
+    if not perms.can(g.user["username"], "accounts.delete"):
         return jsonify({"error": "forbidden"}), 403
+    is_dev = g.user["role"] == "developer"
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row:
         return jsonify({"error": "not_found"}), 404
     if username == g.user["username"]:
         return jsonify({"error": "You can't delete your own account."}), 400
-    # Same reasoning as update_user: an HOD has canManageProfiles, and
-    # without this could delete the Developer account outright.
-    if row["role"] == "developer" and not caps["isDeveloper"]:
+    # Same reasoning as update_user: without this an HOD could delete the
+    # Developer account outright.
+    if row["role"] == "developer" and not is_dev:
         return jsonify({
             "error": "Only a Developer admin can remove a Developer account.",
         }), 403
@@ -2170,36 +2367,45 @@ def delete_user(username):
 
 
 # ------------------------------------------------------- signup approvals
-def _can_approve_role(caps, role):
-    if caps["isDeveloper"] or caps["isHod"] or caps["isCoordinator"]:
-        return True
-    return caps["isHeadOfUnit"] and role == "fellow"
+_APPROVE_PERM = {
+    "resident": "accounts.approve_trainees", "senior_resident": "accounts.approve_trainees",
+    "fellow": "accounts.approve_fellows", "consultant": "accounts.approve_consultants",
+}
+
+
+def _can_approve_role(username, role):
+    key = _APPROVE_PERM.get(role)
+    if key:
+        return perms.can(username, key)
+    # A pending Developer cannot arise through sign-up; only a Developer could settle one.
+    r = get_db().execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+    return bool(r and r["role"] == "developer")
 
 
 @api.get("/signup-requests")
 @login_required()
 def list_signup_requests():
-    caps = user_capabilities(g.user["username"])
-    if not caps["canApprove"]:
-        return jsonify({"error": "forbidden"}), 403
+    me = g.user["username"]
     rows = get_db().execute("SELECT * FROM users WHERE approval_status = 'pending' ORDER BY created_at").fetchall()
-    if not (caps["isDeveloper"] or caps["isHod"] or caps["isCoordinator"]):
-        # Head-of-Unit-only: fellow signups are the only ones they can act on.
-        rows = [r for r in rows if r["role"] == "fellow"]
-    return jsonify({"requests": [row_to_user(r) for r in rows]})
+    # Only the sign-ups this person can actually act on -- listing ones they
+    # cannot approve is a button that always says no.
+    mine = [r for r in rows if _can_approve_role(me, r["role"])]
+    if not mine and not any(perms.can(me, k) for k in _APPROVE_PERM.values()):
+        return jsonify({"error": "forbidden"}), 403
+    return jsonify({"requests": [row_to_user(r) for r in mine]})
 
 
 @api.post("/signup-requests/<username>/approve")
 @login_required()
 def approve_signup_request(username):
-    caps = user_capabilities(g.user["username"])
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or row["approval_status"] != "pending":
         return jsonify({"error": "not_found"}), 404
-    if not _can_approve_role(caps, row["role"]):
+    if not _can_approve_role(g.user["username"], row["role"]):
         return jsonify({"error": "forbidden"}), 403
     db.execute("UPDATE users SET approval_status = 'approved' WHERE username = ?", (username,))
+    _account_event(db, username, "signup_approved", g.user["username"], None)
     db.commit()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     return jsonify({"user": row_to_user(row)})
@@ -2208,12 +2414,11 @@ def approve_signup_request(username):
 @api.post("/signup-requests/<username>/reject")
 @login_required()
 def reject_signup_request(username):
-    caps = user_capabilities(g.user["username"])
     db = get_db()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or row["approval_status"] != "pending":
         return jsonify({"error": "not_found"}), 404
-    if not _can_approve_role(caps, row["role"]):
+    if not _can_approve_role(g.user["username"], row["role"]):
         return jsonify({"error": "forbidden"}), 403
     # Safe to hard-delete outright: a never-approved account can't have
     # logged any entries yet.
@@ -2345,11 +2550,18 @@ def _config_shape_error(body):
 
 
 @api.patch("/config")
-@login_required(role="developer")
+@login_required()
 def update_config():
     body = request.get_json(force=True, silent=True) or {}
     if not isinstance(body, dict):
         return jsonify({"error": "Malformed configuration."}), 400
+    # Units are their own permission; every other list is "edit the lists".
+    me = g.user["username"]
+    needs = {"config.edit_units"} if "units" in body else set()
+    if set(body) - {"units"}:
+        needs.add("config.edit_lists")
+    if not needs or not all(perms.can(me, k) for k in needs):
+        return jsonify({"error": "forbidden"}), 403
     shape_error = _config_shape_error(body)
     if shape_error:
         return jsonify({"error": shape_error}), 400
@@ -2361,7 +2573,7 @@ def update_config():
 
 
 @api.post("/config/restore-procedure-defaults")
-@login_required(role="developer")
+@require_perm("config.edit_lists")
 def restore_procedure_defaults():
     """Puts the shipped procedure lists back for any site that has lost them,
     without touching anything the department has added itself.
@@ -2421,7 +2633,7 @@ def list_role_assignments():
 
 
 @api.get("/units/orphans")
-@login_required(role="developer")
+@require_perm("config.edit_units")
 def unit_orphans():
     """Rows pointing at a unit key the department no longer has.
 
@@ -2541,6 +2753,8 @@ def _submit_one(db, entry_id, approver, comment=None):
         return False, {"error": "forbidden"}, 403
     if row["entry_type"] not in APPROVABLE_TYPES:
         return False, {"error": "Only operative records and case write-ups are approved."}, 400
+    if approver == g.user["username"]:
+        return False, {"error": "You cannot send a record to yourself for approval."}, 400
     if row["status"] != "final":
         return False, {"error": "Finish the entry before sending it for approval."}, 400
     if row["approval_state"] == "approved":
@@ -2801,22 +3015,23 @@ def approval_queue():
     path -- entries naming this consultant as approver, and nothing else. It
     widens no other endpoint.
     """
-    if g.user["role"] != "consultant":
+    me = g.user["username"]
+    if g.user["role"] == "developer" or not (
+            g.user["role"] == "consultant" or perms.can(me, "signoff.approve")
+            or perms.can(me, "signoff.delegate")):
         return jsonify({"error": "forbidden"}), 403
     db = get_db()
-    caps = user_capabilities(g.user["username"])
-    scope = consultant_scope(g.user["username"])
     rows = db.execute(
         "SELECT * FROM entries WHERE approval_state = 'pending' AND status = 'final'"
         " ORDER BY id ASC"
     ).fetchall()
     limit = approval_escalation_days()
+    can_approve = perms.can(me, "signoff.approve")
     mine, delegated = [], []
     for r in rows:
-        own = r["approver_username"] == g.user["username"]
-        can_delegate = (not own) and (
-            caps["isHod"] or caps["isCoordinator"]
-            or (caps["isHeadOfUnit"] and r["unit"] in scope["units"]))
+        own = r["approver_username"] == me and can_approve and r["author_username"] != me
+        can_delegate = (not own) and r["author_username"] != me \
+            and perms.in_scope(me, "signoff.delegate", r["unit"])
         if not own and not can_delegate:
             continue
         hist = _approval_history(db, r["id"])
@@ -2853,13 +3068,14 @@ def approval_summary():
             counts[r["st"]] = r["c"]
         out["mine"] = counts
 
-    if g.user["role"] == "consultant":
-        caps = user_capabilities(g.user["username"])
-        scope = consultant_scope(g.user["username"])
+    me = g.user["username"]
+    if g.user["role"] != "developer" and (g.user["role"] == "consultant" or perms.can(me, "signoff.approve")
+                                          or perms.can(me, "view.escalations")):
+        esc = perms.scope_for(me, "view.escalations")
         pending = db.execute(
             "SELECT * FROM entries WHERE approval_state = 'pending' AND status = 'final'"
         ).fetchall()
-        mine = [r for r in pending if r["approver_username"] == g.user["username"]]
+        mine = [r for r in pending if r["approver_username"] == me and r["author_username"] != me]
         ages = []
         for r in mine:
             hist = _approval_history(db, r["id"])
@@ -2874,7 +3090,7 @@ def approval_summary():
         # oversight of. In-app notification only reaches the nominated
         # consultant when they log in -- this is what stops a record waiting
         # indefinitely because one person is on leave.
-        if caps["isHod"] or caps["isCoordinator"] or caps["isHeadOfUnit"]:
+        if esc["full"] or esc["units"]:
             overdue = []
             for r in pending:
                 # An entry logged on a date no posting covers is stored with
@@ -2885,8 +3101,8 @@ def approval_summary():
                 # either, so they must at least be visible to somebody with
                 # oversight.
                 unattributed = not (r["unit"] or "").strip()
-                in_reach = (caps["isHod"] or caps["isCoordinator"]
-                            or r["unit"] in scope["units"]
+                in_reach = (esc["full"]
+                            or r["unit"] in esc["units"]
                             or unattributed)
                 if not in_reach:
                     continue
@@ -2971,8 +3187,7 @@ FEEDBACK_MAX_BODY = 8000
 
 
 def _can_read_feedback(username):
-    caps = user_capabilities(username)
-    return bool(caps["isHod"] or caps["isCoordinator"] or caps["isDeveloper"])
+    return perms.can(username, "feedback.manage")
 
 
 def _feedback_row_to_dict(db, row, include_author):
@@ -3205,7 +3420,17 @@ def _lock_info(db, row):
 
 
 def _may_edit_entry(user, row):
-    return row["author_username"] == user["username"] or user["role"] == "developer"
+    """The author, a Developer, or someone individually given "correct other
+    people's entries" for this entry's unit (and who can open those records,
+    which is how they would have found it). A draft is its author's alone."""
+    if row["author_username"] == user["username"] or user["role"] == "developer":
+        return True
+    keys = row.keys()
+    if "status" in keys and row["status"] == "draft":
+        return False
+    unit = row["unit"] if "unit" in keys else None
+    me = user["username"]
+    return perms.in_scope(me, "entries.edit_others", unit) and perms.in_scope(me, "view.records", unit)
 
 
 @api.post("/entries/<int:entry_id>/lock")
@@ -3314,20 +3539,20 @@ def _may_decide_account(db, target_username, actor_username):
     """Who may approve a deactivation or deletion.
 
     A trainee's logbook is the evidence for their certification, so deleting
-    one is a training decision rather than an administrative one: the Head of
-    Department signs those off, not the Developer. For everyone else either
-    will do.
+    one is a training decision rather than an administrative one. That is its
+    own permission ("decide a trainee's closure"), held by the HOD by default
+    and deliberately NOT by the Developer -- see perms.SEPARATED. For everyone
+    else, "decide a closure for anyone else" will do.
     """
-    caps = user_capabilities(actor_username)
     target = db.execute("SELECT role FROM users WHERE username = ?", (target_username,)).fetchone()
     if not target:
         return False, "No such account."
     if target["role"] in TRAINEE_ROLES:
-        if not caps["isHod"]:
+        if not perms.can(actor_username, "accounts.decide_trainee_closure"):
             return False, ("Deleting a trainee account removes access to their training "
                            "record, so only the Head of Department can approve it.")
         return True, None
-    if not (caps["isHod"] or caps["isDeveloper"]):
+    if not perms.can(actor_username, "accounts.decide_other_closure"):
         return False, "Only the Head of Department or a Developer admin can decide this."
     return True, None
 
@@ -3452,7 +3677,8 @@ def account_overview():
     db = get_db()
     run_due_deletions(db)
     me = db.execute("SELECT * FROM users WHERE username = ?", (g.user["username"],)).fetchone()
-    scope = consultant_scope(g.user["username"]) if me["role"] == "consultant" else {"full": False, "units": [], "activeAssignments": []}
+    scope = consultant_scope(g.user["username"]) if me["role"] in ("consultant", "fellow") \
+        else {"full": False, "units": [], "activeAssignments": []}
 
     assignments = []
     for a in db.execute(
@@ -3517,7 +3743,16 @@ def account_overview():
             "unit": current_unit, "homeUnit": me["unit"],
             "createdAt": me["created_at"], "lastSeenAt": me["last_seen_at"],
             "lifecycle": _lifecycle_of(me),
+            "courseId": me["course_id"], "joinedYm": me["joined_ym"],
+            "course": _course_map().get(me["course_id"]) if me["course_id"] else None,
+            "study": (courses_mod.progress(_course_map().get(me["course_id"]), me["joined_ym"])
+                      if me["course_id"] and _course_map().get(me["course_id"]) else None),
+            "email": me["email"], "phone": me["phone"],
         },
+        "myPermissions": [] if me["role"] == "developer" else [
+            {"key": k, "label": perms.CATALOGUE_BY_KEY[k]["label"], "scope": v["scope"],
+             "units": sorted(v["units"]), "sources": v["sources"]}
+            for k, v in sorted(perms.compute(g.user["username"]).items())],
         "scope": scope,
         "assignments": assignments,
         "postings": postings,
@@ -3574,11 +3809,10 @@ def request_account_deletion():
         return jsonify({"error": "not_found"}), 404
 
     if target != g.user["username"]:
-        caps = user_capabilities(g.user["username"])
         # Someone leaves without closing their own account -- the common
         # case -- so an HOD or Developer can start it for them. It still
         # goes through the same approval and the same buffer.
-        if not (caps["isHod"] or caps["isDeveloper"]):
+        if not perms.can(g.user["username"], "accounts.delete"):
             return jsonify({"error": "forbidden"}), 403
     if _lifecycle_of(row) == LIFECYCLE_DELETED:
         return jsonify({"error": "This account has already been closed."}), 409
@@ -3637,8 +3871,7 @@ def cancel_account_deletion():
 @login_required()
 def list_account_requests():
     db = get_db()
-    caps = user_capabilities(g.user["username"])
-    if not (caps["isHod"] or caps["isDeveloper"] or caps["isCoordinator"]):
+    if not perms.can(g.user["username"], "accounts.requests_view"):
         return jsonify({"error": "forbidden"}), 403
     run_due_deletions(db)
     rows = db.execute(
@@ -3657,7 +3890,7 @@ def list_account_requests():
         "inBuffer": [r for r in out if r["status"] == "approved"],
         "deactivated": deactivated,
         "bufferDays": DELETION_BUFFER_DAYS,
-        "canDecideTrainees": bool(caps["isHod"]),
+        "canDecideTrainees": perms.can(g.user["username"], "accounts.decide_trainee_closure"),
     })
 
 
@@ -3776,8 +4009,7 @@ def download_account_archive(archive_id):
 @api.get("/account/events/<username>")
 @login_required()
 def account_events(username):
-    caps = user_capabilities(g.user["username"])
-    if not (caps["isHod"] or caps["isDeveloper"] or g.user["username"] == username):
+    if not (perms.can(g.user["username"], "accounts.view_events") or g.user["username"] == username):
         return jsonify({"error": "forbidden"}), 403
     db = get_db()
     rows = db.execute(
@@ -3791,7 +4023,7 @@ def account_events(username):
 
 
 @api.post("/config/bulk-add")
-@login_required(role="developer")
+@require_perm("config.edit_lists")
 def config_bulk_add():
     """Paste a block of options into one list.
 

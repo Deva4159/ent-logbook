@@ -7,6 +7,7 @@ import os
 
 from flask import Flask, g, jsonify, request, send_from_directory
 
+from admin_routes import admin
 from api import api
 from db import init_db
 
@@ -14,6 +15,9 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sta
 
 app = Flask(__name__, static_folder=None)
 app.url_map.strict_slashes = False
+# The one upload in the app is a database backup being restored (Developer
+# only). Entries are text; nothing else legitimately sends a large body.
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
 
 with app.app_context():
     init_db()
@@ -200,6 +204,7 @@ def health():
 
 
 app.register_blueprint(api)
+app.register_blueprint(admin)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))

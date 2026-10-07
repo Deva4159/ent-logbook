@@ -314,3 +314,114 @@ CREATE TABLE IF NOT EXISTS account_archives (
   payload        TEXT NOT NULL           -- JSON snapshot
 );
 CREATE INDEX IF NOT EXISTS idx_account_archives_user ON account_archives(username);
+
+
+-- ===================================================================
+--  v7.4  PERMISSIONS, ALERTS, COURSES, BACKUPS
+-- ===================================================================
+
+-- Only how a role template DIFFERS from the one shipped in perms.py, so a
+-- permission added in a later release reaches every template that has not
+-- explicitly removed it. {"perm": "all"|"unit"|"off"}.
+CREATE TABLE IF NOT EXISTS permission_templates (
+  role_key    TEXT PRIMARY KEY,
+  changes     TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  updated_by  TEXT
+);
+
+-- One person, one permission, granted or denied. A deny beats everything a
+-- template gives. `units` is an optional explicit list for a unit-scoped
+-- grant; absent means "their home unit".
+CREATE TABLE IF NOT EXISTS permission_overrides (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  username  TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  perm      TEXT NOT NULL,
+  effect    TEXT NOT NULL CHECK (effect IN ('grant','deny')),
+  scope     TEXT NOT NULL DEFAULT 'all',
+  units     TEXT,
+  note      TEXT,
+  set_by    TEXT,
+  set_at    TEXT NOT NULL,
+  UNIQUE (username, perm)
+);
+CREATE INDEX IF NOT EXISTS idx_permission_overrides_user ON permission_overrides(username);
+
+-- Append-only. Who changed whose rights, and what they were before.
+CREATE TABLE IF NOT EXISTS permission_audit (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_username TEXT,
+  target_kind    TEXT NOT NULL,      -- user | template
+  target         TEXT NOT NULL,      -- a username, or a template key
+  action         TEXT NOT NULL,
+  detail         TEXT,
+  at             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_target ON permission_audit(target_kind, target, id DESC);
+
+-- Alerts. 'manual' ones are written by the Developer; 'system' ones are
+-- raised and cleared by alerts.sweep() from facts already in the database
+-- (a posting about to end, an unfilled post...). dedupe_key makes a system
+-- alert idempotent: the sweep runs on request from two workers and must not
+-- raise the same thing twice.
+CREATE TABLE IF NOT EXISTS alerts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind        TEXT NOT NULL DEFAULT 'manual',
+  rule        TEXT,
+  dedupe_key  TEXT UNIQUE,
+  title       TEXT NOT NULL,
+  body        TEXT,
+  severity    TEXT NOT NULL DEFAULT 'info',
+  audience    TEXT NOT NULL,          -- JSON, see alerts.py
+  link_view   TEXT,
+  starts_at   TEXT,
+  expires_at  TEXT,
+  active      INTEGER NOT NULL DEFAULT 1,
+  resolved_at TEXT,
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_live ON alerts(active, resolved_at);
+
+CREATE TABLE IF NOT EXISTS alert_reads (
+  alert_id     INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+  username     TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+  read_at      TEXT,
+  dismissed_at TEXT,
+  PRIMARY KEY (alert_id, username)
+);
+
+-- Courses: what a trainee is enrolled in. See courses.py.
+CREATE TABLE IF NOT EXISTS courses (
+  id               TEXT PRIMARY KEY,
+  name             TEXT NOT NULL,
+  short_name       TEXT,
+  role             TEXT NOT NULL CHECK (role IN ('resident','senior_resident','fellow')),
+  duration_months  INTEGER NOT NULL,
+  scope            TEXT NOT NULL DEFAULT 'department' CHECK (scope IN ('department','units')),
+  units            TEXT NOT NULL DEFAULT '[]',
+  allow_peripheral INTEGER NOT NULL DEFAULT 0,
+  peripheral_units TEXT NOT NULL DEFAULT '[]',
+  max_peripheral_months INTEGER,
+  year_labels      TEXT NOT NULL DEFAULT '[]',
+  start_month      INTEGER NOT NULL DEFAULT 1,
+  notes            TEXT,
+  active           INTEGER NOT NULL DEFAULT 1,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT,
+  updated_by       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS backup_log (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  at             TEXT NOT NULL,
+  kind           TEXT NOT NULL,       -- download | restore | safety
+  actor_username TEXT,
+  filename       TEXT,
+  size_bytes     INTEGER,
+  sha256         TEXT,
+  detail         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_backup_log_at ON backup_log(id DESC);

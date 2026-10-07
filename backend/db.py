@@ -281,6 +281,23 @@ def migrate_entry_locks(conn):
     conn.commit()
 
 
+def migrate_v74(conn):
+    """v7.4 columns on existing tables: a course and a joining month for each
+    trainee, optional contact details (groundwork for the reminders the
+    department may add later), and the course an entry was logged under."""
+    if "users" in _existing_tables(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        for name, decl in (("course_id", "TEXT"), ("joined_ym", "TEXT"),
+                           ("email", "TEXT"), ("phone", "TEXT")):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+    if "entries" in _existing_tables(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        if "course_id" not in cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN course_id TEXT")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -294,6 +311,7 @@ def init_db():
     # both are idempotent, so running them on every boot costs nothing.
     migrate_account_lifecycle(conn)
     migrate_entry_locks(conn)
+    migrate_v74(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))
@@ -311,3 +329,7 @@ def init_db():
         if changed:
             conn.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(current),))
     conn.commit()
+    # After the config row exists: the default courses read the department's
+    # unit list to decide which units are peripheral.
+    import courses as _courses
+    _courses.seed_and_backfill(conn)
