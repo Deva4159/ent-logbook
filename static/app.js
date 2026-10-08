@@ -923,7 +923,7 @@
   async function dDeleteUser(username){ await api("DELETE","/users/"+encodeURIComponent(username)); }
   async function dListUsers(){ return (await api("GET","/users")).users; }
   async function dListSignupRequests(){ return (await api("GET","/signup-requests")).requests; }
-  async function dApproveSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/approve"); }
+  async function dApproveSignup(username, doctorId){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/approve", doctorId ? { doctorId: doctorId } : {}); }
   async function dRejectSignup(username){ await api("POST","/signup-requests/"+encodeURIComponent(username)+"/reject"); }
   async function dAddEntry(data){ return (await api("POST","/entries", data)).entry.id; }
   async function dUpdateEntry(id, data){
@@ -964,8 +964,16 @@
   /* ---------------- approvals ---------------- */
   async function aSummary(){ return await api("GET","/approvals/summary"); }
   async function aQueue(){ return await api("GET","/approvals/queue"); }
-  async function aSubmit(id, approver, comment){ return await api("POST","/entries/"+id+"/submit",{approverUsername:approver, comment:comment}); }
-  async function aBulkSubmit(ids, approver){ return await api("POST","/entries/bulk-submit",{ids:ids, approverUsername:approver}); }
+  // `who` is a username (older callers), or {doctorId}, or {name, confirm}.
+  function approverBody(who){
+    if(who && typeof who==="object"){
+      if(who.doctorId) return { approverDoctorId: who.doctorId };
+      return { approverName: who.name, confirmFreeText: !!who.confirm };
+    }
+    return { approverUsername: who };
+  }
+  async function aSubmit(id, who, comment){ return await api("POST","/entries/"+id+"/submit", Object.assign({ comment:comment }, approverBody(who))); }
+  async function aBulkSubmit(ids, who){ return await api("POST","/entries/bulk-submit", Object.assign({ ids:ids }, approverBody(who))); }
   async function aWithdraw(id){ return await api("POST","/entries/"+id+"/withdraw",{}); }
   async function aApprove(id, comment){ return await api("POST","/entries/"+id+"/approve",{comment:comment}); }
   async function aBulkApprove(ids){ return await api("POST","/entries/bulk-approve",{ids:ids}); }
@@ -1072,7 +1080,10 @@
     }
   }
 
-  async function doSignup(fields){
+  async function doSignup(fields, extra){
+    extra = extra || {};
+    state.signupDraft = { username:fields.username, password:fields.password, confirm:fields.confirm, displayName:fields.displayName,
+                          designation:fields.designation, unit:fields.unit };
     state.authError=""; state.authBusy=true; render();
     try{
       if((fields.username||"").length < 3){ state.authError="Username must be at least 3 characters (letters, numbers, . _ -)."; state.authBusy=false; render(); return; }
@@ -1088,6 +1099,7 @@
         state.authBusy=false;
         state.authMode = "signup-pending";
         state.signupPendingMessage = res.message || "Your account is awaiting approval.";
+        state.signupDraft = null;
         render();
         return;
       }
@@ -1393,10 +1405,11 @@
     if(prefill) Object.assign(fields, prefill);
     state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null,
                   editingId:(opts&&opts.editingId)||null, status:(opts&&opts.status)||"final",
-                  linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{} };
+                  linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{},
+                  doctors:[], recents:null, dxSug:{}, dxAsked:{} };
     navPush("wiz", "Back", function(){ releaseEntryLock(); state.wiz = null; });
     render();
-    if(type==="surgical" || type==="other") loadWizPeopleList();
+    if(type==="surgical" || type==="other"){ loadWizPeopleList(); loadFrequent(); }
   }
   // Unit+date-scoped Consultant/Assistants picker: re-fetched whenever the
   // wizard's resolved unit or date changes, with a graceful fallback to the
@@ -1407,6 +1420,16 @@
     var f = state.wiz.fields;
     var unit = unitForDate(state.user.postings, f.date);
     state.wiz.peopleUnit = unit;
+    // v7.5: the department's doctors list, flagged for this unit and date.
+    // Replaces the account-only list; the old one stays below as a fallback.
+    try{
+      var dres = await api("GET","/doctors/picker?"+(unit?"unit="+encodeURIComponent(unit)+"&":"")+"date="+encodeURIComponent(f.date));
+      if(state.wiz) state.wiz.doctors = dres.doctors || [];
+    }catch(e){ if(state.wiz) state.wiz.doctors = state.wiz.doctors || []; }
+    if(unit && state.wiz && !state.wiz.recents){
+      try{ state.wiz.recents = await api("GET","/suggest/people?unit="+encodeURIComponent(unit)); }catch(e){ state.wiz.recents = { consultants:[], involved:[] }; }
+    }
+    if(!state.wiz) return;
     if(unit){
       try{
         var res = await api("GET","/units/"+encodeURIComponent(unit)+"/people?date="+encodeURIComponent(f.date));
@@ -1524,7 +1547,7 @@
     await loadConsultants(); // normally loaded on the way into "Log Entry"; edit jumps straight to the form
     var type = normType(e);
     var fields = Object.assign({}, e);
-    fields.consultantChoice = e.consultantUsername || "__other__";
+    fields.consultantChoice = e.consultantDoctorId ? ("d:"+e.consultantDoctorId) : (e.consultantUsername || "__other__");
     // The Assistants column stays a plain comma-joined TEXT string in the
     // database (no schema change) -- back-parse it into the picker's array
     // shape here. Any name that isn't in the current unit/date-scoped list
@@ -1532,7 +1555,9 @@
     // roster) still shows up as a removable "extra" chip via multiPicker's
     // existing built-in handling for values outside its options list.
     if(type==="surgical" || type==="other"){
-      fields.assistantsPicked = (e.assistants||"").split(",").map(function(s){ return s.trim(); }).filter(Boolean);
+      fields.assistantsPicked = (e.involved && e.involved.length)
+        ? e.involved.map(function(i){ return i.name; }).filter(Boolean)
+        : (e.assistants||"").split(",").map(function(s){ return s.trim(); }).filter(Boolean);
       // Fresh copies of every block (and its procedures array) -- the
       // wizard mutates blocks in place (wizSetBlockSite, __entlog_setBlockField,
       // the procedures multiPicker), which must never reach back into the
@@ -1759,9 +1784,25 @@
     render();
   };
 
+  function wizDoctor(id){
+    return ((state.wiz&&state.wiz.doctors)||[]).filter(function(d){ return d.id===+id; })[0] || null;
+  }
+  // The names ticked under "Also involved", as the server wants them: a
+  // listed doctor by id (so their spelling stays the list's), anyone else as typed.
+  function involvedPayload(){
+    var f = state.wiz.fields, docs = (state.wiz.doctors||[]);
+    return (f.assistantsPicked||[]).map(function(n){
+      var d = docs.filter(function(x){ return x.displayName.toLowerCase()===String(n).toLowerCase(); })[0];
+      return d ? { doctorId:d.id } : { name:n };
+    });
+  }
   function resolvedConsultant(){
     var f = state.wiz.fields;
-    if(f.consultantChoice && f.consultantChoice!=="__other__"){
+    if(f.consultantChoice && f.consultantChoice.indexOf("d:")===0){
+      var dd = wizDoctor(f.consultantChoice.slice(2));
+      if(dd) return { consultant: dd.displayName, consultantUsername: dd.linkedUsername||null, consultantDoctorId: dd.id };
+    }
+    if(f.consultantChoice && f.consultantChoice!=="__other__" && f.consultantChoice.indexOf("d:")!==0){
       var c = state.consultantsList.filter(function(x){ return x.username===f.consultantChoice; })[0];
       return { consultant: c ? c.displayName : f.consultantChoice, consultantUsername: f.consultantChoice };
     }
@@ -1792,6 +1833,7 @@
       hospitalNumber: hospitalNumber.trim(), age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
+      consultantDoctorId: cons.consultantDoctorId||null, involved: involvedPayload(),
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
       caseReport: caseReport, status: "final"
     };
@@ -1865,6 +1907,7 @@
       age: (el("f-age")||{}).value || "", sex: (el("f-sex")||{}).value,
       diagnoses: f.diagnoses, diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities,
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
+      consultantDoctorId: cons.consultantDoctorId||null, involved: involvedPayload(),
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
       status: "final"
     };
@@ -1908,6 +1951,7 @@
       sex: (el("f-sex")||{}).value || f.sex || "",
       diagnoses: f.diagnoses||[], diagnosesSecondary: f.diagnosesSecondary||[], comorbidities: f.comorbidities||[],
       consultant: cons.consultant.trim(), consultantUsername: cons.consultantUsername,
+      consultantDoctorId: cons.consultantDoctorId||null, involved: involvedPayload(),
       assistants: (f.assistantsPicked||[]).join(", "), comments: (el("f-comments")||{}).value || "",
       status: "draft"
     };
@@ -2060,7 +2104,8 @@
   }
   async function approveSignupRequest(username){
     try{
-      await dApproveSignup(username);
+      var sel = document.querySelector('[data-su-link="'+username+'"]');
+      await dApproveSignup(username, sel && sel.value ? +sel.value : null);
       state.signupRequests = state.signupRequests.filter(function(u){ return u.username!==username; });
       render();
       toast("Approved "+username+" — they can now sign in.");
@@ -2576,6 +2621,7 @@
       '<button class="btn btn-primary" style="width:100%" id="btn-login" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Signing in…":"Sign in")+'</button>'+
       '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">No account yet? <button class="link-btn" id="go-signup">Create one</button></div>'+
       '<div style="text-align:center; margin-top:8px; font-size:12.5px;" class="muted">Forgot your password? <button class="link-btn" id="go-forgot">Request a reset</button></div>'+
+      '<div style="text-align:center; margin-top:8px; font-size:12.5px;" class="muted">Been given an invite code? <button class="link-btn" id="go-invite">Use it here</button></div>'+
       // Deliberately the least prominent thing on this screen: this is a
       // developer/maintainer path, not a third self-service option for a
       // trainee or consultant, so it doesn't get the same visual weight as
@@ -2611,9 +2657,23 @@
     );
   }
 
+  // ---- sign-up: keep what was typed across every re-render (an error used to
+  // wipe the whole form), and let a doctor on the department list claim their name.
+  function suCapture(){
+    var g = function(id){ var n = el(id); return n ? n.value : undefined; };
+    var d = state.signupDraft || {};
+    ["username","password","confirm","displayName"].forEach(function(k){ var v = g("su-"+k); if(v!==undefined) d[k]=v; });
+    var des = g("su-designation"); if(des!==undefined) d.designation = des;
+    var un = g("su-unit"); if(un!==undefined) d.unit = un;
+    state.signupDraft = d;
+    return d;
+  }
   function renderSignup(){
     var role = state.signupRole;
     var isTrainee = isTraineeRole(role);
+    var sd = state.signupDraft || {};
+    var listRole = (role==="consultant" || role==="fellow" || role==="senior_resident");
+    var claim = null;
     return authShell(''+
       '<div class="auth-eyebrow">ENT Postgraduate Programme</div>'+
       '<h1>Create your account</h1>'+
@@ -2625,31 +2685,71 @@
         radioCard("signup-role","fellow",role==="fellow","Fellow","Same logbook and dashboard as a PG Resident.")+
         radioCard("signup-role","consultant",role==="consultant","Consultant / Faculty","View trainee progress in your unit.")+
       '</div></div>'+
-      '<div class="field"><label for="su-username">Username</label><input id="su-username" type="text" placeholder="e.g. devashish.pg"></div>'+
+      '<div class="field"><label for="su-username">Username</label><input id="su-username" type="text" placeholder="e.g. devashish.pg" value="'+esc(sd.username||"")+'"></div>'+
       '<div class="row2">'+
-        '<div class="field"><label for="su-password">Password</label><input id="su-password" type="password"></div>'+
-        '<div class="field"><label for="su-confirm">Confirm password</label><input id="su-confirm" type="password"></div>'+
+        '<div class="field"><label for="su-password">Password</label><input id="su-password" type="password" value="'+esc(sd.password||"")+'"></div>'+
+        '<div class="field"><label for="su-confirm">Confirm password</label><input id="su-confirm" type="password" value="'+esc(sd.confirm||"")+'"></div>'+
       '</div>'+
-      '<div class="field"><label for="su-displayName">Display name</label><input id="su-displayName" type="text" placeholder="e.g. Dr. Devashish Chaudhary"></div>'+
+      '<div class="field"><label for="su-displayName">Display name</label><input id="su-displayName" type="text" placeholder="e.g. Dr. Devashish Chaudhary" value="'+esc(sd.displayName||"")+'">'+
+        (listRole ? '<div class="hint">Use your full name as the department knows you. Whoever approves your account matches it to the department list. Been given an invite code instead? Use it from the sign-in page.</div>' : '')+'</div>'+
       (isTrainee ?
         vCourseFields("su", role, "")+
         (role==="fellow" ?
-          '<div class="field"><label for="su-unit-search">Parent / home unit</label>'+searchSingleField("su-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
-          '<p class="hint">This is your home unit for the fellowship — you can still log peripheral postings in other units under My Postings after signing in.</p>'
+          (claim ? '' :
+          '<div class="field"><label for="su-unit-search">Parent / home unit</label>'+searchSingleField("su-unit", unitSearchOptions(), sd.unit||null, "Search units…")+'</div>'+
+          '<p class="hint">This is your home unit for the fellowship — you can still log peripheral postings in other units under My Postings after signing in.</p>')
           :
           '<p class="hint">You’ll add your unit posting (with dates) after signing in, under My Postings.</p>'
         )
         :
+        (claim ? '' :
         '<div class="row2">'+
-          '<div class="field"><label for="su-designation">Designation</label><select id="su-designation">'+opts_(state.config.consultantDesignations, state.config.consultantDesignations[0])+'</select></div>'+
-          '<div class="field"><label for="su-unit-search">Department / unit</label>'+searchSingleField("su-unit", unitSearchOptions(), null, "Search units…")+'</div>'+
-        '</div>'
+          '<div class="field"><label for="su-designation">Designation</label><select id="su-designation">'+opts_(state.config.consultantDesignations, sd.designation||state.config.consultantDesignations[0])+'</select></div>'+
+          '<div class="field"><label for="su-unit-search">Department / unit</label>'+searchSingleField("su-unit", unitSearchOptions(), sd.unit||null, "Search units…")+'</div>'+
+        '</div>')
       )+
       '<p class="hint">Your account needs approval before you can sign in — a Head of Department, Course Coordinator'+(role==="fellow"?", Head of Unit,":"")+' or Developer will review it.</p>'+
       '<button class="btn btn-primary" style="width:100%; margin-top:6px;" id="btn-signup" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Creating account…":"Create account")+'</button>'+
       '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted">Already have an account? <button class="link-btn" id="go-login">Sign in</button></div>',
       { maxWidth: 460 }
     );
+  }
+
+  // ---- invite code: the HOD enters only a username; the doctor sets the password.
+  function renderInvite(){
+    var inv = state.invite || {};
+    var inner;
+    if(inv.doctor){
+      inner = '<div class="auth-eyebrow">Invite</div><h1>Welcome, '+esc(inv.doctor.displayName)+'</h1>'+
+        '<div class="auth-sub">'+esc(inv.doctor.designation)+(inv.doctor.units&&inv.doctor.units.length?' \u00b7 '+inv.doctor.units.map(unitShort).map(esc).join(", "):'')+'. Your username will be <b class="mono">'+esc(inv.username)+'</b>. Choose a password and you are in.</div>'+
+        (state.authError ? '<div class="error-banner">'+esc(state.authError)+'</div>' : '')+
+        '<div class="row2"><div class="field"><label for="inv-password">Password</label><input id="inv-password" type="password" autocomplete="new-password"></div>'+
+        '<div class="field"><label for="inv-confirm">Confirm password</label><input id="inv-confirm" type="password" autocomplete="new-password"></div></div>'+
+        '<button class="btn btn-primary" style="width:100%" id="btn-invite-use" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Creating…":"Create my account")+'</button>';
+    } else {
+      inner = '<div class="auth-eyebrow">Invite</div><h1>Use your invite code</h1>'+
+        '<div class="auth-sub">The Head of Department gave you a code like <span class="mono">ABCDE-23456</span>. It works once and expires after a week.</div>'+
+        (state.authError ? '<div class="error-banner">'+esc(state.authError)+'</div>' : '')+
+        '<div class="field"><label for="inv-code">Invite code</label><input id="inv-code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCDE-23456" value="'+esc(inv.code||"")+'"></div>'+
+        '<button class="btn btn-primary" style="width:100%" id="btn-invite-check" '+(state.authBusy?"disabled":"")+'>'+(state.authBusy?"Checking…":"Continue")+'</button>';
+    }
+    return authShell(inner + '<div style="text-align:center; margin-top:16px; font-size:13px;" class="muted"><button class="link-btn" id="go-login-from-invite">Back to sign in</button></div>', { maxWidth: 420 });
+  }
+  async function doInvitePreview(code){
+    state.authError=""; state.authBusy=true; state.invite = { code: code }; render();
+    try{
+      var r = await api("POST","/auth/invite/preview",{ code: code });
+      state.invite = { code: code, doctor: r.doctor, username: r.username };
+    }catch(e){ state.authError = e.message || "That code did not work."; }
+    state.authBusy=false; render();
+  }
+  async function doInviteUse(pw, confirmPw){
+    state.authError=""; state.authBusy=true; render();
+    try{
+      var r = await api("POST","/auth/invite/use",{ code: state.invite.code, password: pw, confirm: confirmPw });
+      state.user = r.user; state.capabilities = r.capabilities; state.user.postings = [];
+      state.invite = null; state.view = defaultViewFor(r.user.role); state.authBusy=false; render(); loadForView();
+    }catch(e){ state.authError = e.message || "Could not create the account."; state.authBusy=false; render(); }
   }
 
   function renderSignupPending(){
@@ -2719,12 +2819,14 @@
       items.push(["approval-queue","Case Sign-off"]);
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
+      if(hasPerm("directory.manage")) items.push(["doctors","Doctors"]);
+      if(hasPerm("lists.review")) items.push(["list-review","List Review"]);
       items.push(["feedback","Feedback"]);
       if(hasPerm("accounts.requests_view")) items.push(["account-requests","Account Requests"]);
       items.push(["account","My Account"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -3063,19 +3165,21 @@
   // top, implemented as plain DOM show/hide in wireShellEvents rather than a
   // state change, so typing a search term never triggers a full re-render
   // and never costs the input its cursor position/focus.
-  function multiPicker(fieldKey, options, selected){
+  function multiPicker(fieldKey, options, selected, mpOpts){
     selected = selected || [];
+    mpOpts = mpOpts || {};
     // Every current caller (diagnoses, comorbidities, per-site procedures,
     // assistants) is an unordered pool of choices where alphabetical is
     // strictly easier to scan than admin-add/API-fetch order -- sorted once,
     // here, rather than at each of the dozen call sites (and their tests'
     // hand-picked entries) so nothing can add a 13th call site that forgets
     // to sort.
-    options = sortedStrings(options);
+    if(!mpOpts.keepOrder) options = sortedStrings(options);
     var boxes = options.map(function(o){
       var checked = selected.indexOf(o)!==-1;
-      return '<label class="mp-row" data-mp-row-text="'+esc(o.toLowerCase())+'" style="display:flex; gap:8px; align-items:center; font-size:13.5px; padding:4px 0;">'+
-        '<input type="checkbox" class="mp-box" data-mp-field="'+esc(fieldKey)+'" value="'+esc(o)+'" '+(checked?"checked":"")+'> '+esc(o)+'</label>';
+      var note = mpOpts.annot && mpOpts.annot[o];
+      return '<label class="mp-row" data-mp-row-text="'+esc((o+" "+(note||"")).toLowerCase())+'" style="display:flex; gap:8px; align-items:center; font-size:13.5px; padding:4px 0;">'+
+        '<input type="checkbox" class="mp-box" data-mp-field="'+esc(fieldKey)+'" value="'+esc(o)+'" '+(checked?"checked":"")+'> '+esc(o)+(note?' <span class="muted" style="font-size:12px;">\u00b7 '+esc(note)+'</span>':'')+'</label>';
     }).join("");
     var extras = selected.filter(function(s){ return options.indexOf(s)===-1; });
     var extraChips = extras.map(function(s){
@@ -3147,14 +3251,65 @@
     });
   }
 
+  // v7.5: ONE combined list for the posting unit -- highest designation
+  // first -- from which the person who will sign the record off is picked.
+  // Doctors from other units sit under their own heading, always reachable
+  // (search finds them), and "Other / not listed" is always there for a name
+  // that is not on the department list yet.
+  function rankChip(d){ return d.designation ? d.designation : ""; }
+  function consultantEligible(d){ return (d.department||"ENT").toUpperCase()==="ENT" && (d.rank>=3 || d.canSignOff); }
   function consultantField(){
     var f = state.wiz.fields;
-    var list = sortedByDisplayName(wizConsultantOptions());
-    var options = list.map(function(c){ return { value:c.username, label:c.displayName }; });
-    options.push({ value:"__other__", label:"Other / not listed" });
+    var docs = (state.wiz.doctors||[]).filter(consultantEligible);
+    // an older entry (or a draft) may hold an account name; map it to its list row
+    if(f.consultantChoice && f.consultantChoice!=="__other__" && f.consultantChoice.indexOf("d:")!==0){
+      var byUser = (state.wiz.doctors||[]).filter(function(d){ return d.linkedUsername===f.consultantChoice; })[0];
+      if(byUser) f.consultantChoice = "d:"+byUser.id;
+    }
+    if(!docs.length && !(state.wiz.doctors||[]).length){
+      // the list could not be loaded: fall back to the accounts list
+      var oldList = sortedByDisplayName(wizConsultantOptions());
+      var oldOpts = oldList.map(function(c){ return { value:c.username, label:c.displayName }; });
+      oldOpts.push({ value:"__other__", label:"Other / not listed" });
+      return '<div class="field"><label for="f-consultantChoice-search">Consultant</label>'+searchSingleField("f-consultantChoice", oldOpts, f.consultantChoice, "Search consultants…")+'</div>'+
+        '<div class="field" id="consultant-other-wrap" style="'+(f.consultantChoice==="__other__"?"":"display:none;")+'"><label for="f-consultant-other">Consultant name</label><input id="f-consultant-other" type="text" value="'+esc(f.consultant||"")+'" placeholder="e.g. Dr. Rekha Menon"></div>';
+    }
+    var unitKey = state.wiz.peopleUnit;
+    var inLabel = unitKey ? ("In "+unitShort(unitKey)) : "Department";
+    var options = docs.map(function(d){
+      return { value:"d:"+d.id, label:d.displayName+(d.designation?" \u00b7 "+d.designation:"")+(d.hasAccount?"":" (no account yet)"),
+               group: (unitKey ? (d.inUnit ? inLabel : "Other units") : "All doctors") };
+    });
+    var cur = f.consultantChoice;
+    if(cur && cur.indexOf("d:")===0 && !options.some(function(o){ return o.value===cur; })){
+      var known = wizDoctor(cur.slice(2));
+      if(known) options.push({ value:cur, label:known.displayName+" (not in the usual list)", group:"Other units" });
+    }
+    options.push({ value:"__other__", label:"Other / not listed", group:"Not on the list" });
+    var rc = (state.wiz.recents && state.wiz.recents.consultants || []).map(function(id){ return wizDoctor(id); }).filter(Boolean).filter(consultantEligible).slice(0,4);
+    var chips = rc.length ? '<div class="dp-recents"><span class="muted">Usually with</span> '+rc.map(function(d){
+        return '<button type="button" class="chip chip-teal dp-chip" onclick="window.__entlog_ssPick(\'f-consultantChoice\',\'d:'+d.id+'\')">'+esc(d.displayName)+'</button>'; }).join(" ")+'</div>' : '';
+    var pickedDoc = cur && cur.indexOf("d:")===0 ? wizDoctor(cur.slice(2)) : null;
+    var note = (pickedDoc && !pickedDoc.hasAccount)
+      ? '<div class="hint dp-note">'+esc(pickedDoc.displayName)+' has no account yet. When you send this for sign-off it goes to the Head of Unit or the HOD, and moves to '+esc(pickedDoc.displayName)+' automatically once they have an account.</div>' : '';
     return ''+
-    '<div class="field"><label for="f-consultantChoice-search">Consultant</label>'+searchSingleField("f-consultantChoice", options, f.consultantChoice, "Search consultants…")+'</div>'+
-    '<div class="field" id="consultant-other-wrap" style="'+(f.consultantChoice==="__other__"?"":"display:none;")+'"><label for="f-consultant-other">Consultant name</label><input id="f-consultant-other" type="text" value="'+esc(f.consultant||"")+'" placeholder="e.g. Dr. Rekha Menon"></div>';
+    '<div class="field"><label for="f-consultantChoice-search">Consultant <span class="muted">(who will sign this off)</span></label>'+chips+
+      searchSingleField("f-consultantChoice", options, cur, "Search "+(unitKey?"your unit’s consultants and others…":"consultants…"))+note+'</div>'+
+    '<div class="field" id="consultant-other-wrap" style="'+(cur==="__other__"?"":"display:none;")+'"><label for="f-consultant-other">Consultant name</label><input id="f-consultant-other" type="text" value="'+esc(f.consultant||"")+'" placeholder="e.g. Dr. Rekha Menon">'+
+      '<div class="hint">Not on the department list. The Head of Department can add them; until then, sign-off for this name goes to the Head of Unit or the HOD.</div></div>';
+  }
+  function involvedField(){
+    var f = state.wiz.fields, me = state.user.username;
+    var docs = (state.wiz.doctors||[]).filter(function(d){ return d.linkedUsername!==me; });
+    var names = docs.map(function(d){ return d.displayName; });
+    var annot = {};
+    docs.forEach(function(d){ annot[d.displayName] = [d.designation||"", (d.inUnit?"":"other unit")].filter(Boolean).join(" \u00b7 "); });
+    var rc = (state.wiz.recents && state.wiz.recents.involved || []).map(function(id){ return wizDoctor(id); }).filter(Boolean).slice(0,5);
+    var chips = rc.length ? '<div class="dp-recents"><span class="muted">Often with</span> '+rc.map(function(d){
+        var on = (f.assistantsPicked||[]).indexOf(d.displayName)!==-1;
+        return '<button type="button" class="chip dp-chip '+(on?'chip-grey':'chip-teal')+'" data-dp-involve="'+esc(d.displayName)+'"'+(on?' disabled':'')+'>'+esc(d.displayName)+'</button>'; }).join(" ")+'</div>' : '';
+    return '<div class="field"><label>Also involved <span class="muted">(optional — assistants, anaesthetist, a consultant from another unit)</span></label>'+chips+
+      multiPicker("assistantsPicked", names, f.assistantsPicked, { keepOrder:true, annot:annot })+'</div>';
   }
 
   // Shared by the Surgical and Other Procedure forms: one repeatable block
@@ -3237,7 +3392,7 @@
   function renderSurgicalForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("surgical",(state.wiz.editingId?"Edit ":"")+"Surgical Procedure",wizDraftBadge())+
+    '<div class="card">'+photoBand("surgical",(state.wiz.editingId?"Edit ":"")+"Surgical Procedure",wizDraftBadge())+repeatLastBar()+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -3251,14 +3406,14 @@
         '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
       '</div>'+
       '<div class="form-section"><div class="form-section-title">Diagnoses &amp; comorbidities</div>'+
-        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
+        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+dxSuggestChips()+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
         '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
         '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '</div>'+
       fieldGroup("procedures", '<div class="form-section-title">Sites &amp; procedures</div>'+renderProcedureBlocks(true), "form-section")+
       '<div class="form-section"><div class="form-section-title">Consultant &amp; sign-off</div>'+
         fieldGroup("consultant", consultantField())+
-        '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
+        involvedField()+
         '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
         '<div class="field"><label for="f-caseReport">Will you be writing a case report?</label><select id="f-caseReport">'+opts_(["No","Yes"],f.caseReport)+'</select><div class="hint">Yes takes you straight into an Interesting Case entry, pre-filled with this case’s Hospital Number, age/sex, diagnoses, comorbidities and procedures.</div></div>'+
       '</div>'+
@@ -3269,7 +3424,7 @@
   function renderOtherForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("other",(state.wiz.editingId?"Edit ":"")+"Other Procedure",wizDraftBadge())+
+    '<div class="card">'+photoBand("other",(state.wiz.editingId?"Edit ":"")+"Other Procedure",wizDraftBadge())+repeatLastBar()+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -3286,14 +3441,14 @@
         '</div>'+
       '</div>'+
       '<div class="form-section"><div class="form-section-title">Diagnoses &amp; comorbidities</div>'+
-        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
+        fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+dxSuggestChips()+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
         '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
         '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '</div>'+
       fieldGroup("procedures", '<div class="form-section-title">Sites &amp; procedures</div>'+renderProcedureBlocks(false), "form-section")+
       '<div class="form-section"><div class="form-section-title">Consultant &amp; sign-off</div>'+
         fieldGroup("consultant", consultantField())+
-        '<div class="field"><label>Assistants <span class="muted">(optional)</span></label>'+multiPicker("assistantsPicked", wizPeopleDisplayNames(), f.assistantsPicked)+'</div>'+
+        involvedField()+
         '<div class="field"><label for="f-comments">Comments / Complications <span class="muted">(optional)</span></label><textarea id="f-comments">'+esc(f.comments||"")+'</textarea></div>'+
       '</div>'+
       wizDraftButtons()+
@@ -3316,7 +3471,7 @@
         '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
         '<div class="field"><label for="f-sex">Sex</label><select id="f-sex">'+opts_(state.config.sexOptions,f.sex)+'</select></div>'+
       '</div>'+
-      fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
+      fieldGroup("diagnoses", '<label>Primary Diagnosis</label>'+dxSuggestChips()+multiPicker("diagnoses", state.config.diagnoses, f.diagnoses))+
       '<div class="field"><label>Secondary Diagnosis <span class="muted">(optional)</span></label>'+multiPicker("diagnosesSecondary", state.config.diagnoses, f.diagnosesSecondary)+'</div>'+
       '<div class="field"><label>Comorbidities</label>'+multiPicker("comorbidities", state.config.comorbidities, f.comorbidities)+'</div>'+
       '<div class="field"><label>Procedure(s) performed <span class="muted">(optional)</span></label>'+multiPicker("procedures", allProcs, f.procedures)+'</div>'+
@@ -3611,27 +3766,34 @@
   ============================================================ */
   function renderSubmitDialog(){
     var d = state.submitDialog; if(!d) return "";
-    var opts = approverOptions();
+    var docs = (d.docs||[]).filter(function(x){ return x.canSignOff; });
     var many = d.ids.length > 1;
-    return '<div class="modal-overlay" data-submit-overlay><div class="modal-card" style="max-width:440px;">'+
+    var inU = docs.filter(function(x){ return x.inUnit; }), out = docs.filter(function(x){ return !x.inUnit; });
+    function opt(x){
+      return '<option value="d:'+x.id+'"'+(("d:"+x.id)===d.approver?" selected":"")+'>'+esc(x.displayName)+(x.designation?" \u00b7 "+esc(x.designation):"")+(x.hasAccount?"":" (no account yet)")+'</option>';
+    }
+    var cur = d.approver;
+    return '<div class="modal-overlay" data-submit-overlay><div class="modal-card" style="max-width:460px;">'+
       '<button class="modal-close" data-submit-cancel aria-label="Close">&times;</button>'+
       '<h2>Send '+(many ? d.ids.length+' records' : 'this record')+' for sign-off</h2>'+
       '<p class="muted" style="font-size:13px; margin:6px 0 16px;">'+
         'The consultant you pick will be asked to sign '+(many?'these off':'this off')+'. '+
         'Once signed, the record is locked and you will need them to release it before you can edit it again.</p>'+
-      (opts.length ?
-        '<div class="field"><label for="submit-approver">Send to</label>'+
-          '<select id="submit-approver">'+
-            '<option value="">Choose a consultant…</option>'+
-            opts.map(function(c){
-              return '<option value="'+esc(c.username)+'"'+(c.username===d.approver?" selected":"")+'>'+esc(c.displayName)+'</option>';
-            }).join("")+
-          '</select></div>'+
-        '<div class="field"><label for="submit-note">Note (optional)</label>'+
-          '<textarea id="submit-note" placeholder="Anything the consultant should know"></textarea></div>'
-        : '<div class="notice-banner"><span>No active consultant accounts to send to yet. Ask your Developer admin to add one.</span></div>')+
+      '<div class="field"><label for="submit-approver">Send to</label>'+
+        '<select id="submit-approver">'+
+          '<option value="">Choose a consultant…</option>'+
+          (inU.length ? '<optgroup label="'+esc(d.unit?("In "+unitShort(d.unit)):"Department")+'">'+inU.map(opt).join("")+'</optgroup>' : '')+
+          (out.length ? '<optgroup label="'+(inU.length?"Other units":"Consultants")+'">'+out.map(opt).join("")+'</optgroup>' : '')+
+          '<option value="__typed__"'+(cur==="__typed__"?" selected":"")+'>Someone not on the list…</option>'+
+        '</select></div>'+
+      '<div class="field" id="submit-typed-wrap" style="'+(cur==="__typed__"?"":"display:none;")+'"><label for="submit-typed">Consultant name</label>'+
+        '<input id="submit-typed" type="text" value="'+esc(d.typed||"")+'" placeholder="e.g. Dr. Rekha Menon">'+
+        '<div class="hint">Not on the department list, so the Head of Unit or the HOD signs it off for them until they are added.</div></div>'+
+      '<div class="hint" id="submit-noacct" style="margin:-6px 0 12px; '+((function(){ var x=(d.docs||[]).filter(function(y){ return "d:"+y.id===cur; })[0]; return x && !x.hasAccount ? "" : "display:none;"; })())+'">This doctor has no account yet. The record waits with your Head of Unit or the HOD, and moves to them the day their account is made.</div>'+
+      '<div class="field"><label for="submit-note">Note (optional)</label>'+
+        '<textarea id="submit-note" placeholder="Anything the consultant should know"></textarea></div>'+
       '<div class="btn-row"><button class="btn" data-submit-cancel>Cancel</button>'+
-        '<button class="btn btn-primary" data-submit-go '+(opts.length?"":"disabled")+'>Send</button></div>'+
+        '<button class="btn btn-primary" data-submit-go>Send</button></div>'+
     '</div></div>';
   }
 
@@ -3665,7 +3827,7 @@
         '<div class="q-meta muted">'+esc(e.authorDisplayName||userDisplay(e.authorUsername))+' &middot; '+fmtDate(e.date)+
           ' &middot; '+unitShortHtml(e.unit)+
           ' &middot; <span class="'+(over?"q-age-over":"")+'">waiting '+e.waitingDays+'d</span>'+
-          (delegated ? ' &middot; <span class="chip chip-violet">for '+esc(e.approverDisplayName||userDisplay(e.onBehalfOf))+'</span>' : '')+
+          (delegated ? ' &middot; <span class="chip chip-violet">for '+esc(e.approverDisplayName||userDisplay(e.onBehalfOf))+(e.nomineeHasNoAccount?' \u00b7 no account yet':'')+'</span>' : '')+
           (e.unlockRequested ? ' &middot; <span class="chip chip-amber">unlock asked</span>' : '')+
         '</div></div>'+
       '<div class="q-act">'+
@@ -3755,7 +3917,8 @@
         if(isApprovable(e)){
           extra += '<div class="detail-row"><div class="k">Sign-off</div><div>'+approvalChip(e)+
             (e.approverUsername ? ' <span class="muted" style="font-size:12px;">'+
-              (e.approvalState==="approved"?"by ":"with ")+esc(userDisplay(e.approverUsername))+'</span>' : '')+
+              (e.approvalState==="approved"?"by ":"with ")+esc(userDisplay(e.approverUsername))+'</span>'
+              : (e.approverName ? ' <span class="muted" style="font-size:12px;">with '+esc(e.approverName)+' \u00b7 no account yet, so your Head of Unit or the HOD signs it off</span>' : ''))+
             (isLocked(e) ? ' <span class="muted" style="font-size:12px;">\u00b7 locked</span>' : '')+
             '</div></div>';
         }
@@ -4654,15 +4817,27 @@
   function renderSignupApprovals(){
     if(state.loading) return skeletonTable(5);
     var rows = state.signupRequests.slice().sort(function(a,b){ return (a.createdAt||"").localeCompare(b.createdAt||""); });
+    function listCell(u){
+      if(u.claim){
+        return '<span class="chip chip-teal">Claims</span> <b>'+esc(u.claim.displayName)+'</b><div class="muted" style="font-size:12px;">'+esc(u.claim.designation)+(u.claim.units&&u.claim.units.length?' \u00b7 '+u.claim.units.map(unitShort).map(esc).join(", "):'')+
+          '. Approving links this account to that name, and takes name, designation and unit from the list.'+(u.canDecide?'':' Only the Head of Department or a Developer can settle this.')+'</div>';
+      }
+      var m = u.possibleMatches || [];
+      if(!m.length) return u.role==="resident" ? '<span class="muted">—</span>' : '<span class="muted">Not on the list; approving adds them.</span>';
+      var free = m.filter(function(x){ return !x.hasAccount; }), taken = m.filter(function(x){ return x.hasAccount; });
+      return (taken.length ? '<div class="v-warn" style="font-size:12.5px;">Possible duplicate: '+taken.map(function(x){ return esc(x.displayName); }).join(", ")+' already has an account.</div>' : '')+
+        (free.length && u.canLinkList ? '<select data-su-link="'+esc(u.username)+'" style="margin-top:4px;"><option value="">Add as a new name on the list</option>'+
+          free.map(function(x){ return '<option value="'+x.id+'">Same person as '+esc(x.displayName)+' ('+esc(x.designation)+')</option>'; }).join("")+'</select>' : '');
+    }
     return ''+
     '<div class="card"><h2>Pending sign-ups ('+rows.length+')</h2>'+
       '<p class="muted" style="margin-bottom:14px;">New accounts wait here until someone eligible approves them — approving lets them sign in right away; rejecting deletes the request outright.</p>'+
       (rows.length===0 ? '<div class="empty-state">Nothing waiting on you.</div>' :
-      '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Unit</th><th>Requested</th><th></th></tr></thead><tbody>'+
+      '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Unit</th><th>Doctors list</th><th>Requested</th><th></th></tr></thead><tbody>'+
         rows.map(function(u){
           return '<tr><td class="mono">'+esc(u.username)+'</td><td>'+esc(u.displayName)+'</td><td><span class="chip chip-grey">'+esc(roleLabel(u.role))+'</span></td>'+
-          '<td>'+esc(u.pgYear || u.designation || "—")+'</td><td>'+unitShortHtml(u.unit)+'</td><td class="tabular">'+fmtDateTime(u.createdAt)+'</td>'+
-          '<td style="white-space:nowrap;"><button class="btn btn-sm btn-primary" data-approve-signup="'+esc(u.username)+'">Approve</button> <button class="btn btn-sm btn-danger" data-reject-signup="'+esc(u.username)+'">Reject</button></td></tr>';
+          '<td>'+esc(u.pgYear || u.designation || "—")+'</td><td>'+unitShortHtml(u.unit)+'</td><td style="min-width:220px;">'+listCell(u)+'</td><td class="tabular">'+fmtDateTime(u.createdAt)+'</td>'+
+          '<td style="white-space:nowrap;"><button class="btn btn-sm btn-primary" data-approve-signup="'+esc(u.username)+'"'+(u.canDecide===false?' disabled title="Only the Head of Department or a Developer can settle a claim on the doctors list"':'')+'>Approve</button> <button class="btn btn-sm btn-danger" data-reject-signup="'+esc(u.username)+'"'+(u.canDecide===false?' disabled':'')+'>Reject</button></td></tr>';
         }).join("")+
       '</tbody></table></div>')+
     '</div>';
@@ -4957,6 +5132,27 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.5.1", date: "2026-10-08", title: "The doctors list is no longer searchable before sign-in",
+      note: "Replace backend/api.py, backend/doctor_routes.py, backend/doctors.py and static/app.js, styles.css. No database change.",
+      changes: [
+        ["changed", "<b>Nobody can see names on the doctors list without signing in.</b> The search box on the sign-up page, and the warning that named similar listed doctors, are gone. Sign-up is as it was before 7.5: you type your own name. The person who approves your account is shown the listed names yours resembles and links it to the right row."],
+        ["changed", "<b>Invite codes are the way to skip that step.</b> A doctor given a code by the Head of Department or a Developer is linked at once. The \u201cWaiting\u201d tab on the Doctors screen now appears only if a claim is outstanding."]
+      ]
+    },
+    {
+      version: "7.5", date: "2026-10-08", title: "A list of doctors, faster entries, and cleaner sign-up",
+      note: "Adds three tables. Nothing is lost on upgrade: every existing consultant and fellow account is placed on the new list automatically, and entries already waiting for sign-off keep their approver.",
+      changes: [
+        ["added", "<b>A list of doctors that does not depend on accounts.</b> The Head of Department and Developer keep a list of everyone in the department \u2014 name, designation and units \u2014 whether or not they have a login. It fills the consultant and assistant pickers. Doctors can be added one at a time or unit by unit in bulk (paste names, check the preview, then apply); an exact match to someone already listed is merged, not duplicated."],
+        ["added", "<b>Two safe ways to give a listed doctor an account.</b> (1) The HOD or Developer chooses a username and issues a one-time invite code; the doctor opens the sign-up page, enters the code and sets their own password. (2) The doctor signs up and picks their own name from the list; that row is locked as \u201cclaim pending\u201d until the HOD or Developer approves. One row can hold at most one account, enforced by the database, and sign-up warns when a typed name closely resembles a listed doctor."],
+        ["added", "<b>Entries can name a doctor who has no account yet.</b> The entry waits with the unit's Head of Unit or the HOD, and moves to the doctor automatically the moment their account is linked."],
+        ["changed", "<b>The entry form asks for one approving doctor and, separately, anyone else involved.</b> One list for the posting unit, highest rank first; the person chosen is pre-filled as \u201cSend to\u201d. A second box takes others, including other units; free text is always available."],
+        ["added", "<b>Faster entries.</b> Recent consultants and assistants as one-tap chips, a \u201cRepeat last entry\u201d button, diagnosis suggestions once a procedure is chosen, and starter lists of diagnoses, comorbidities and procedures per site for the HOD to review before anything reaches the live lists."],
+        ["added", "<b>List Review.</b> Anything users type that is not on a list is gathered for the HOD, who can promote it (with a corrected spelling), dismiss it, or add starter-list items in bulk."],
+        ["fixed", "<b>The sign-up form no longer clears everything you typed when one field is wrong.</b>"]
+      ]
+    },
     {
       version: "7.4.1", date: "2026-10-07", title: "Two fixes found in the first diagnostics run",
       note: "No database change. Replace backend/admin_routes.py, backend/alerts.py and static/app.js.",
@@ -5358,7 +5554,7 @@
     }
     if(!state.user){
       var mode = state.authMode;
-      app.innerHTML = mode==="signup" ? renderSignup() : (mode==="dev-login" ? renderDevLogin() : (mode==="forgot" ? renderForgot() : (mode==="signup-pending" ? renderSignupPending() : renderLogin())));
+      app.innerHTML = mode==="signup" ? renderSignup() : (mode==="dev-login" ? renderDevLogin() : (mode==="forgot" ? renderForgot() : (mode==="signup-pending" ? renderSignupPending() : (mode==="invite" ? renderInvite() : renderLogin()))));
       wireAuthEvents();
       return;
     }
@@ -5401,6 +5597,7 @@
     // listener in wireShellEvents instead, because typing deliberately does
     // NOT re-render (that is what would eat the cursor).
     persistWizDraft();
+    if(state.wiz) wizEnsureSuggestions();
   }
 
   /* ============================================================
@@ -5484,16 +5681,24 @@
     };
 
     document.querySelectorAll('input[name="signup-role"]').forEach(function(r){
-      r.onchange = function(){ state.signupRole = r.value; render(); };
+      r.onchange = function(){ suCapture(); state.signupRole = r.value; render(); };
     });
-    var btnSignup = el("btn-signup"); if(btnSignup) btnSignup.onclick = function(){
-      doSignup({
+    function suFields(){
+      return {
         username: el("su-username").value, password: el("su-password").value, confirm: el("su-confirm").value,
-        displayName: el("su-displayName").value, role: state.signupRole,
+        displayName: (el("su-displayName")||{}).value, role: state.signupRole,
         pgYear: (el("su-pgYear")||{}).value, designation: (el("su-designation")||{}).value, unit: (el("su-unit")||{}).value,
         courseId: (el("su-course")||{}).value, joinedYm: (el("su-joined")||{}).value
-      });
+      };
+    }
+    var btnSignup = el("btn-signup"); if(btnSignup) btnSignup.onclick = function(){
+      doSignup(suFields());
     };
+    var goInvite = el("go-invite"); if(goInvite) goInvite.onclick = function(){ state.authMode="invite"; state.authError=""; state.invite=null; render(); };
+    var goLoginFromInvite = el("go-login-from-invite"); if(goLoginFromInvite) goLoginFromInvite.onclick = function(){ state.authMode="login"; state.authError=""; state.invite=null; render(); };
+    var invCheck = el("btn-invite-check"); if(invCheck) invCheck.onclick = function(){ doInvitePreview((el("inv-code")||{}).value||""); };
+    var invCode = el("inv-code"); if(invCode) invCode.addEventListener("keydown", function(ev){ if(ev.key==="Enter"){ ev.preventDefault(); invCheck.click(); } });
+    var invUse = el("btn-invite-use"); if(invUse) invUse.onclick = function(){ doInviteUse((el("inv-password")||{}).value||"", (el("inv-confirm")||{}).value||""); };
 
     var goLoginFromPending = el("go-login-from-pending"); if(goLoginFromPending) goLoginFromPending.onclick = function(){
       state.authMode="login"; state.authError=""; render();
@@ -5554,12 +5759,22 @@
     /* ---------------- approvals ---------------- */
     function pickIds(){ return Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; }); }
     async function openSubmit(ids){
-      // consultantsList is normally only fetched on the way into Log Entry;
-      // the submit dialog can be opened straight from My Entries.
-      await loadConsultants();
-      var d = approverOptions();
+      // v7.5: the department's doctors list, not only people with accounts.
+      // The record's own consultant is pre-selected when every record shares one.
+      var mine = (state.myEntries||[]).filter(function(e){ return ids.indexOf(String(e.id))!==-1 || ids.indexOf(e.id)!==-1; });
+      var unit = (mine[0]||{}).unit || null;
+      var docs = [];
+      try{ docs = (await api("GET","/doctors/picker"+(unit?"?unit="+encodeURIComponent(unit):""))).doctors || []; }catch(e){}
+      var pre = "";
+      var keys = mine.map(function(e){
+        if(e.consultantDoctorId) return "d:"+e.consultantDoctorId;
+        var hit = docs.filter(function(d){ return e.consultantUsername && d.linkedUsername===e.consultantUsername; })[0];
+        return hit ? "d:"+hit.id : "";
+      });
+      if(keys.length && keys.every(function(k){ return k && k===keys[0]; })) pre = keys[0];
+      if(pre){ var pd = docs.filter(function(d){ return "d:"+d.id===pre; })[0]; if(!pd || !pd.canSignOff) pre = ""; }
       navOpenOverlay(function(){
-        state.submitDialog = { ids: ids, approver: d.length===1 ? d[0].username : "" };
+        state.submitDialog = { ids: ids, approver: pre, docs: docs, unit: unit, typed: "" };
       }, function(){ state.submitDialog = null; });
     }
     document.querySelectorAll("[data-send-approval]").forEach(function(b){
@@ -5646,7 +5861,7 @@
         state.openEntryMenu=null;
         try{
           var h = await aHistory(b.getAttribute("data-approval-history"));
-          toast(h.length ? h.map(function(r){ return r.action.replace(/_/g," ")+" by "+r.actor_username; }).join(" \u2192 ") : "No sign-off activity yet.");
+          toast(h.length ? h.map(function(r){ var by = userDisplay(r.actor_username), tail = r.on_behalf_of_label ? " (for "+r.on_behalf_of_label+")" : (r.on_behalf_of ? " (for "+userDisplay(r.on_behalf_of)+")" : ""); return r.action.replace(/_/g," ")+" by "+by+tail; }).join(" \u2192 ") : "No sign-off activity yet.");
         }catch(e){ toast(e.message||"Could not load that."); }
       };
     });
@@ -5656,16 +5871,42 @@
     });
     var subOv = document.querySelector("[data-submit-overlay]");
     if(subOv) subOv.onclick = function(ev){ if(ev.target===subOv) navBack(); };
+    var subSel = el("submit-approver");
+    if(subSel) subSel.onchange = function(){
+      var v = subSel.value, w = el("submit-typed-wrap"), n = el("submit-noacct");
+      if(state.submitDialog) state.submitDialog.approver = v;
+      if(w) w.style.display = v==="__typed__" ? "" : "none";
+      var x = (state.submitDialog.docs||[]).filter(function(y){ return "d:"+y.id===v; })[0];
+      if(n) n.style.display = (x && !x.hasAccount) ? "" : "none";
+    };
     var subGo = document.querySelector("[data-submit-go]");
     if(subGo) subGo.onclick = once("submit-approval", async function(){
-      var who = (el("submit-approver")||{}).value || "";
+      var pick = (el("submit-approver")||{}).value || "";
       var note = (el("submit-note")||{}).value || "";
-      if(!who){ toast("Pick a consultant to send this to."); return; }
+      var typed = ((el("submit-typed")||{}).value || "").trim();
+      var who;
+      if(!pick){ toast("Pick a consultant to send this to."); return; }
+      if(pick==="__typed__"){
+        if(typed.length<3){ toast("Type the consultant’s name."); return; }
+        who = { name: typed };
+      } else who = { doctorId: +pick.slice(2) };
       var ids = state.submitDialog.ids;
       subGo.disabled = true; subGo.innerHTML = '<span class="spin"></span>Sending…';
+      async function go(w){
+        if(ids.length===1) await aSubmit(ids[0], w, note); else await aBulkSubmit(ids, w);
+      }
       try{
-        if(ids.length===1) await aSubmit(ids[0], who, note);
-        else await aBulkSubmit(ids, who);
+        try{ await go(who); }
+        catch(e){
+          // A typed name that closely matches someone on the list: ask once.
+          if(e.status===409 && e.data && e.data.matches && who.name){
+            var names = e.data.matches.map(function(m){ return m.displayName; }).join(", ");
+            if(!window.confirm("“"+who.name+"” looks like "+names+" on the department list. Press OK to send to the name exactly as typed, or Cancel to choose from the list.")){
+              subGo.disabled=false; subGo.textContent="Send"; return;
+            }
+            who.confirm = true; await go(who);
+          } else throw e;
+        }
         state.submitDialog=null; navDrop("overlay"); state.approvalPick={};
         await loadMyEntries(); await refreshApprovalSummary();
         toast(ids.length===1 ? "Sent for sign-off." : "Sent "+ids.length+" records for sign-off.");
@@ -6455,7 +6696,7 @@
   };
   state.v74 = V;
 
-  var V_VIEWS = ["dev-permissions","dev-user-edit","dev-alerts","dev-courses","dev-backups"];
+  var V_VIEWS = ["dev-permissions","dev-user-edit","dev-alerts","dev-courses","dev-backups","doctors","list-review"];
 
   function hasPerm(key){
     var caps = state.capabilities || {};
@@ -7483,6 +7724,8 @@
       case "dev-alerts": return renderDevAlerts();
       case "dev-courses": return renderDevCourses();
       case "dev-backups": return renderDevBackups();
+      case "doctors": return renderDoctors();
+      case "list-review": return renderListReview();
     }
     return "";
   }
@@ -7496,6 +7739,8 @@
     }
     else if(v==="dev-courses"){ await vLoadCourseList(); if(!V.c.edit) V.c.err = ""; }
     else if(v==="dev-backups"){ await vLoadBackup(); }
+    else if(v==="doctors"){ await loadDoctors(); }
+    else if(v==="list-review"){ await loadListReview(); }
     else if(v==="dev-alerts"){ await vLoadAlertsManage(); }
     else if(v==="dev-user-edit" && !V.ue){ state.view = "developer-users"; loadForView(); return; }
     render();
@@ -7577,10 +7822,13 @@
     // has already repainted by this point, so a blur needs nothing.
     if(fromChange && t.tagName!=="SELECT" && t.type!=="radio" && t.type!=="checkbox") list = null;
     if(list==="v-ulist"){ var box = el("v-ulist"); if(box) box.innerHTML = userListRows(); }
+    else if(list==="v-dlist"){ var bd = el("v-dlist"); if(bd) bd.innerHTML = doctorRows(); }
     else if(list==="v-perm-list"){
       var rows = (V.p.people||[]).filter(function(p){ var q = (V.p.q||"").toLowerCase(); return !q || p.displayName.toLowerCase().indexOf(q)!==-1 || p.username.toLowerCase().indexOf(q)!==-1; });
       var b2 = el("v-perm-list"); if(b2) b2.innerHTML = vPermPeopleRows(rows);
     }
+    if(path && path.indexOf("d.bulk.rows.")===0) dBulkPaint();
+    if(path==="d.inv.username") dInviteCheck();
     if(t.getAttribute("data-vcalc")==="ue") vPaintUe();
     else if(path && path.indexOf("ue.draft.")===0) vPaintUe();
     if(t.getAttribute("data-vcheck")==="rename") vRenameCheck();
@@ -7642,6 +7890,7 @@
       function toggle(arr){ var i = arr.indexOf(val); if(on && i===-1) arr.push(val); if(!on && i!==-1) arr.splice(i,1); return arr; }
       if(pre.indexOf("ppu:")===0){ var pk = pre.slice(4); var dd = vDraftFor(pk); toggle(dd.units); vDraftPrune(pk); vPaintPersonBar(); }
       else if(pre==="cedit:units") toggle(V.c.edit.units);
+      else if(pre==="dedit:units") toggle(V.d.edit.units);
       else if(pre==="cedit:peripheralUnits") toggle(V.c.edit.peripheralUnits);
       else if(pre==="aud:units"){ toggle(V.a.draft.units); vAudPreviewSoon(); }
     }
@@ -7743,6 +7992,553 @@
       ev.preventDefault(); vOpenUser(ev.target.getAttribute("data-u"));
     }
   });
+
+
+  /* ============================================================
+     v7.5  --  THE DOCTORS LIST, ACCOUNT CLAIMS, FASTER ENTRY
+     ============================================================
+     Reuses the v7.4 machinery above (V state, vget/vset, the delegated
+     data-v / data-vin listeners). Three screens' worth of code:
+       * Doctors      (directory.manage)  list, edit, add many, invites, claims,
+                                           names typed on old entries
+       * List Review  (lists.review)      what people typed into the diagnosis /
+                                           procedure / comorbidity boxes, and the
+                                           starter lists
+       * the entry form's helpers          recents, repeat last entry,
+                                           procedure -> diagnosis chips
+  ============================================================ */
+  V.d = { tab:"list", list:null, claims:[], designations:[], q:"", unit:"", status:"all", edit:null, inv:null,
+          bulk:{ unit:"", desig:"", text:"", rows:null, result:null, busy:false, err:"" }, typed:null, err:"" };
+  V.r = { tab:"typed", data:null, sel:{}, ren:{}, site:{}, pick:{}, busy:false, err:"", msg:"" };
+
+  function dActiveUnits(){ return ((state.config&&state.config.units)||[]); }
+  function dDesigOptions(){ return V.d.designations && V.d.designations.length ? V.d.designations : ["Professor","Associate Professor","Assistant Professor","Consultant","Fellow","Senior Resident"]; }
+
+  async function loadDoctors(){
+    try{
+      var r = await api("GET","/doctors");
+      V.d.list = r.doctors; V.d.claims = r.claims || []; V.d.designations = r.designations || [];
+      V.d.err = "";
+    }catch(e){ V.d.list = V.d.list || []; V.d.err = e.message || "Could not load the list."; }
+    if(V.d.tab==="typed" && !V.d.typed){ try{ V.d.typed = (await api("GET","/doctors/typed-names")).names; }catch(e){ V.d.typed = []; } }
+    render();
+  }
+
+  function dAcctChips(d){
+    var c = d.claim;
+    if(c && c.state==="invited") return chipHtml("Invited · "+c.username,"chip-amber");
+    if(c && c.state==="pending") return chipHtml("Claim pending · "+c.username,"chip-amber");
+    if(d.hasAccount) return chipHtml("Account · "+d.linkedUsername,"chip-teal")+(d.accountState && d.accountState!=="active" ? " "+chipHtml(d.accountState,"chip-grey") : "");
+    return chipHtml("No account","chip-grey");
+  }
+  function dFiltered(){
+    var q = (V.d.q||"").toLowerCase(), u = V.d.unit, st = V.d.status;
+    return (V.d.list||[]).filter(function(d){
+      if(q && (d.displayName+" "+d.designation+" "+(d.linkedUsername||"")).toLowerCase().indexOf(q)===-1) return false;
+      if(u && d.units.indexOf(u)===-1) return false;
+      if(st==="account" && !d.hasAccount) return false;
+      if(st==="none" && (d.hasAccount || d.status==="left")) return false;
+      if(st==="left" && d.status!=="left") return false;
+      if(st==="all" && d.status==="left") return false;
+      return true;
+    });
+  }
+  function doctorRows(){
+    var rows = dFiltered();
+    if(!rows.length) return '<div class="empty-state">No doctors match.</div>';
+    return rows.map(function(d){
+      var open = d.claim && d.claim.state==="invited";
+      var acts = '<button class="btn btn-sm" data-v="doc-edit" data-id="'+d.id+'">Edit</button> ';
+      if(!d.hasAccount && d.status==="active"){
+        if(open) acts += '<button class="btn btn-sm" data-v="doc-invite-cancel" data-claim="'+d.claim.id+'">Cancel invite</button> ';
+        else if(!d.claim && (d.department||"ENT")==="ENT") acts += '<button class="btn btn-sm btn-primary" data-v="doc-invite" data-id="'+d.id+'">Create account</button> <button class="btn btn-sm" data-v="doc-link" data-id="'+d.id+'">Link existing</button> ';
+      }
+      acts += d.status==="left" ? '<button class="btn btn-sm" data-v="doc-status" data-id="'+d.id+'" data-next="active">Reactivate</button>'
+                                 : '<button class="btn btn-sm" data-v="doc-status" data-id="'+d.id+'" data-next="left">Mark as left</button>';
+      return '<div class="v-urow d-row'+(d.status==="left"?" d-left":"")+'">'+
+        '<div class="d-main"><div class="d-name"><b>'+esc(d.displayName)+'</b> <span class="muted">· '+esc(d.designation)+'</span>'+
+          ((d.department||"ENT")!=="ENT" ? ' '+chipHtml(d.department,"chip-grey") : '')+(d.status==="left"?' '+chipHtml("left","chip-grey"):'')+'</div>'+
+          '<div class="d-meta">'+(d.units.length ? d.units.map(function(u){ return '<span class="chip chip-grey">'+esc(unitShort(u))+'</span>'; }).join(" ") : '<span class="muted">no unit</span>')+' '+dAcctChips(d)+
+          (d.email||d.phone ? ' <span class="muted">'+esc([d.email,d.phone].filter(Boolean).join(" · "))+'</span>' : '')+'</div></div>'+
+        '<div class="d-acts">'+acts+'</div></div>';
+    }).join("");
+  }
+
+  function renderDoctors(){
+    if(!V.d.list) return skeletonTable(6);
+    var D = V.d, nClaims = (D.claims||[]).length;
+    if(D.tab==="claims" && !nClaims) D.tab = "list";
+    var tabs = [["list","Doctors ("+(D.list||[]).filter(function(d){ return d.status==="active"; }).length+")"],["bulk","Add many"]].concat(nClaims?[["claims","Waiting ("+nClaims+")"]]:[]).concat([["typed","Typed names"]]);
+    var head = '<div class="card v-head"><div class="section-head"><h2>Doctors</h2>'+
+      '<button class="btn btn-sm btn-primary" data-v="doc-new">Add a doctor</button></div>'+
+      '<p class="muted" style="margin:4px 0 12px;">Everyone who can be named on a record, whether or not they have a login. Only the Head of Department and Developers edit this list. A doctor without an account is signed off for by their Head of Unit or the HOD until they have one.</p>'+
+      '<div class="v-tabs">'+tabs.map(function(t){ return '<button class="v-tab'+(D.tab===t[0]?" on":"")+'" data-v="doc-tab" data-tab="'+t[0]+'">'+esc(t[1])+'</button>'; }).join("")+'</div></div>';
+    var body = "";
+    if(D.err) body += vErr(D.err);
+    if(D.inv) body += dInviteCard();
+    if(D.edit) body += dEditCard();
+    if(D.tab==="list"){
+      body += '<div class="card"><div class="v-filters">'+
+        '<input type="search" id="v-dq" data-vin="d.q" data-vlist="v-dlist" placeholder="Search name, designation, username…" value="'+esc(D.q)+'">'+
+        '<select data-vin="d.unit" data-vlist="v-dlist" aria-label="Unit"><option value="">Every unit</option>'+dActiveUnits().map(function(u){ return '<option value="'+esc(u.key)+'"'+(D.unit===u.key?" selected":"")+'>'+esc(u.shortForm)+'</option>'; }).join("")+'</select>'+
+        '<select data-vin="d.status" data-vlist="v-dlist" aria-label="Show">'+[["all","Current"],["none","No account yet"],["account","With an account"],["left","Left"]].map(function(r){ return '<option value="'+r[0]+'"'+(D.status===r[0]?" selected":"")+'>'+r[1]+'</option>'; }).join("")+'</select></div>'+
+        '<div id="v-dlist" class="v-ulist">'+doctorRows()+'</div></div>';
+    } else if(D.tab==="bulk") body += dBulkCard();
+    else if(D.tab==="claims") body += dClaimsCard();
+    else body += dTypedCard();
+    return head + body;
+  }
+
+  /* ---- add / edit one --------------------------------------------------- */
+  function dBlank(){ return { id:null, displayName:"", designation:"Assistant Professor", homeUnit:"", units:[], department:"", regNo:"", email:"", phone:"", notes:"", linked:false, err:"" }; }
+  function dEditCard(){
+    var e = V.d.edit, locked = e.linked;
+    return '<div class="card v-editor"><h2 style="font-size:16px;">'+(e.id?"Edit doctor":"Add a doctor")+'</h2>'+vErr(e.err)+
+      (locked ? '<div class="notice-banner">This doctor has an account, so name and designation are changed on the account (Users). Units, contact details and notes are edited here.</div>' : '')+
+      '<div class="row2">'+vtext("d.edit.displayName","Name",{ ph:"e.g. Dr. Rekha Menon", disabled:locked, max:120 })+
+      vsel("d.edit.designation","Designation", dDesigOptions(), { disabled:locked })+'</div>'+
+      '<div class="row2"><div class="field"><label for="d-home">Home unit</label><select id="d-home" data-vin="d.edit.homeUnit"><option value="">— none —</option>'+dActiveUnits().map(function(u){ return '<option value="'+esc(u.key)+'"'+(e.homeUnit===u.key?" selected":"")+'>'+esc(u.shortForm)+'</option>'; }).join("")+'</select></div>'+
+      vtext("d.edit.department","Department",{ ph:"Leave blank for ENT (e.g. Anaesthesia)", max:60 })+'</div>'+
+      '<div class="field"><label>Also works in</label>'+unitChecklist("dedit:units", e.units)+'<div class="hint">The units whose picker lists this doctor first.</div></div>'+
+      '<div class="row2">'+vtext("d.edit.email","Email",{ type:"email", max:120 })+vtext("d.edit.phone","Phone",{ max:40 })+'</div>'+
+      '<div class="row2">'+vtext("d.edit.regNo","Registration no. (optional)",{ max:60 })+vtext("d.edit.notes","Notes",{ max:1000 })+'</div>'+
+      '<div class="btn-row"><button class="btn" data-v="doc-cancel">Cancel</button>'+
+        (e.id && !locked ? '<button class="btn btn-danger" data-v="doc-delete" data-id="'+e.id+'">Delete</button>' : '')+
+        '<button class="btn btn-primary" data-v="doc-save">Save</button></div></div>';
+  }
+  async function dSave(dup){
+    var e = V.d.edit; e.err = "";
+    var body = { displayName:e.displayName, designation:e.designation, homeUnit:e.homeUnit||null, units:e.units, department:e.department,
+                 regNo:e.regNo, email:e.email, phone:e.phone, notes:e.notes };
+    if(e.linked){ delete body.displayName; delete body.designation; }
+    if(dup) body.confirmDuplicate = true;
+    try{
+      if(e.id) await api("PATCH","/doctors/"+e.id, body); else await api("POST","/doctors", body);
+      V.d.edit = null; await loadDoctors(); toast("Saved.");
+    }catch(err){
+      if(err.status===409 && err.code==="possible_duplicate"){
+        var names = (err.data.matches||[]).map(function(m){ return m.displayName+" ("+m.designation+")"; }).join(", ");
+        if(window.confirm("Someone with a similar name is already listed: "+names+".\n\nPress OK to add this as a different person, or Cancel to go back.")) return dSave(true);
+        return;
+      }
+      e.err = err.message || "Could not save."; render();
+    }
+  }
+
+  /* ---- invite ------------------------------------------------------------ */
+  var __invTimer;
+  function dInviteCard(){
+    var v = V.d.inv;
+    if(v.code){
+      return '<div class="card v-editor"><h2 style="font-size:16px;">Invite for '+esc(v.name)+'</h2>'+
+        '<p>Give them this code. It is shown <b>once</b>, works once, and expires '+esc(fmtDateTime(v.expiresAt))+'.</p>'+
+        '<div class="d-code mono" id="d-code">'+esc(v.code)+'</div>'+
+        '<ol class="muted" style="font-size:13px; line-height:1.6; margin:10px 0 14px 18px;">'+
+          '<li>They open the sign-in page and choose <b>Use it here</b> under “Been given an invite code?”.</li>'+
+          '<li>They enter the code and choose their own password. Their username will be <b class="mono">'+esc(v.username)+'</b>.</li>'+
+          '<li>Anything already waiting on them moves to their queue.</li></ol>'+
+        '<div class="btn-row"><button class="btn" data-v="doc-code-copy">Copy code</button><button class="btn btn-primary" data-v="doc-invite-done">Done</button></div></div>';
+    }
+    return '<div class="card v-editor"><h2 style="font-size:16px;">Create an account for '+esc(v.name)+'</h2>'+
+      '<p class="muted" style="font-size:13px; margin:0 0 10px;">You only choose the username. They set their own password with a one-time code, so nobody else ever knows it. The name, designation and unit come from this list.</p>'+vErr(v.err)+
+      vtext("d.inv.username","Username",{ ph:"letters, numbers, . _ -", max:40, extra:' autocomplete="off" autocapitalize="off" spellcheck="false"' })+
+      '<div id="d-inv-msg" class="hint" style="min-height:18px;"></div>'+
+      '<div class="btn-row"><button class="btn" data-v="doc-invite-cancel-form">Cancel</button><button class="btn btn-primary" id="d-inv-go" data-v="doc-invite-go" disabled>Create invite</button></div></div>';
+  }
+  function dInviteCheck(){
+    var v = V.d.inv; if(!v) return;
+    var name = (v.username||"").trim(), msg = el("d-inv-msg"), go = el("d-inv-go");
+    clearTimeout(__invTimer);
+    if(!name){ v.status = null; if(msg) msg.innerHTML = ""; if(go) go.disabled = true; return; }
+    if(msg) msg.innerHTML = '<span class="muted">Checking…</span>'; if(go) go.disabled = true;
+    __invTimer = setTimeout(async function(){
+      try{
+        var r = await api("GET","/doctors/username-check?name="+encodeURIComponent(name));
+        if(!V.d.inv || (V.d.inv.username||"").trim()!==name) return;
+        v.status = r.status;
+        var m = el("d-inv-msg"), g = el("d-inv-go");
+        if(m) m.innerHTML = r.status==="free" ? '<span class="v-ok">✓ Available</span>' : '<span class="v-bad">✕ '+esc(r.detail||"Not available")+'</span>';
+        if(g) g.disabled = r.status!=="free";
+      }catch(e){ var m2 = el("d-inv-msg"); if(m2) m2.innerHTML = '<span class="v-bad">'+esc(e.message)+'</span>'; }
+    }, 280);
+  }
+
+  /* ---- add many ---------------------------------------------------------- */
+  function dBulkCard(){
+    var b = V.d.bulk, rows = b.rows;
+    var form = '<div class="card"><h2 style="font-size:16px;">Add many doctors to one unit</h2>'+
+      '<p class="muted" style="font-size:13px; margin:0 0 10px;">Paste one doctor per line: <span class="mono">Name, Designation</span>. Email and phone are optional (<span class="mono">Name | Designation | email | phone</span>). Names already on the list are not duplicated; they are just added to this unit.</p>'+vErr(b.err)+
+      '<div class="row2"><div class="field"><label for="d-bunit">Unit</label><select id="d-bunit" data-vin="d.bulk.unit"><option value="">Choose a unit…</option>'+dActiveUnits().map(function(u){ return '<option value="'+esc(u.key)+'"'+(b.unit===u.key?" selected":"")+'>'+esc(u.shortForm)+' — '+esc(u.fullName)+'</option>'; }).join("")+'</select></div>'+
+        vsel("d.bulk.desig","If a line has no designation", [["","— require one —"]].concat(dDesigOptions().map(function(x){ return [x,x]; })))+'</div>'+
+      '<div class="field"><label for="d-btext">Doctors</label><textarea id="d-btext" rows="8" data-vin="d.bulk.text" placeholder="Dr. A. Kumar, Professor&#10;Dr. S. Rao, Associate Professor&#10;Dr. T. Nair, Assistant Professor&#10;Dr. V. Das, Fellow">'+esc(b.text)+'</textarea></div>'+
+      '<div class="btn-row"><button class="btn btn-primary" data-v="bulk-preview"'+(b.busy?" disabled":"")+'>Preview</button></div></div>';
+    if(!rows) return form+(b.result ? dBulkResult(b.result) : "");
+    return form + '<div class="card"><h2 style="font-size:16px;">Check before adding to '+esc(unitShort(b.unit))+'</h2>'+
+      '<div class="table-wrap"><table><thead><tr><th>Line</th><th>Name</th><th>Designation</th><th>What to do</th></tr></thead><tbody id="d-brows">'+dBulkRows()+'</tbody></table></div>'+
+      '<div class="btn-row"><button class="btn" data-v="bulk-cancel">Cancel</button><button class="btn btn-primary" id="d-bapply" data-v="bulk-apply">Add</button></div></div>';
+  }
+  function dBulkChoiceOptions(r){
+    var cur = r.choice || "";
+    var o = '<option value="">Choose…</option><option value="add"'+(cur==="add"?" selected":"")+'>Add as a new doctor</option>';
+    (r.matches||[]).forEach(function(m){
+      var v = "merge:"+m.id;
+      o += '<option value="'+v+'"'+(cur===v?" selected":"")+'>Same person as '+esc(m.displayName)+' ('+esc(m.designation)+(m.units.length?", "+m.units.map(unitShort).join("/"):"")+')'+(m.hasAccount?' — has an account':'')+'</option>';
+    });
+    return o+'<option value="skip"'+(cur==="skip"?" selected":"")+'>Skip this line</option>';
+  }
+  function dBulkRows(){
+    return V.d.bulk.rows.map(function(r, i){
+      var note = r.error ? '<span class="v-bad">'+esc(r.error)+'</span>' : (r.note ? '<span class="muted">'+esc(r.note)+'</span>' : "");
+      var fixed = r.action==="skip" && !(r.matches||[]).length;
+      return '<tr><td class="tabular">'+r.line+'</td><td>'+esc(r.name)+'</td><td>'+esc(r.designation||"—")+'</td><td>'+
+        (fixed ? note || '<span class="muted">Skipped</span>' : '<select data-vin="d.bulk.rows.'+i+'.choice">'+dBulkChoiceOptions(r)+'</select> '+note)+'</td></tr>';
+    }).join("");
+  }
+  function dBulkPaint(){
+    var undecided = V.d.bulk.rows ? V.d.bulk.rows.filter(function(r){ return !r.choice; }).length : 0;
+    var b = el("d-bapply"); if(b){ b.disabled = undecided>0; b.textContent = undecided ? ("Choose for "+plural(undecided,"line")+" first") : "Add"; }
+  }
+  function dBulkResult(r){
+    return '<div class="card"><div class="success-banner" style="margin:0;">Added '+plural(r.added,"doctor")+(r.merged?", put "+plural(r.merged,"existing doctor")+" in this unit":"")+(r.skipped?", skipped "+r.skipped:"")+'.</div>'+
+      (r.errors && r.errors.length ? '<ul class="v-bad" style="margin:10px 0 0 18px;">'+r.errors.map(function(x){ return '<li>'+esc(x)+'</li>'; }).join("")+'</ul>' : '')+'</div>';
+  }
+  async function dBulkPreview(){
+    var b = V.d.bulk; b.err = ""; b.result = null;
+    if(!b.unit){ b.err = "Choose the unit these doctors belong to."; render(); return; }
+    if(!(b.text||"").trim()){ b.err = "Paste at least one doctor."; render(); return; }
+    b.busy = true; render();
+    try{
+      var r = await api("POST","/doctors/bulk/preview",{ unit:b.unit, text:b.text, defaultDesignation:b.desig||null });
+      b.rows = r.rows.map(function(x){
+        x.choice = x.action==="add" ? "add" : x.action==="merge" ? ("merge:"+x.mergeId) : x.action==="skip" ? "skip" : "";
+        return x;
+      });
+    }catch(e){ b.err = e.message || "Could not read that."; }
+    b.busy = false; render(); dBulkPaint();
+  }
+  async function dBulkApply(){
+    var b = V.d.bulk, out = [];
+    b.rows.forEach(function(r){
+      var c = r.choice;
+      if(!c || c==="skip") return;
+      if(c==="add") out.push({ name:r.name, designation:r.designation, email:r.email, phone:r.phone, action:"add" });
+      else if(c.indexOf("merge:")===0) out.push({ name:r.name, action:"merge", mergeId:+c.slice(6) });
+    });
+    if(!out.length){ b.err = "Nothing to add."; render(); return; }
+    try{
+      var r = await api("POST","/doctors/bulk/apply",{ unit:b.unit, rows:out });
+      b.result = r; b.rows = null; b.text = ""; await loadDoctors(); render();
+    }catch(e){ b.err = e.message || "Could not add them."; render(); }
+  }
+
+  /* ---- claims waiting ----------------------------------------------------- */
+  function dClaimsCard(){
+    var c = V.d.claims || [];
+    var inv = (V.d.list||[]).filter(function(d){ return d.claim && d.claim.state==="invited"; });
+    return '<div class="card"><h2 style="font-size:16px;">Sign-ups claiming a name on the list ('+c.length+')</h2>'+
+      '<p class="muted" style="font-size:13px; margin:0 0 10px;">Each of these people picked a listed name when signing up; the name is locked to them until you decide. Approving links the account and takes name, designation and unit from the list. Rejecting deletes the sign-up and frees the name.</p>'+
+      (c.length ? '<div class="table-wrap"><table><thead><tr><th>Listed name</th><th>Signed up as</th><th>Requested</th><th></th></tr></thead><tbody>'+
+        c.map(function(x){
+          return '<tr><td><b>'+esc(x.doctor.displayName)+'</b><div class="muted" style="font-size:12px;">'+esc(x.doctor.designation)+(x.doctor.units.length?" · "+x.doctor.units.map(unitShort).join(", "):"")+'</div></td>'+
+            '<td class="mono">'+esc(x.username)+'</td><td class="tabular">'+fmtDateTime(x.requestedAt)+'</td>'+
+            '<td style="white-space:nowrap;"><button class="btn btn-sm btn-primary" data-v="claim-approve" data-u="'+esc(x.username)+'">Approve</button> <button class="btn btn-sm btn-danger" data-v="claim-reject" data-u="'+esc(x.username)+'">Reject</button></td></tr>';
+        }).join("")+'</tbody></table></div>' : '<div class="empty-state">No claims waiting.</div>')+
+      (inv.length ? '<h3 style="font-size:14px; margin:18px 0 8px;">Invites not used yet ('+inv.length+')</h3>'+
+        '<div class="table-wrap"><table><thead><tr><th>Doctor</th><th>Username reserved</th><th>Expires</th><th></th></tr></thead><tbody>'+
+        inv.map(function(d){ return '<tr><td>'+esc(d.displayName)+'</td><td class="mono">'+esc(d.claim.username)+'</td><td class="tabular">'+fmtDateTime(d.claim.expiresAt)+'</td><td><button class="btn btn-sm" data-v="doc-invite-cancel" data-claim="'+d.claim.id+'">Cancel</button></td></tr>'; }).join("")+'</tbody></table></div>' : '')+
+    '</div>';
+  }
+
+  /* ---- names typed on old entries ----------------------------------------- */
+  function dTypedCard(){
+    var t = V.d.typed;
+    if(!t) return '<div class="card"><div class="muted">Loading…</div></div>';
+    var docs = (V.d.list||[]).filter(function(d){ return d.status==="active" && (d.department||"ENT")==="ENT"; });
+    return '<div class="card"><h2 style="font-size:16px;">Consultant names typed on records ('+t.length+')</h2>'+
+      '<p class="muted" style="font-size:13px; margin:0 0 10px;">Before the list existed, consultants were typed. Pointing each spelling at the right doctor makes their records count under one name and, once they have an account, show up for them. This rewrites the consultant’s name on those records to the list’s spelling.</p>'+
+      (t.length ? '<div class="table-wrap"><table><thead><tr><th>As typed</th><th>Records</th><th>Is…</th></tr></thead><tbody>'+
+        t.map(function(x, i){
+          return '<tr><td><b>'+esc(x.spelling)+'</b>'+(x.spellings.length>1?'<div class="muted" style="font-size:12px;">also: '+x.spellings.filter(function(s){ return s!==x.spelling; }).map(esc).join("; ")+'</div>':'')+'</td><td class="tabular">'+x.count+'</td><td>'+
+            (x.suggest||[]).map(function(m){ return '<button class="btn btn-sm" data-v="typed-assign" data-key="'+esc(x.key)+'" data-doc="'+m.id+'">'+esc(m.displayName)+' ('+Math.round(m.score*100)+'%)</button> '; }).join("")+
+            '<select id="tn-'+i+'" style="max-width:200px;"><option value="">Someone else…</option>'+docs.map(function(d){ return '<option value="'+d.id+'">'+esc(d.displayName)+'</option>'; }).join("")+'</select> '+
+            '<button class="btn btn-sm" data-v="typed-assign-sel" data-key="'+esc(x.key)+'" data-i="'+i+'">Assign</button></td></tr>';
+        }).join("")+'</tbody></table></div>' : '<div class="empty-state">Every consultant on a record is a listed doctor.</div>')+'</div>';
+  }
+
+  /* ---- LIST REVIEW ---------------------------------------------------------- */
+  async function loadListReview(){
+    try{ V.r.data = await api("GET","/lists/review"); V.r.err = ""; }
+    catch(e){ V.r.err = e.message || "Could not load."; V.r.data = V.r.data || { typed:{diagnoses:[],comorbidities:[],procedures:[]}, starter:{diagnoses:[],comorbidities:[],procedures:{}}, sites:[] }; }
+    render();
+  }
+  var R_LISTS = [["diagnoses","Diagnoses"],["comorbidities","Comorbidities"],["procedures","Procedures"]];
+  function renderListReview(){
+    var d = V.r.data; if(!d) return skeletonTable(6);
+    var n = d.typed.diagnoses.length + d.typed.comorbidities.length + d.typed.procedures.length;
+    var sn = d.starter.diagnoses.length + d.starter.comorbidities.length + Object.keys(d.starter.procedures).reduce(function(a,k){ return a+d.starter.procedures[k].length; }, 0);
+    var head = '<div class="card v-head"><h2>List Review</h2>'+
+      '<p class="muted" style="margin:4px 0 12px;">Two ways to make the dropdowns match what people actually see in theatre: promote what they typed, or start from a ready-made list and tick what you want.</p>'+
+      '<div class="v-tabs"><button class="v-tab'+(V.r.tab==="typed"?" on":"")+'" data-v="r-tab" data-tab="typed">Typed by users ('+n+')</button>'+
+      '<button class="v-tab'+(V.r.tab==="starter"?" on":"")+'" data-v="r-tab" data-tab="starter">Starter lists ('+sn+' not yet added)</button></div></div>';
+    return head + (V.r.err ? vErr(V.r.err) : "") + (V.r.msg ? '<div class="success-banner">'+esc(V.r.msg)+'</div>' : "") + (V.r.tab==="typed" ? rTypedCard(d) : rStarterCard(d));
+  }
+  function rTypedCard(d){
+    var out = "", any = false;
+    R_LISTS.forEach(function(L){
+      var rows = d.typed[L[0]]; if(!rows.length) return; any = true;
+      out += '<div class="card"><h3 style="font-size:15px; margin:0 0 8px;">'+L[1]+' people typed ('+rows.length+')</h3>'+
+        '<div class="r-rows">'+rows.map(function(r, i){
+          var k = L[0]+"|"+i;
+          return '<div class="r-row"><label class="v-check"><input type="checkbox" data-r-pick="'+k+'"'+(V.r.pick[k]?" checked":"")+'></label>'+
+            '<input type="text" class="r-name" data-r-ren="'+k+'" value="'+esc(V.r.ren[k]!=null?V.r.ren[k]:r.value)+'" aria-label="Name to add">'+
+            (L[0]==="procedures" ? '<select data-r-site="'+k+'" aria-label="Site"><option value="">Site…</option>'+d.sites.map(function(s){ var cur = V.r.site[k]!=null?V.r.site[k]:r.site; return '<option value="'+esc(s.key)+'"'+(cur===s.key?" selected":"")+'>'+esc(s.name)+'</option>'; }).join("")+'</select>' : '')+
+            '<span class="muted r-count">'+plural(r.count,"record")+(r.people?" · "+plural(r.people,"person","people"):"")+'</span></div>';
+        }).join("")+'</div></div>';
+    });
+    if(!any) return '<div class="card"><div class="empty-state">Nothing typed outside the lists. Every diagnosis, comorbidity and procedure on a record is on a list.</div></div>';
+    return out + '<div class="card"><div class="btn-row"><button class="btn" data-v="r-dismiss" '+(V.r.busy?"disabled":"")+'>Ignore selected</button><button class="btn btn-primary" data-v="r-promote" '+(V.r.busy?"disabled":"")+'>Add selected to the lists</button></div>'+
+      '<div class="hint">You can tidy the spelling before adding. Records keep what their author typed; from now on everyone can pick the listed name instead.</div></div>';
+  }
+  function rStarterCard(d){
+    var s = d.starter, out = "";
+    function sect(title, key, items, extra){
+      if(!items.length) return "";
+      return '<div class="card"><div class="section-head"><h3 style="font-size:15px; margin:0;">'+esc(title)+' ('+items.length+')</h3>'+
+        '<span><button class="btn btn-sm" data-v="r-all" data-key="'+esc(key)+'" data-on="1">Tick all</button> <button class="btn btn-sm" data-v="r-all" data-key="'+esc(key)+'" data-on="0">None</button></span></div>'+
+        '<div class="r-grid">'+items.map(function(x, i){ var k = key+"|"+i; return '<label class="v-check"><input type="checkbox" data-r-pick="'+esc(k)+'"'+(V.r.pick[k]?" checked":"")+'> <span>'+esc(x)+'</span></label>'; }).join("")+'</div></div>';
+    }
+    out += sect("Diagnoses","sd",s.diagnoses);
+    out += sect("Comorbidities","sc",s.comorbidities);
+    Object.keys(s.procedures).forEach(function(site){
+      var nm = (d.sites.filter(function(x){ return x.key===site; })[0]||{}).name || site;
+      out += sect("Procedures — "+nm, "sp:"+site, s.procedures[site]);
+    });
+    if(!out) return '<div class="card"><div class="empty-state">Everything in the starter lists is already on yours.</div></div>';
+    return '<div class="notice-banner">These are a starting point written for ENT practice, not an authority. Nothing is added until you tick it and press the button.</div>'+out+
+      '<div class="card"><div class="btn-row"><button class="btn btn-primary" data-v="r-starter-apply"'+(V.r.busy?" disabled":"")+'>Add ticked items</button></div></div>';
+  }
+  function rPicked(prefix){
+    var d = V.r.data.starter, out = [];
+    var list = prefix==="sd" ? d.diagnoses : prefix==="sc" ? d.comorbidities : d.procedures[prefix.slice(3)] || [];
+    list.forEach(function(x, i){ if(V.r.pick[prefix+"|"+i]) out.push(x); });
+    return out;
+  }
+  async function rStarterApply(){
+    var d = V.r.data.starter, body = { diagnoses: rPicked("sd"), comorbidities: rPicked("sc"), procedures:{} };
+    Object.keys(d.procedures).forEach(function(site){ var p = rPicked("sp:"+site); if(p.length) body.procedures[site] = p; });
+    var n = body.diagnoses.length + body.comorbidities.length + Object.keys(body.procedures).reduce(function(a,k){ return a+body.procedures[k].length; }, 0);
+    if(!n){ V.r.err = "Tick at least one item."; render(); return; }
+    V.r.busy = true; V.r.err = ""; render();
+    try{
+      var r = await api("POST","/lists/starter/apply", body);
+      V.r.pick = {}; V.r.msg = "Added "+plural(r.added,"item")+" to the lists.";
+      try{ state.config = (await api("GET","/config")).config; }catch(e){}
+      await loadListReview();
+    }catch(e){ V.r.err = e.message || "Could not add."; }
+    V.r.busy = false; render();
+  }
+  function rSelected(){
+    var out = [], t = V.r.data.typed;
+    R_LISTS.forEach(function(L){
+      t[L[0]].forEach(function(r, i){
+        var k = L[0]+"|"+i; if(!V.r.pick[k]) return;
+        out.push({ list:L[0], value:r.value, as:(V.r.ren[k]!=null?V.r.ren[k]:r.value), site:(V.r.site[k]!=null?V.r.site[k]:r.site), key:k });
+      });
+    });
+    return out;
+  }
+  async function rPromote(){
+    var sel = rSelected(); if(!sel.length){ V.r.err = "Tick at least one."; render(); return; }
+    for(var i=0;i<sel.length;i++){ if(sel[i].list==="procedures" && !sel[i].site){ V.r.err = "Choose a site for “"+sel[i].as+"”."; render(); return; } }
+    V.r.busy = true; V.r.err = ""; render();
+    try{
+      var r = await api("POST","/lists/review/promote",{ items: sel.map(function(x){ return { list:x.list, value:x.value, as:x.as, site:x.site }; }) });
+      V.r.pick = {}; V.r.ren = {}; V.r.site = {}; V.r.msg = "Added "+plural(r.added,"item")+" to the lists.";
+      try{ state.config = (await api("GET","/config")).config; }catch(e){}
+      await loadListReview();
+    }catch(e){ V.r.err = e.message || "Could not add."; }
+    V.r.busy = false; render();
+  }
+  async function rDismiss(){
+    var sel = rSelected(); if(!sel.length){ V.r.err = "Tick at least one."; render(); return; }
+    if(!window.confirm("Hide "+plural(sel.length,"entry","entries")+" from this review? Records are not changed.")) return;
+    try{
+      await api("POST","/lists/review/dismiss",{ items: sel.map(function(x){ return { list:x.list, value:x.value }; }) });
+      V.r.pick = {}; V.r.msg = ""; await loadListReview();
+    }catch(e){ V.r.err = e.message || "Could not do that."; render(); }
+  }
+
+  /* ---- entry form helpers --------------------------------------------------- */
+  async function loadFrequent(){
+    try{ state.frequent = await api("GET","/me/frequent"); }catch(e){ state.frequent = state.frequent || {}; }
+    if(state.wiz) render();
+  }
+  function repeatLastBar(){
+    var w = state.wiz;
+    if(!w || w.editingId || !(state.frequent && state.frequent.lastEntryId)) return "";
+    var f = w.fields;
+    var blank = !(f.diagnoses||[]).length && !(f.procedureBlocks||[]).some(function(b){ return (b.procedures||[]).length; });
+    if(!blank) return "";
+    return '<div class="repeat-bar"><button type="button" class="btn btn-sm" data-repeat-last="1">Start from my last entry</button>'+
+      '<span class="muted">Copies the procedures, diagnoses, consultant and people. You add the patient details.</span></div>';
+  }
+  async function repeatLast(){
+    var w = state.wiz; if(!w) return;
+    try{
+      var e = (await api("GET","/entries/"+state.frequent.lastEntryId)).entry;
+      var f = w.fields;
+      f.procedureBlocks = (e.procedureBlocks||[]).map(function(b){ return { site:b.site||"", procedures:(b.procedures||[]).slice(), laterality:b.laterality||"", role:b.role||"" }; });
+      if(!f.procedureBlocks.length) f.procedureBlocks = [newProcedureBlock([])];
+      f.diagnoses = (e.diagnoses||[]).slice(); f.diagnosesSecondary = (e.diagnosesSecondary||[]).slice(); f.comorbidities = (e.comorbidities||[]).slice();
+      f.setting = e.setting || f.setting;
+      f.consultantChoice = e.consultantDoctorId ? ("d:"+e.consultantDoctorId) : (e.consultantUsername || "__other__");
+      f.consultant = e.consultant || "";
+      f.assistantsPicked = (e.involved && e.involved.length) ? e.involved.map(function(i){ return i.name; }).filter(Boolean)
+                          : (e.assistants||"").split(",").map(function(x){ return x.trim(); }).filter(Boolean);
+      render();
+      toast("Copied from your last entry. Add the hospital number, age and sex.");
+    }catch(err){ toast(err.message || "Could not copy that entry."); }
+  }
+  function wizSelectedProcedures(){
+    var f = state.wiz.fields, out = [];
+    (f.procedureBlocks||[]).forEach(function(b){ (b.procedures||[]).forEach(function(p){ if(out.indexOf(p)===-1) out.push(p); }); });
+    (f.procedures||[]).forEach(function(p){ if(out.indexOf(p)===-1) out.push(p); });
+    return out;
+  }
+  async function wizEnsureSuggestions(){
+    var w = state.wiz; if(!w || (w.entryType!=="surgical" && w.entryType!=="other" && w.entryType!=="case")) return;
+    var todo = wizSelectedProcedures().filter(function(p){ return !w.dxAsked[p]; });
+    if(!todo.length) return;
+    todo.forEach(function(p){ w.dxAsked[p] = true; });
+    var any = false;
+    for(var i=0;i<todo.length;i++){
+      try{ w.dxSug[todo[i]] = (await api("GET","/suggest/diagnoses?procedure="+encodeURIComponent(todo[i]))).suggestions || []; any = true; }
+      catch(e){ w.dxSug[todo[i]] = []; }
+    }
+    if(any && state.wiz===w) render();
+  }
+  function dxSuggestChips(){
+    var w = state.wiz; if(!w) return "";
+    var f = w.fields, have = (f.diagnoses||[]).concat(f.diagnosesSecondary||[]);
+    var seen = {}, list = [], rankSrc = { you:0, department:1, suggested:2 };
+    wizSelectedProcedures().forEach(function(p){ (w.dxSug[p]||[]).forEach(function(x){
+      if(have.indexOf(x.name)!==-1 || seen[x.name]) return; seen[x.name] = true; list.push(x);
+    }); });
+    list.sort(function(a,b){ return (rankSrc[a.source]-rankSrc[b.source]) || (b.count-a.count); });
+    list = list.slice(0,6);
+    if(!list.length) return "";
+    return '<div class="dp-recents dx-chips"><span class="muted">Usually for this procedure</span> '+list.map(function(x){
+      return '<button type="button" class="chip chip-teal dp-chip'+(x.inList?"":" dp-new")+'" data-dx-add="'+esc(x.name)+'"'+(x.inList?"":' title="Not on your list yet; it will be added as typed and flagged for review"')+'>+ '+esc(x.name)+'</button>';
+    }).join(" ")+'</div>';
+  }
+
+  /* ---- clicks ---------------------------------------------------------------- */
+  function dEditFrom(d){
+    return { id:d.id, displayName:d.displayName, designation:d.designation, homeUnit:d.homeUnit||"", units:(d.units||[]).slice(), department:(d.department&&d.department!=="ENT")?d.department:"",
+             regNo:d.regNo||"", email:d.email||"", phone:d.phone||"", notes:d.notes||"", linked:!!d.hasAccount, err:"" };
+  }
+  function dFind(id){ return (V.d.list||[]).filter(function(d){ return d.id===+id; })[0]; }
+  async function dAfterChange(msg){ await loadDoctors(); if(msg) toast(msg); }
+  Object.assign(CLICK, {
+    "doc-tab": async function(t){
+      V.d.tab = t.getAttribute("data-tab");
+      if(V.d.tab==="typed"){ try{ V.d.typed = (await api("GET","/doctors/typed-names")).names; }catch(e){ V.d.typed = []; } }
+      if(V.d.tab==="claims") await loadDoctors();
+      render();
+    },
+    "doc-new": function(){ V.d.edit = dBlank(); V.d.inv = null; V.d.tab = "list"; render(); window.scrollTo(0,0); },
+    "doc-edit": function(t){ var d = dFind(t.getAttribute("data-id")); if(d){ V.d.edit = dEditFrom(d); V.d.inv = null; render(); window.scrollTo(0,0); } },
+    "doc-cancel": function(){ V.d.edit = null; render(); },
+    "doc-save": function(){ dSave(false); },
+    "doc-delete": async function(t){
+      if(!window.confirm("Delete this doctor from the list? This cannot be undone.")) return;
+      try{ await api("DELETE","/doctors/"+t.getAttribute("data-id")); V.d.edit = null; await dAfterChange("Deleted."); }
+      catch(e){ V.d.edit.err = e.message || "Could not delete."; render(); }
+    },
+    "doc-status": async function(t){
+      var next = t.getAttribute("data-next");
+      try{ await api("PATCH","/doctors/"+t.getAttribute("data-id"), { status: next }); await dAfterChange(next==="left" ? "Marked as left. They no longer appear in pickers." : "Back on the list."); }
+      catch(e){ toast(e.message || "Could not change that."); }
+    },
+    "doc-invite": function(t){ var d = dFind(t.getAttribute("data-id")); if(!d) return; V.d.inv = { doctorId:d.id, name:d.displayName, username:"", status:null, err:"", code:null }; V.d.edit = null; render(); var i = el("d.inv.username"); if(i) i.focus(); window.scrollTo(0,0); },
+    "doc-invite-cancel-form": function(){ V.d.inv = null; render(); },
+    "doc-invite-go": async function(){
+      var v = V.d.inv; v.err = "";
+      try{
+        var r = await api("POST","/doctors/"+v.doctorId+"/invite",{ username: v.username.trim() });
+        v.code = r.code; v.expiresAt = r.expiresAt; v.username = r.username; render();
+        await loadDoctors();
+      }catch(e){ v.err = e.message || "Could not create the invite."; render(); }
+    },
+    "doc-code-copy": function(){ try{ navigator.clipboard.writeText(V.d.inv.code); toast("Copied."); }catch(e){ toast("Select the code and copy it."); } },
+    "doc-invite-done": function(){ V.d.inv = null; render(); },
+    "doc-invite-cancel": async function(t){
+      if(!window.confirm("Cancel this invite? The code stops working and the username is released.")) return;
+      try{ await api("POST","/doctors/claims/"+t.getAttribute("data-claim")+"/cancel"); await dAfterChange("Invite cancelled."); }
+      catch(e){ toast(e.message || "Could not cancel."); }
+    },
+    "doc-link": async function(t){
+      var d = dFind(t.getAttribute("data-id")); if(!d) return;
+      var u = window.prompt("Username of the existing account that belongs to "+d.displayName+":");
+      if(!u) return;
+      try{ var r = await api("POST","/doctors/"+d.id+"/link",{ username: u.trim() }); await dAfterChange("Linked. "+(r.entriesRouted?plural(r.entriesRouted,"waiting record")+" moved to them.":"")); }
+      catch(e){ toast(e.message || "Could not link."); }
+    },
+    "bulk-preview": dBulkPreview,
+    "bulk-cancel": function(){ V.d.bulk.rows = null; render(); },
+    "bulk-apply": dBulkApply,
+    "claim-approve": async function(t){
+      try{ await api("POST","/signup-requests/"+encodeURIComponent(t.getAttribute("data-u"))+"/approve",{}); await loadSignupRequests(); await dAfterChange("Approved and linked."); }
+      catch(e){ toast(e.message || "Could not approve."); }
+    },
+    "claim-reject": async function(t){
+      if(!window.confirm("Reject this sign-up? The account request is deleted and the name is free again.")) return;
+      try{ await api("POST","/signup-requests/"+encodeURIComponent(t.getAttribute("data-u"))+"/reject",{}); await loadSignupRequests(); await dAfterChange("Rejected."); }
+      catch(e){ toast(e.message || "Could not reject."); }
+    },
+    "typed-assign": async function(t){ await dTypedAssign(t.getAttribute("data-key"), +t.getAttribute("data-doc")); },
+    "typed-assign-sel": async function(t){
+      var sel = el("tn-"+t.getAttribute("data-i")); if(!sel || !sel.value){ toast("Choose a doctor first."); return; }
+      await dTypedAssign(t.getAttribute("data-key"), +sel.value);
+    },
+    "r-tab": function(t){ V.r.tab = t.getAttribute("data-tab"); V.r.msg = ""; V.r.err = ""; render(); },
+    "r-promote": rPromote, "r-dismiss": rDismiss, "r-starter-apply": rStarterApply,
+    "r-all": function(t){
+      var key = t.getAttribute("data-key"), on = t.getAttribute("data-on")==="1", d = V.r.data.starter;
+      var list = key==="sd" ? d.diagnoses : key==="sc" ? d.comorbidities : d.procedures[key.slice(3)] || [];
+      list.forEach(function(x, i){ if(on) V.r.pick[key+"|"+i] = true; else delete V.r.pick[key+"|"+i]; });
+      render();
+    }
+  });
+  async function dTypedAssign(key, docId){
+    try{
+      var r = await api("POST","/doctors/typed-names/assign",{ key:key, doctorId:docId });
+      V.d.typed = (await api("GET","/doctors/typed-names")).names; render(); toast("Updated "+plural(r.updated,"record")+".");
+    }catch(e){ toast(e.message || "Could not assign."); }
+  }
+  // Plain delegated handlers for the entry form's chips and the list-review inputs.
+  document.addEventListener("click", function(ev){
+    var t = ev.target && ev.target.closest ? ev.target : null; if(!t) return;
+    var b;
+    if((b = t.closest("[data-repeat-last]"))){ ev.preventDefault(); repeatLast(); return; }
+    if((b = t.closest("[data-dx-add]"))){ ev.preventDefault(); if(state.wiz) mpAddExtra("diagnoses", b.getAttribute("data-dx-add")); return; }
+    if((b = t.closest("[data-dp-involve]"))){ ev.preventDefault(); if(state.wiz) mpAddExtra("assistantsPicked", b.getAttribute("data-dp-involve")); return; }
+  });
+  document.addEventListener("change", function(ev){
+    var t = ev.target; if(!t || !t.getAttribute) return;
+    var k;
+    if((k = t.getAttribute("data-r-pick"))){ if(t.checked) V.r.pick[k] = true; else delete V.r.pick[k]; }
+    else if((k = t.getAttribute("data-r-site"))){ V.r.site[k] = t.value; }
+    else if((k = t.getAttribute("data-r-ren"))){ V.r.ren[k] = t.value; }
+  });
+  document.addEventListener("input", function(ev){
+    var t = ev.target; if(!t || !t.getAttribute) return;
+    var k;
+    if((k = t.getAttribute("data-r-ren"))) V.r.ren[k] = t.value;
+    if(t.id==="submit-typed" && state.submitDialog) state.submitDialog.typed = t.value;
+  });
+
+
 
   boot();
 })();

@@ -1208,3 +1208,37 @@ input[type=email]:disabled, input[type=tel]:disabled, input[type=month]:disabled
   table.v-stack td:first-child{ flex:1 1 100%; }
   table.v-stack td:last-child:not(:first-child){ margin-left:auto; }
 }
+
+/* ================= v7.5: doctors list, claims, entry speed ================= */
+.v-tab.on{color:var(--teal-ink); border-bottom-color:var(--teal);}
+.v-head{margin-bottom:12px;}
+.v-head .v-tabs{margin-top:10px; overflow-x:auto;}
+.v-ulist{display:flex; flex-direction:column;}
+.d-row{display:flex; gap:12px; align-items:center; justify-content:space-between; padding:11px 4px; border-bottom:1px solid var(--line); cursor:pointer;}
+.d-row:hover{background:var(--surface-2);}
+.d-row.d-left{opacity:.62;}
+.d-main{min-width:0; flex:1 1 auto;}
+.d-name{font-size:14px; line-height:1.35;}
+.d-meta{display:flex; flex-wrap:wrap; gap:4px 6px; align-items:center; margin-top:4px; font-size:12px;}
+.d-acts{display:flex; gap:6px; flex:none; flex-wrap:wrap; justify-content:flex-end;}
+.d-code{font-size:19px; letter-spacing:.06em; padding:10px 12px; background:var(--surface-2); border-radius:8px; word-break:break-all; user-select:all; margin:8px 0;}
+@media (max-width:640px){
+  .d-row{flex-direction:column; align-items:stretch; gap:8px;}
+  .d-acts{justify-content:flex-start;}
+}
+/* list review */
+.r-rows{display:flex; flex-direction:column; gap:6px; margin:8px 0;}
+.r-row{display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:center;}
+.r-name{min-width:0;}
+.r-count{font-size:12px; color:var(--ink-soft); white-space:nowrap;}
+.r-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:2px 14px; margin:8px 0;}
+/* sign-up claim */
+.su-claimed{background:var(--teal-bg); color:var(--teal-ink); border-radius:8px; padding:9px 11px; margin:6px 0 10px; font-size:13px;}
+/* entry form helpers */
+.dp-recents, .dx-chips{display:flex; flex-wrap:wrap; gap:6px; margin:6px 0;}
+.dp-chip{cursor:pointer; border:1px solid transparent; font-family:inherit; font-size:12.5px; padding:4px 10px;}
+.dp-chip:hover{border-color:var(--teal);}
+.dp-chip.chip-grey{opacity:.75;}
+.dp-new{font-size:12px; color:var(--amber);}
+.dp-note{margin:4px 0 0;}
+.repeat-bar{display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap; background:var(--surface-2); border-radius:10px; padding:9px 12px; margin:0 0 12px; font-size:13px;}
