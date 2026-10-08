@@ -1227,6 +1227,7 @@
     if(!state.user) return;
     var v = state.view, role = state.user.role, caps = state.capabilities || {};
     vTick();
+    gdMaybeTour();
     if(V_VIEWS.indexOf(v)!==-1){ await vLoadView(v); return; }
     if(v==="dashboard"){
       state.loading = true; render();
@@ -2809,7 +2810,7 @@
       if(state.user.role==="fellow" && hasPerm("view.roster")) tItems.push(["consultant-roster","Roster"]);
       if(state.user.role==="fellow" && hasPerm("signoff.approve")) tItems.push(["approval-queue","Case Sign-off"]);
       if(state.user.role==="fellow" && caps.canApprove) tItems.push(["signup-approvals","Approvals"]);
-      tItems.push(["feedback","Feedback"],["account","My Account"],["about","About / Roadmap"]);
+      tItems.push(["feedback","Feedback"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]);
       return tItems;
     }
     if(state.user.role==="consultant"){
@@ -2819,14 +2820,15 @@
       items.push(["approval-queue","Case Sign-off"]);
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
+      else if(hasPerm("postings.assign_others")) items.push(["set-postings","Set Postings"]);
       if(hasPerm("directory.manage")) items.push(["doctors","Doctors"]);
       if(hasPerm("lists.review")) items.push(["list-review","List Review"]);
       items.push(["feedback","Feedback"]);
       if(hasPerm("accounts.requests_view")) items.push(["account-requests","Account Requests"]);
-      items.push(["account","My Account"],["about","About / Roadmap"]);
+      items.push(["account","My Account"],["guide","Guide"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -3392,7 +3394,7 @@
   function renderSurgicalForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("surgical",(state.wiz.editingId?"Edit ":"")+"Surgical Procedure",wizDraftBadge())+repeatLastBar()+
+    '<div class="card">'+photoBand("surgical",(state.wiz.editingId?"Edit ":"")+"Surgical Procedure",wizDraftBadge()+tipBtn("log-procedure"))+repeatLastBar()+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -3424,7 +3426,7 @@
   function renderOtherForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("other",(state.wiz.editingId?"Edit ":"")+"Other Procedure",wizDraftBadge())+repeatLastBar()+
+    '<div class="card">'+photoBand("other",(state.wiz.editingId?"Edit ":"")+"Other Procedure",wizDraftBadge()+tipBtn("log-procedure"))+repeatLastBar()+
       (state.wiz.editingId && state.wiz.status==="draft" ? '<p class="muted" style="margin-top:-8px; margin-bottom:16px; font-size:12.5px;">This is a saved draft — it isn\'t counted in your stats or visible to your consultant until you finalize it.</p>' : '')+
       '<div class="form-section"><div class="form-section-title">Patient &amp; procedure details</div>'+
         '<div class="row2">'+
@@ -3462,7 +3464,7 @@
     return ''+
     '<div class="card">'+
       (state.wiz.linkedFromId ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Pre-filled from the surgical procedure you just logged — add the history and examination findings to finish.</div>' : '')+
-      photoBand("case",(state.wiz.editingId?"Edit ":"")+"Interesting Case")+
+      photoBand("case",(state.wiz.editingId?"Edit ":"")+"Interesting Case",tipBtn("log-case"))+
       '<div class="row2">'+
         fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
@@ -3485,7 +3487,7 @@
   function renderAcademicForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("academic",(state.wiz.editingId?"Edit ":"")+"Academic Participation")+
+    '<div class="card">'+photoBand("academic",(state.wiz.editingId?"Edit ":"")+"Academic Participation",tipBtn("log-teaching"))+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
         '<div class="field"><label for="f-academicType">Type</label><select id="f-academicType" onchange="window.__entlog_toggleAcademicOther(this.value)">'+
@@ -3502,7 +3504,7 @@
   function renderSeminarForm(){
     var f = state.wiz.fields;
     return ''+
-    '<div class="card">'+photoBand("seminar",(state.wiz.editingId?"Edit ":"")+"Seminar / Presentation")+
+    '<div class="card">'+photoBand("seminar",(state.wiz.editingId?"Edit ":"")+"Seminar / Presentation",tipBtn("log-teaching"))+
       '<p class="muted" style="margin-bottom:16px;">For seminars, lectures or case presentations <b>you</b> conducted — not ones you attended (log those as Academic Participation).</p>'+
       '<div class="row2">'+
         '<div class="field"><label for="f-date">Date</label><input id="f-date" type="date" value="'+esc(f.date)+'"></div>'+
@@ -3846,7 +3848,7 @@
       '<button class="btn btn-sm btn-primary" data-bulk-approve>Sign off '+picked.length+'</button></div>' : '';
     function section(title, rows, delegated, note){
       if(!rows.length) return "";
-      return '<div class="card"><div class="section-head"><h2>'+title+' ('+rows.length+')</h2></div>'+
+      return '<div class="card"><div class="section-head"><h2>'+title+' ('+rows.length+')'+tipBtn(delegated ? "signoff-delegate" : "signoff")+'</h2></div>'+
         (note ? '<p class="muted" style="font-size:12.5px; margin:-6px 0 12px;">'+note+'</p>' : '')+
         '<div class="q-list">'+rows.map(function(e){ return queueRow(e, delegated); }).join("")+'</div></div>';
     }
@@ -3903,7 +3905,7 @@
     return ''+
     approvalCounters()+
     bulkBar+
-    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')</h2><button class="btn btn-sm" id="open-export">Export\u2026</button></div>'+
+    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')'+tipBtn("send-signoff")+'</h2><button class="btn btn-sm" id="open-export">Export\u2026</button></div>'+
     renderEntriesList({
       uiKey: "my-entries",
       entries: rows,
@@ -4101,7 +4103,7 @@
       return '<tr><td class="tabular">'+fmtDate(p.startDate)+'</td><td class="tabular">'+(p.endDate?fmtDate(p.endDate):'<span class="muted">Ongoing</span>')+'</td><td>'+unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>'+(isCurrent?' <span class="chip chip-green">Current</span>':'')+'</td><td><button class="btn btn-sm" data-remove-posting="'+entry.origIndex+'">Remove</button></td></tr>';
     }).join("");
     return ''+
-    '<div class="card"><h2>My unit postings</h2>'+
+    '<div class="card"><h2>My unit postings'+tipBtn("postings")+'</h2>'+
       '<p class="muted" style="margin-bottom:16px;">Log each posting with its start (and, once you know it, end) date — every entry you log automatically picks up whichever posting was active on that entry’s date, so your history stays accurate as you rotate through units.</p>'+
       (rows ? '<div class="table-wrap"><table><thead><tr><th>Start date</th><th>End date</th><th>Unit</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>' : '<p class="muted" style="font-size:13px;">No postings logged yet — add your current one below.</p>')+
       '<div class="row3" style="margin-top:16px;">'+
@@ -4521,7 +4523,7 @@
     var myUnits = (state.consultantScope && state.consultantScope.units) || [];
     var unitName = myUnits.length===1 ? unitShort(myUnits[0]) : "your units";
     return banner+''+
-    '<div class="card"><div class="section-head"><h2>Trainee roster</h2><button class="btn btn-sm" id="open-export">Export…</button></div>'+
+    '<div class="card"><div class="section-head"><h2>Trainee roster'+tipBtn("roster")+'</h2><button class="btn btn-sm" id="open-export">Export…</button></div>'+
     (full ? '' : '<p class="muted" style="font-size:12.5px; margin:-6px 0 14px;">'+
       'Everyone who has been, is, or is due to be posted to '+esc(unitName)+'. '+
       'The counts and the case records are for their time in '+esc(unitName)+' only \u2014 not their whole logbook. '+
@@ -4706,7 +4708,7 @@
     return ''+
     renderCreateUserForm()+
     renderBulkPostings()+
-    '<div class="card"><h2>All accounts ('+rows.length+')</h2>'+
+    '<div class="card"><h2>All accounts ('+rows.length+')'+tipBtn("dev-people")+'</h2>'+
     renderUserAccountsTable(rows, true)+
     '</div>';
   }
@@ -4731,7 +4733,7 @@
     var bp = state.bulkPostings;
     if(!bp) {
       return '<div class="card">'+
-        '<div class="section-head" style="margin-bottom:0;"><h2 style="margin-bottom:0;">Set postings for trainees</h2>'+
+        '<div class="section-head" style="margin-bottom:0;"><h2 style="margin-bottom:0;">Set postings for trainees'+tipBtn("set-postings")+'</h2>'+
         '<button class="btn btn-sm" id="bp-open">+ Set postings</button></div>'+
         '<p class="muted" style="margin:10px 0 0; font-size:13px;">Put a group of trainees into a unit for a block of dates, in one go — for a new intake, or to fill in a rotation nobody has logged yet.</p>'+
       '</div>';
@@ -4830,7 +4832,7 @@
           free.map(function(x){ return '<option value="'+x.id+'">Same person as '+esc(x.displayName)+' ('+esc(x.designation)+')</option>'; }).join("")+'</select>' : '');
     }
     return ''+
-    '<div class="card"><h2>Pending sign-ups ('+rows.length+')</h2>'+
+    '<div class="card"><h2>Pending sign-ups ('+rows.length+')'+tipBtn("approve-signups")+'</h2>'+
       '<p class="muted" style="margin-bottom:14px;">New accounts wait here until someone eligible approves them — approving lets them sign in right away; rejecting deletes the request outright.</p>'+
       (rows.length===0 ? '<div class="empty-state">Nothing waiting on you.</div>' :
       '<div class="table-wrap"><table><thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Batch / Designation</th><th>Unit</th><th>Doctors list</th><th>Requested</th><th></th></tr></thead><tbody>'+
@@ -5132,6 +5134,20 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.6", date: "2026-10-08", title: "A guide for everyone, and a welcome tour",
+      note: "Adds one column (which tour a person has seen). Replace backend/guide_routes.py (new), app.py, api.py, db.py, static/app.js and static/styles.css.",
+      changes: [
+        ["added", "<b>A Guide in the menu, for every kind of person.</b> It explains what the logbook is and why it exists, then gives a roadmap of everything that role does, in the order it comes up. Each step answers who, what, why, when and how, says what happens next, and warns about the usual mistakes."],
+        ["added", "<b>Who does what is read from the live permission settings.</b> The “can do” lists and the full comparison table change when the Developer changes a permission, so the guide cannot tell anyone something that is no longer true. The process, and the reasons for it, are written by hand."],
+        ["added", "<b>Read the guide as any role.</b> A picker shows how the guide reads for a Resident, a Head of Unit, the Head of Department and so on, without changing what you can do. Useful for explaining a role to someone before they join."],
+        ["added", "<b>How a record travels:</b> one picture of the path from a trainee logging an entry, to sign-off, to escalation and unlocking."],
+        ["added", "<b>A short welcome tour the first time you sign in</b> (4 to 6 cards, specific to your role). Skip it at any point; it is shown once per account, on whatever device, and can be replayed from the Guide."],
+        ["added", "<b>A ? beside the title of the main screens</b> opens the steps for that screen without leaving it."],
+        ["added", "<b>A printable one-page quick guide per role</b> (Guide → Print a one-page quick guide). Pick any role first to print it for them."],
+        ["fixed", "<b>A Course Coordinator could not reach “Set postings”.</b> The permission was theirs but the page lived under Manage Users, which a Coordinator does not have, so there was no way in (and the alert about a trainee with no posting linked to it). Anyone who may set postings but cannot open Manage Users now gets a Set Postings page in the menu."]
+      ]
+    },
     {
       version: "7.5.1", date: "2026-10-08", title: "The doctors list is no longer searchable before sign-in",
       note: "Replace backend/api.py, backend/doctor_routes.py, backend/doctors.py and static/app.js, styles.css. No database change.",
@@ -5576,6 +5592,7 @@
     else if(state.view==="developer-data") inner = renderDeveloperData();
     else if(state.view==="signup-approvals") inner = renderSignupApprovals();
     else if(state.view==="manage-users") inner = renderUsersConcise();
+    else if(state.view==="set-postings") inner = '<div class="card"><h2>Set postings</h2><p class="muted" style="margin:6px 0 0;">Move a batch of trainees into a unit for a block of dates. You are shown exactly who would be added, who clashes with an existing posting and who is skipped before anything is saved.</p></div>'+renderBulkPostings();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
     else if(state.view==="feedback") inner = renderFeedback();
@@ -5583,7 +5600,7 @@
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
       + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
-      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog() + vAlertPanel();
+      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog() + vAlertPanel() + renderTipDialog() + renderTourDialog();
     // THE GATE. render() runs on every state change -- every keystroke in a
     // filter, every checkbox -- and replaces the entire DOM, so an entry
     // animation attached to these elements would re-fire constantly and the
@@ -6061,7 +6078,7 @@
         // -- which means it can never again fall out of step with the list
         // of dialogs that exist. Guarded on something actually being open,
         // so Escape inside an entry form does NOT walk out of the form.
-        if(state.exportDialog || state.decideDialog || state.submitDialog
+        if(state.exportDialog || state.decideDialog || state.submitDialog || GS.tour || GS.tip
            || state.viewingHistoryEntryId != null || state.viewingEntryId){
           navBack();
         }
@@ -6696,7 +6713,7 @@
   };
   state.v74 = V;
 
-  var V_VIEWS = ["dev-permissions","dev-user-edit","dev-alerts","dev-courses","dev-backups","doctors","list-review"];
+  var V_VIEWS = ["dev-permissions","dev-user-edit","dev-alerts","dev-courses","dev-backups","doctors","list-review","guide"];
 
   function hasPerm(key){
     var caps = state.capabilities || {};
@@ -6834,7 +6851,7 @@
     var role = state.user.role, caps = state.capabilities||{};
     switch(a.linkView){
       case "postings": return isTraineeRole(role) ? "resident-postings" : null;
-      case "bulkPostings": return role==="developer" ? "developer-users" : (hasPerm("postings.assign_others") ? "manage-users" : null);
+      case "bulkPostings": return role==="developer" ? "developer-users" : (hasPerm("postings.assign_others") ? ((state.capabilities||{}).canManageProfiles ? "manage-users" : "set-postings") : null);
       case "appointments": return role==="developer" ? "developer-roles" : null;
       case "backup": return role==="developer" ? "dev-backups" : null;
     }
@@ -6910,7 +6927,7 @@
   function renderDevPermissions(){
     if(!V.p.cat) return V.p.err ? vErr(V.p.err) : skeletonTable(6);
     var body = V.p.tab==="people" ? vPermPeople() : (V.p.tab==="audit" ? vPermAudit() : vPermRoles());
-    return '<div class="card"><span class="eyebrow">Developer</span><h2>Permissions</h2>'+
+    return '<div class="card"><span class="eyebrow">Developer</span><h2>Permissions'+tipBtn("dev-permissions")+'</h2>'+
       '<p class="muted" style="margin:6px 0 14px; font-size:13px;">What each kind of person may see and do. Each appointment (HOD, Coordinator, Head of Unit) and each kind of account is a <b>bundle</b> you can edit; any individual can then be given extra permissions or have one taken away. A Developer always holds everything except the trainee-closure decision, which stays with the Head of Department. Every change is recorded.</p>'+
       vPermTabs()+'</div>'+ vErr(V.p.err) + body;
   }
@@ -7399,7 +7416,7 @@
   function renderDevCourses(){
     if(!V.c.list) return V.c.err ? vErr(V.c.err) : skeletonTable(4);
     var ed = V.c.edit;
-    var list = '<div class="card"><div class="section-head"><div><span class="eyebrow">Developer</span><h2>Courses</h2></div>'+
+    var list = '<div class="card"><div class="section-head"><div><span class="eyebrow">Developer</span><h2>Courses'+tipBtn("dev-courses")+'</h2></div>'+
       '<button class="btn btn-sm btn-primary" data-v="course-new">+ New course</button></div>'+
       '<p class="muted" style="font-size:13px; margin-bottom:14px;">A course says how long a programme runs, which units it rotates through, whether it has peripheral postings, and what each year is called. Trainees are enrolled on one and enter the month they joined; their year of study is then worked out, never typed. The three below were set up as <b>starting points</b> — confirm the durations match your programmes.</p>'+
       (V.c.list.length ? '<div class="v-courses">'+V.c.list.map(function(c){
@@ -7513,7 +7530,7 @@
     if(!s) return V.b.err ? vErr(V.b.err) : skeletonDash();
     var dl = s.lastDownload, rule = s.rule || {};
     var overdue = !dl || (rule.everyDays && (Date.now()-new Date(dl.at).getTime())/86400000 >= rule.everyDays);
-    var status = '<div class="card"><span class="eyebrow">Developer</span><h2>Backups</h2>'+
+    var status = '<div class="card"><span class="eyebrow">Developer</span><h2>Backups'+tipBtn("dev-backups")+'</h2>'+
       '<div class="v-backup-state '+(overdue?"due":"ok")+'"><b>'+(dl ? "Last backup downloaded "+ago(dl.at) : "No backup has ever been downloaded")+'</b>'+
         (dl ? '<span class="muted"> · '+fmtDateTime(dl.at)+' · '+esc(dl.by||"")+' · '+fmtBytes(dl.sizeBytes)+'</span>' : '')+
         (overdue ? '<div style="margin-top:4px;">Download one now and keep it somewhere other than this server.</div>' : '')+'</div>'+
@@ -7726,6 +7743,7 @@
       case "dev-backups": return renderDevBackups();
       case "doctors": return renderDoctors();
       case "list-review": return renderListReview();
+      case "guide": return renderGuide();
     }
     return "";
   }
@@ -7741,6 +7759,7 @@
     else if(v==="dev-backups"){ await vLoadBackup(); }
     else if(v==="doctors"){ await loadDoctors(); }
     else if(v==="list-review"){ await loadListReview(); }
+    else if(v==="guide"){ await gdLoad(true); render(); }
     else if(v==="dev-alerts"){ await vLoadAlertsManage(); }
     else if(v==="dev-user-edit" && !V.ue){ state.view = "developer-users"; loadForView(); return; }
     render();
@@ -8069,7 +8088,7 @@
     var D = V.d, nClaims = (D.claims||[]).length;
     if(D.tab==="claims" && !nClaims) D.tab = "list";
     var tabs = [["list","Doctors ("+(D.list||[]).filter(function(d){ return d.status==="active"; }).length+")"],["bulk","Add many"]].concat(nClaims?[["claims","Waiting ("+nClaims+")"]]:[]).concat([["typed","Typed names"]]);
-    var head = '<div class="card v-head"><div class="section-head"><h2>Doctors</h2>'+
+    var head = '<div class="card v-head"><div class="section-head"><h2>Doctors'+tipBtn("doctors-list")+'</h2>'+
       '<button class="btn btn-sm btn-primary" data-v="doc-new">Add a doctor</button></div>'+
       '<p class="muted" style="margin:4px 0 12px;">Everyone who can be named on a record, whether or not they have a login. Only the Head of Department and Developers edit this list. A doctor without an account is signed off for by their Head of Unit or the HOD until they have one.</p>'+
       '<div class="v-tabs">'+tabs.map(function(t){ return '<button class="v-tab'+(D.tab===t[0]?" on":"")+'" data-v="doc-tab" data-tab="'+t[0]+'">'+esc(t[1])+'</button>'; }).join("")+'</div></div>';
@@ -8276,7 +8295,7 @@
     var d = V.r.data; if(!d) return skeletonTable(6);
     var n = d.typed.diagnoses.length + d.typed.comorbidities.length + d.typed.procedures.length;
     var sn = d.starter.diagnoses.length + d.starter.comorbidities.length + Object.keys(d.starter.procedures).reduce(function(a,k){ return a+d.starter.procedures[k].length; }, 0);
-    var head = '<div class="card v-head"><h2>List Review</h2>'+
+    var head = '<div class="card v-head"><h2>List Review'+tipBtn("list-review")+'</h2>'+
       '<p class="muted" style="margin:4px 0 12px;">Two ways to make the dropdowns match what people actually see in theatre: promote what they typed, or start from a ready-made list and tick what you want.</p>'+
       '<div class="v-tabs"><button class="v-tab'+(V.r.tab==="typed"?" on":"")+'" data-v="r-tab" data-tab="typed">Typed by users ('+n+')</button>'+
       '<button class="v-tab'+(V.r.tab==="starter"?" on":"")+'" data-v="r-tab" data-tab="starter">Starter lists ('+sn+' not yet added)</button></div></div>';
@@ -8538,6 +8557,681 @@
     if(t.id==="submit-typed" && state.submitDialog) state.submitDialog.typed = t.value;
   });
 
+
+
+/* ================= v7.6: Guide, welcome tour, tips ================= */
+/* ---- content --------------------------------------------------------------
+   Process is written by hand here (who / what / why / when / how / what next).
+   What each kind of person is ALLOWED to do is not written here: it is read
+   from the live permission bundles (GET /guide), so it cannot go stale.
+   {days} is replaced by the department's current escalation period.        */
+var GUIDE_TOUR_VERSION = "7.6";
+var GUIDE_PHASES = ["Start here", "Every case", "Regularly", "When it comes up"];
+var PERSONA_GROUP = { resident:"trainee", senior_resident:"trainee", fellow:"trainee", consultant:"consultant",
+  professor:"consultant", head_of_unit:"consultant", coordinator:"consultant", hod:"consultant", developer:"developer" };
+
+var GUIDE_SITE = {
+  what: "A shared logbook for the Department of Otorhinolaryngology. Trainees record what they do — operations, procedures, interesting cases, teaching — and the consultants who supervised them attest to it. Heads of Unit and the Head of Department can see where everyone is and how training is going.",
+  why: "A training record that is written down once, signed by the person who was there, and impossible to quietly change afterwards is worth more than a spreadsheet kept by each person. It also gives the department one place to see rotations, case numbers and what is waiting to be signed.",
+  rules: [
+    "Patients are never named. Every entry uses a Hospital Number only.",
+    "Nobody can sign off their own record, whatever else they are allowed to do.",
+    "Consultants sign records; they do not rewrite them. Correcting a record is the trainee’s job.",
+    "A signed record is locked. Changing it needs the signer (or a Head of Unit, Coordinator or HOD) to release it first.",
+    "Academic and Seminar entries are the trainee’s own record; nobody signs for them.",
+    "Closing an account never deletes work. Entries and signatures stay where they are."
+  ]
+};
+
+var PERSONA_INFO = {
+  resident: { label:"PG Resident", who:"A postgraduate registrar logging their own training.",
+    does:"Logs operations, procedures, cases and teaching; keeps their postings up to date; sends records to a consultant for sign-off; tracks progress.",
+    never:["See other trainees’ entries.","Sign anything off.","Edit a record after it has been signed (ask to unlock it instead)."],
+    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard tiles.","Send it to the consultant who supervised you."] },
+  senior_resident: { label:"Senior Resident", who:"A senior resident using the same logbook as a PG Resident.",
+    does:"Everything a PG Resident does, under a Senior Residency course.",
+    never:["See other trainees’ entries.","Sign anything off.","Edit a record after it has been signed."],
+    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard tiles.","Send it to the consultant who supervised you."] },
+  fellow: { label:"Fellow", who:"A fellow: logs their own work like a resident, and can be given a few oversight tools.",
+    does:"Everything a resident does. The Head of Department can additionally give a fellow the roster, sign-off or a few viewing permissions; the menu then shows them.",
+    never:["Hold anything beyond viewing, exporting and sign-off permissions, whatever they are given.","Sign off their own record."],
+    steps:["Add your postings under My Postings (your home unit plus any peripheral posting).","Log your first entry from the Dashboard tiles.","Check the menu: roster and sign-off appear only if you have been given them."] },
+  consultant: { label:"Consultant", who:"A consultant or faculty member who supervises trainees and signs their records.",
+    does:"Signs off the records trainees send to them. Sees trainees only if given a roster or records permission.",
+    never:["Edit a trainee’s record.","Sign off their own record.","See trainees outside the units they have been given."],
+    steps:["Open Case Sign-off to see what is waiting.","Open a record and sign it off, or ask for changes with a note.","Check Roster, if you have it, to see who is posted with you."] },
+  professor: { label:"Professor", who:"A consultant whose designation is Professor.",
+    does:"Everything a consultant does, plus sight of the roster and records for their home unit.",
+    never:["See other units unless they hold an appointment or a permission for them."],
+    steps:["Open Case Sign-off to see what is waiting.","Open Roster to see your unit’s trainees.","Open a trainee to see what was logged during their posting in your unit."] },
+  head_of_unit: { label:"Head of Unit", who:"A consultant appointed Head of a unit for a period.",
+    does:"Oversees the units they head: roster, records logged there, overdue sign-offs, and signing off on a colleague’s behalf when asked or when they are away.",
+    never:["See a trainee’s work in other units.","Approve new trainee or consultant accounts (fellows only, unless extra permissions are given)."],
+    steps:["Open Case Sign-off, including the “You can also sign these off” section.","Check the Dashboard for records waiting more than {days} days.","Open Roster to see who is posted to your unit and for how long."] },
+  coordinator: { label:"Course Coordinator", who:"A consultant appointed to coordinate the training course across the department.",
+    does:"Sees every unit’s roster and records, approves new accounts, assigns postings in groups, reads feedback, and can sign off on a colleague’s behalf.",
+    never:["Edit batches, deactivate or delete accounts (that is the Head of Department).","Change roles, designations, passwords or permissions."],
+    steps:["Open Approvals to see new sign-ups.","Open Roster to see where everyone is posted.","Use Manage Users → Set postings when a batch rotates."] },
+  hod: { label:"Head of Department", who:"The consultant appointed to lead the department.",
+    does:"Oversees everything: all units, all records including teaching, accounts, postings, feedback, the doctors list and the lists people choose from.",
+    never:["Change permissions, roles, passwords, usernames, courses, alerts or backups (Developer only).","Touch a Developer account."],
+    steps:["Open Approvals for new sign-ups.","Open Doctors to keep the list of everyone who can be named on a record.","Open List Review to see what people typed that is not on a list yet."] },
+  developer: { label:"Developer", who:"The person who runs the site: structure, permissions and safety.",
+    does:"Holds every permission. Sets up units and appointments, permissions, courses, lists, alerts and backups, and creates or repairs accounts.",
+    never:["Be locked out: the last Developer account cannot be deleted, deactivated or demoted."],
+    steps:["Open Units & Roles and check the units and appointments.","Open Permissions and review what each role can do.","Open Backups and download one."] }
+};
+
+/* One activity = one thing a person does. Each answers who / what / why / when / how / next. */
+var GUIDE_ACTIVITIES = [
+ /* ---------------- everyone new ---------------- */
+ { id:"signup", phase:0, kinds:["trainee","consultant"], title:"Get your account", line:"Create it, wait for approval, sign in.",
+   who:"Anyone joining: PG Residents, Senior Residents, Fellows and Consultants.",
+   what:"Make an account on the sign-in page. A doctor who has been given an invite code skips the form and only chooses a password.",
+   why:"Approval keeps the logbook to real members of the department, and it ties every record to a named person.",
+   when:"Once, when you join. Approval is done by people, so it can take a day.",
+   how:["Open the site and choose “Create one” under the sign-in box.","Choose what you are: PG Resident, Senior Resident, Fellow or Consultant.","Pick a username (letters, numbers, dots, underscores, hyphens), a password of at least 8 characters, and your name as you want it shown.","Trainees choose their course and the month and year they joined; the year of study is worked out from that. Fellows choose a home unit; consultants a designation and unit.","Press Create account. You will see “Awaiting approval”.","Have an invite code instead? Choose “Use it here” on the sign-in page, enter the code and set a password."],
+   next:"The Head of Department or a Course Coordinator approves you (a Head of Unit can approve fellows). You can then sign in with your username and password.",
+   watch:["You cannot sign in until you are approved.","Forgotten password: “Request a reset” on the sign-in page. A Developer sets a new one; there is no email, so also tell them in person if it is urgent."] },
+
+ /* ---------------- trainees ---------------- */
+ { id:"postings", phase:0, kinds:["trainee"], title:"Add your unit postings", line:"So every entry is filed under the right unit.",
+   who:"Every trainee. The Head of Department, a Coordinator or a Developer can also set postings for you, a whole group at a time.",
+   what:"A posting is a unit with a start date and an end date. My Postings is your rotation history.",
+   why:"Each entry is filed under the posting that was active on its date. Consultants and Heads of Unit see only the trainees posted to their unit, and only what was logged there.",
+   when:"When you join, and each time you rotate. Add a future posting if you already know it; add the end date once it is known.",
+   how:["Open My Postings.","Choose the unit, the start date and, if you know it, the end date.","Press Add posting.","If it overlaps another posting you are shown the dates it clashes with. Add it anyway only if you mean it, for example a peripheral block inside a main posting."],
+   next:"Your Dashboard shows your current posting and new entries pick up the unit automatically. Alerts warn you when a posting is about to end or when you have none.",
+   watch:["While two postings overlap, an entry is filed under whichever started later.","An entry dated outside every posting has no unit, so a Head of Unit will not see it in their unit.","A posting outside your course’s normal pattern is flagged and needs a confirmation; it is never blocked."],
+   view:["resident-postings"], viewLabel:"My Postings" },
+
+ { id:"log-procedure", phase:1, kinds:["trainee"], title:"Log an operation or procedure", line:"Surgical Procedure or Other Procedure.",
+   who:"You, as the trainee who did or assisted the case.",
+   what:"Surgical Procedure is any operative case booked in theatre. Other Procedure covers OPD, bedside, emergency-department and treatment-room procedures.",
+   why:"It is your operative log, and the record a consultant attests to. Everything on your Progress page comes from these entries.",
+   when:"As soon after the case as you can. The app sets no deadline, but sign-off is easier while the case is fresh.",
+   how:["From the Dashboard choose Surgical Procedure or Other Procedure (or Log Entry in the menu).","Enter the date, Emergency or Elective, the Hospital Number, age and sex. Never a patient’s name.","Pick the primary diagnosis, any secondary diagnosis and comorbidities. Once a procedure is chosen the usual diagnoses for it are offered as one-tap chips.","Under Sites & procedures choose the site, the side, the procedures and your role (the entrustment level). Use “Add another site” for a combined case.","Under Consultant & sign-off choose the doctor who will sign it. Doctors in the posting unit are listed first, highest rank first. Others involved (assistants, anaesthetist, a consultant from another unit) go in “Also involved”.","Press Finalize entry, or Save as draft to finish later."],
+   next:"A finalized entry counts in your stats. Send it for sign-off when you are ready. A draft is not counted and nobody else can see it.",
+   watch:["Not on a list? Type it in the “Add one not on the list” box. It is kept for the Head of Department to review.","Leaving the form half-filled never loses it: it is saved as you type and offered back from the Dashboard.","“Start from my last entry” and the recent-doctor chips save typing for similar cases."],
+   view:["resident-log"], viewLabel:"Log Entry" },
+
+ { id:"log-case", phase:1, kinds:["trainee"], title:"Log an interesting case", line:"Rare presentations, dilemmas and teaching cases.",
+   who:"You.",
+   what:"An Interesting Case is a write-up record for something worth teaching from: a rare presentation or a diagnostic dilemma. It can be linked to the operation it came from.",
+   why:"It builds a register of teaching cases and lets a consultant attest to the write-up on its own, separately from the operation.",
+   when:"When a case is worth writing up. You can do it straight from the operation form.",
+   how:["On a procedure form, answer “Will you be writing a case report?” with Yes. The new entry is pre-filled with the hospital number, age, sex, diagnoses and procedures.","Or choose Interesting Case on the Dashboard to start from scratch.","Fill in the case, keep the write-up status up to date, and finalize."],
+   next:"Send it for sign-off like any operative record.",
+   watch:["A linked case and its operation are two independent sign-offs. Signing one never signs the other."] },
+
+ { id:"log-teaching", phase:1, kinds:["trainee"], title:"Log teaching and attendance", line:"Academic Participation and Seminar / Presentation.",
+   who:"You.",
+   what:"Academic Participation is what you attended: CME, journal club, a paper presented at a meeting, university activity. Seminar / Presentation is what you gave: a talk or a case presentation.",
+   why:"It is your own record of teaching and academic work. Nobody signs for it, so it is not sent for sign-off.",
+   when:"After the event.",
+   how:["Choose Academic Participation or Seminar / Presentation on the Dashboard.","Fill in the date and details and finalize."],
+   next:"It counts in your stats. By default only the Head of Department and the Coordinator can see teaching records.",
+   watch:["Use Academic for what you attended and Seminar for what you presented."] },
+
+ { id:"send-signoff", phase:1, kinds:["trainee"], title:"Send a record for sign-off", line:"Ask the consultant to attest to it.",
+   who:"You, to the consultant who supervised the case.",
+   what:"You name a consultant, who then approves the record or sends it back with a note.",
+   why:"It turns what you reported into something a consultant has put their name to.",
+   when:"After finalizing. You can send many at once (up to 200), which is how to bring an older back-catalogue in gradually.",
+   how:["Open My Entries.","On a finalized record choose Send for sign-off from its menu, or tick several records and send them together.","Choose the consultant. Doctors in the posting unit come first. Someone who is not on the list can be typed in.","Add a note if it helps, and press Send."],
+   next:"The record shows “Awaiting sign-off”. If it waits more than {days} days it also shows to the Head of Unit, Coordinator and Head of Department who oversee that unit, so a consultant being away does not stall your logbook.",
+   watch:["Drafts cannot be sent.","Sending again to the same consultant is refused. Choosing a different one is recorded as a reassignment.","A consultant with no account yet is signed for by the unit’s Head of Unit or the Head of Department until the account exists, and then the record moves to them.","You can Withdraw a record from sign-off any time before it is approved."],
+   view:["resident-entries"], viewLabel:"My Entries" },
+
+ { id:"after-signoff", phase:1, kinds:["trainee"], title:"When a consultant replies", line:"Approved and locked, or changes asked.",
+   who:"You.",
+   what:"A record comes back approved, or with a note asking for changes.",
+   why:"The consultant attested to one specific version, so an approved record is locked. Anything they ask for is a correction only you can make.",
+   when:"When you see “Changes asked” on your Dashboard or in My Entries.",
+   how:["Changes asked: open the record, read the note, edit it, and send it again. The waiting clock restarts.","Approved: nothing to do. It is locked and cannot be edited or deleted.","Need to change a locked record? Choose Ask to unlock and give a reason. The signer, or a Head of Unit, Coordinator or Head of Department, can release it."],
+   next:"After an edit that changes the case itself, a released record goes back to “Awaiting sign-off”. Changing only comments or the write-up status does not.",
+   watch:["A reason is required to ask for an unlock.","Only one person can edit a record at a time. Others are told who has it; the hold lapses after 10 minutes."],
+   view:["resident-entries"], viewLabel:"My Entries" },
+
+ { id:"progress", phase:2, kinds:["trainee"], title:"Track your progress and export", line:"Counts, charts and a CSV of your own entries.",
+   who:"You.",
+   what:"My Progress charts your finalized entries. My Entries lists everything and has an Export button.",
+   why:"For your own portfolio and for review meetings.",
+   when:"Any time; before an annual review or a rotation meeting is the usual one.",
+   how:["Open My Progress for the counts and charts.","In My Entries choose Export…, pick which entries and which columns, and download the CSV. Your choices are remembered in your browser."],
+   next:"Drafts are not counted. Signed-off numbers are shown separately on your Dashboard.",
+   view:["resident-progress"], viewLabel:"My Progress" },
+
+ { id:"account-care", phase:3, kinds:["trainee","consultant"], title:"Look after your account", line:"Password, leave, closure and feedback.",
+   who:"You.",
+   what:"My Account holds your details, appointments, postings, and your password. It is also where you pause or close your account.",
+   why:"People leave, go on long leave and change their minds, and the logbook has to cope without losing anyone’s work.",
+   when:"As it arises.",
+   how:["Change your password: My Account → Password.","Going on leave: Deactivate your account from My Account. It is immediate and undone simply by signing in again.","Leaving: Request closure with a reason. The Head of Department decides (for trainees; a Developer can for others). A 14-day countdown follows, and you or the department can stop it at any point.","Anything else: Feedback takes complaints, suggestions and praise. Send it under your name to follow its status, or anonymously, in which case no author is stored and nobody can reply."],
+   next:"Closing an account never removes the work. Entries and signatures stay, flagged as a closed account.",
+   watch:["An account switched off by an administrator needs an administrator to switch it back on."],
+   view:["account"], viewLabel:"My Account" },
+
+ /* ---------------- consultants ---------------- */
+ { id:"signoff", phase:1, kinds:["consultant"], perm:"signoff.approve", title:"Sign off trainees’ records", line:"Approve, or send back with a note.",
+   who:"Any consultant a trainee has named. Fellows with the sign-off permission can too.",
+   what:"The Case Sign-off queue lists records waiting for you, oldest first. You approve a record, or ask for changes with a note.",
+   why:"Your signature is what makes a trainee’s entry a training record. You are attesting to one specific version of it.",
+   when:"As soon as you can. Anything waiting more than {days} days is flagged to the people who oversee that unit.",
+   how:["Open Case Sign-off.","Open a record to read it in full.","Choose Sign this off, or Ask for changes and say what needs correcting (a note is required).","Many records at once: tick them and use Sign off N (up to 200)."],
+   next:"An approved record is locked. A record sent back returns to the trainee, who corrects it and resends. If a trainee asks to unlock a signed record, the request appears in your queue and you can release it.",
+   watch:["You cannot approve your own record.","You never edit the record; the trainee does.","An operation and a linked case write-up are separate sign-offs.","Teaching entries are not signed."],
+   view:["approval-queue"], viewLabel:"Case Sign-off" },
+
+ { id:"signoff-delegate", phase:2, kinds:["consultant"], perm:"signoff.delegate", title:"Sign off for a colleague who is away", line:"Acting on someone’s behalf, on the record.",
+   who:"Head of Unit (for their units), Coordinator and Head of Department, as shipped.",
+   what:"Records sent to another consultant also appear under “You can also sign these off”.",
+   why:"One consultant on leave should not hold up a trainee’s logbook.",
+   when:"When a record has waited too long, or a colleague has asked you to.",
+   how:["Open Case Sign-off and scroll to “You can also sign these off”.","Approve or ask for changes exactly as for your own queue."],
+   next:"The record shows that you acted on their behalf, and for whom.",
+   watch:["A Head of Unit can only do this for their own units."],
+   view:["approval-queue"], viewLabel:"Case Sign-off" },
+
+ { id:"roster", phase:2, kinds:["consultant"], anyPerm:["view.roster","view.records"], title:"See your trainees", line:"Roster and each trainee’s page, within your scope.",
+   who:"Anyone given the roster or records permission. As shipped: Heads of Unit and Professors for their unit, Coordinators and the Head of Department for every unit.",
+   what:"The Roster lists trainees posted to the units you may see, with their counts and how long they have been in your unit. Opening a trainee shows their postings and the records logged during postings in your unit.",
+   why:"To know who is with you, how they are getting on, and who has not logged anything.",
+   when:"Before reviews and rotation meetings, and whenever you want to see who is posted where.",
+   how:["Open Roster.","Search or sort; choose a trainee to open their page.","Use Export on the Roster to download what you may see."],
+   next:"A trainee who has been posted to your unit but logged nothing is listed too, and a trainee due to arrive shows as upcoming.",
+   watch:["You see only what was logged during postings in your unit, never the trainee’s work elsewhere.","Everyone is told where each trainee is posted today, but not their rotation history.","Academic and Seminar columns need the teaching permission."],
+   view:["consultant-roster"], viewLabel:"Roster" },
+
+ { id:"escalations", phase:2, kinds:["consultant"], perm:"view.escalations", title:"Chase what has waited too long", line:"Overdue sign-offs in the units you oversee.",
+   who:"Heads of Unit (their units), Coordinators and the Head of Department.",
+   what:"Your Dashboard lists records unsigned for more than {days} days, in the units you oversee.",
+   why:"So that a record is never stuck because one person is away.",
+   when:"Whenever the Dashboard shows the panel.",
+   how:["Open the Dashboard and look for “Waiting more than {days} days”.","Open a record and, if you have delegate rights, sign it yourself, or ask the named consultant."],
+   next:"Once signed it drops off the list for everyone.",
+   view:["dashboard"], viewLabel:"Dashboard" },
+
+ { id:"approve-signups", phase:3, kinds:["consultant","developer"], anyPerm:["accounts.approve_trainees","accounts.approve_fellows","accounts.approve_consultants"], title:"Approve new accounts", line:"Let genuine members in.",
+   who:"As shipped: Head of Department and Coordinator for everyone; Head of Unit for fellows only.",
+   what:"Approvals lists sign-ups waiting for a decision. You approve or reject each one.",
+   why:"It is the only thing keeping outsiders out, and it is where a new doctor is matched to the doctors list.",
+   when:"When the Approvals badge shows a number.",
+   how:["Open Approvals.","Check the name, kind, unit and course.","If a name on the doctors list looks like the same person you are shown it. Pick it from the list so the account links to that row, or leave it to add a new row.","Press Approve, or Reject (which deletes the request)."],
+   next:"An approved person can sign in immediately.",
+   watch:["You see every pending sign-up but can act only on the kinds you are allowed to approve."],
+   view:["signup-approvals"], viewLabel:"Approvals" },
+
+ { id:"manage-users", phase:3, kinds:["consultant"], anyPerm:["accounts.edit_profile","accounts.deactivate","accounts.delete"], title:"Manage users", line:"Batches, deactivation, deletion.",
+   who:"As shipped: Head of Department.",
+   what:"Manage Users lists people. You can change a trainee’s batch or year, deactivate an account, or delete one that has no entries.",
+   why:"People rotate, leave and join. The department needs to tidy accounts without ever losing a record.",
+   when:"At the start of a batch, and when someone leaves.",
+   how:["Open Manage Users and choose a person.","Edit batch or year, or deactivate. Deleting is refused if the account has entries; deactivate it instead."],
+   next:"Every account change, who asked, who decided, when and why, is recorded permanently.",
+   watch:["Designation, role and passwords are Developer-only.","The Developer account cannot be touched from here."],
+   view:["manage-users"], viewLabel:"Manage Users" },
+
+ { id:"account-requests", phase:3, kinds:["consultant"], perm:"accounts.requests_view", title:"Handle account requests", line:"Closures waiting or counting down.",
+   who:"As shipped: Head of Department and Coordinator can read them; the Head of Department decides a trainee’s closure.",
+   what:"Account Requests shows closures waiting for a decision, closures counting down and how long is left, and who is deactivated (and whether they did it themselves).",
+   why:"Leaving should be deliberate and reversible, and somebody senior should know it is happening.",
+   when:"When the Account Requests badge shows a number.",
+   how:["Open Account Requests.","Decide a closure if it is yours to decide, or stop one that is counting down."],
+   next:"After a closure is approved a 14-day countdown starts, which either side can stop. A full copy of the account is taken when it is approved; a Developer can download it or restore the login.",
+   watch:["Closing an account never removes the work. Entries and signatures stay, flagged as a closed account."],
+   view:["account-requests"], viewLabel:"Account Requests" },
+
+ { id:"set-postings", phase:3, kinds:["consultant","developer"], perm:"postings.assign_others", title:"Set postings for trainees", line:"A batch at a time, checked before it is saved.",
+   who:"Head of Department, Coordinator and Developer.",
+   what:"Add the same posting to a group of trainees in one go.",
+   why:"At rotation time a whole batch moves together, and individual trainees forget.",
+   when:"Whenever a batch rotates.",
+   how:["Open Manage Users (Users for a Developer) and choose + Set postings.","Choose the trainees, the unit and the dates and press Check. It shows exactly who would be added, who already has a clashing posting, and who is skipped and why.","If it is right, commit."],
+   next:"Each posting is recorded against that person’s account, and the trainee sees it under My Postings.",
+   view:["developer-users","manage-users","set-postings"], viewLabel:"Set postings" },
+
+ { id:"feedback-inbox", phase:3, kinds:["consultant","developer"], perm:"feedback.manage", title:"Read and handle feedback", line:"Complaints, suggestions and praise.",
+   who:"Head of Department, Coordinator and Developer.",
+   what:"The Feedback screen is the inbox for everything people send in.",
+   why:"The logbook should improve from what the people using it say.",
+   when:"Regularly.",
+   how:["Open Feedback.","Open a submission, set it to Open, Being looked at or Closed, and add internal notes if useful."],
+   next:"The sender sees the status, never the notes.",
+   watch:["Anonymous submissions store no author at all, so nobody can look it up and nobody can reply."],
+   view:["feedback"], viewLabel:"Feedback" },
+
+ { id:"doctors-list", phase:3, kinds:["consultant","developer"], perm:"directory.manage", title:"Keep the doctors list", line:"Everyone who can be named, with or without an account.",
+   who:"Head of Department and Developer.",
+   what:"The Doctors screen lists consultants, fellows and senior residents by name, designation and unit, whether or not they have a login. It fills the pickers on the entry form.",
+   why:"Trainees can name the right doctor from a list instead of free text, and a doctor who has no account yet can still be named and signed for.",
+   when:"At the start, and whenever someone joins or leaves.",
+   how:["Add one doctor with Add a doctor, or a whole unit with Add many (paste one per line, check the preview, then apply). A name already listed is merged, not duplicated.","Give a listed doctor an account: Create account, choose the username, and give them the one-time code. They enter it on the sign-in page and set their own password.","Or link an existing account to a row, or mark someone as left so they stop appearing in pickers."],
+   next:"Entries that named a doctor before they had an account are waiting with the unit’s Head of Unit or the Head of Department; when the account is linked they move to the doctor.",
+   watch:["An invite code is shown once, works once and expires after 7 days.","Nobody can see this list without signing in.","Once a doctor has an account, their name and designation change on the account."],
+   view:["doctors"], viewLabel:"Doctors" },
+
+ { id:"list-review", phase:3, kinds:["consultant","developer"], perm:"lists.review", title:"Review what people typed", line:"Promote it to the lists, or dismiss it.",
+   who:"Head of Department (and Developer).",
+   what:"List Review gathers diagnoses, comorbidities and procedures that people typed because they were not on a list.",
+   why:"The lists should match what is seen in theatre, and the gaps are shown by what people have to type.",
+   when:"Every few weeks.",
+   how:["Open List Review → Typed by users.","Tick what belongs, correct the spelling, and promote it; dismiss what does not.","Starter lists offers ready-made diagnoses and procedures to tick through in bulk."],
+   next:"Promoted items appear in everyone’s dropdowns."},
+
+ /* ---------------- developer ---------------- */
+ { id:"dev-setup", phase:0, kinds:["developer"], title:"Set the department up", line:"A checklist, in the order that works.",
+   who:"The Developer.",
+   what:"Structure first, then people, then safety.",
+   why:"Most of what a person can see or do follows from units, appointments and permissions, so those come before anything else.",
+   when:"Once, then whenever the structure changes.",
+   how:["Units & Roles: confirm the units; appoint the Head of Department, Coordinator(s) and each Head of Unit, with dates.","Permissions: review what each kind of person can do; change a bundle or give one person something extra.","Courses: confirm the starter courses (PG, Senior Residency, Fellowship) and their years.","Manage Lists: check diagnoses, comorbidities and procedures; Restore default procedure lists if any are missing.","Alerts: check which automatic alerts are on.","Backups: download one now.","Doctors: have the Head of Department enter the list of doctors."],
+   next:"Then approve the first sign-ups.",
+   view:["developer-roles"], viewLabel:"Units & Roles" },
+
+ { id:"dev-people", phase:2, kinds:["developer"], title:"Look after accounts", line:"Create, promote, rename, reset.",
+   who:"The Developer.",
+   what:"Users lists everyone. A person’s page holds their details and everything only a Developer may change: role, designation, username, password, deactivation, closure.",
+   why:"These change what people can see or do, so they are kept to one role, and each change is recorded.",
+   when:"As requests arrive. Password Requests shows anyone locked out.",
+   how:["Open Users and search for the person.","Change what you need on their page.","Password Requests: set a new password for someone who asked, and tell them in person."],
+   next:"A username change rewrites every record, signature and history line in one step and ends their sessions.",
+   watch:["The last Developer account cannot be deleted, deactivated or demoted.","Designation “Professor” gives sight of the home unit’s records, which is why it is Developer-only."],
+   view:["developer-users"], viewLabel:"Users" },
+
+ { id:"dev-permissions", phase:2, kinds:["developer"], title:"Decide who can do what", line:"Bundles per role, extras per person.",
+   who:"The Developer.",
+   what:"Every kind of person (Head of Department, Coordinator, Head of Unit, Professor, every Consultant, every Fellow) is a bundle of permissions you can edit, and individuals can be given extras or have something taken away.",
+   why:"So that “this Associate Professor may see ENT 2’s roster but sign nothing” is a setting, not a code change.",
+   when:"When the department decides.",
+   how:["Open Permissions.","Choose a role or a person, change what they hold, and save. Each change is written to an audit trail."],
+   next:"Menus and buttons follow at once. This guide’s “can do” lists follow too.",
+   watch:["Ten permissions are Developer-only and can never be delegated.","Residents and Senior Residents can hold no delegated permission; Fellows only viewing, export and sign-off ones.","The Developer always holds everything."],
+   view:["dev-permissions"], viewLabel:"Permissions" },
+
+ { id:"dev-courses", phase:3, kinds:["developer"], title:"Define courses", line:"Duration, scope, peripheral postings.",
+   who:"The Developer.", what:"A course sets how long a programme runs, whether it covers the whole department or particular units, whether it allows peripheral postings and for how long, and what each year is called.",
+   why:"The year of study shown everywhere is worked out from the course and the month a trainee joined.",
+   when:"When a programme is created or changes.",
+   how:["Open Courses.","Create or edit a course and save."],
+   next:"Trainees pick a course when they sign up.", view:["dev-courses"], viewLabel:"Courses" },
+
+ { id:"dev-alerts", phase:3, kinds:["developer"], title:"Send alerts", line:"By hand, and the automatic ones.",
+   who:"The Developer.", what:"Write an alert, aim it at everyone, a group, particular people or whoever holds a permission, with dates and an importance. Automatic alerts cover postings about to end, trainees with no posting, appointments ending, vacant posts, courses finishing and overdue backups.",
+   why:"To tell people something without relying on them to look.",
+   when:"When there is something to say.",
+   how:["Open Alerts, write the alert, choose who it is for and when it runs.","Automatic alerts can each be switched off or given a different lead time."],
+   next:"People see a bell in the top bar, and urgent ones as a banner on the Dashboard. Automatic alerts are worked out when someone uses the app, not on a timer.",
+   view:["dev-alerts"], viewLabel:"Alerts" },
+
+ { id:"dev-backups", phase:2, kinds:["developer"], title:"Back up and restore", line:"One file holds the whole logbook.",
+   who:"The Developer.", what:"Download the whole logbook as a file, and restore from one if the server’s disk is ever lost.",
+   why:"The database is a single file on one server. Without a backup, one bad day is the end of the logbook.",
+   when:"Regularly. A reminder appears when one is overdue.",
+   how:["Open Backups and press Download.","To restore: upload the file, review what it would change, enter your password and type RESTORE."],
+   next:"A restore copies the current data aside first, so a mistaken restore can be undone.",
+   watch:["The file holds every record and every password hash. Keep it as carefully as the logbook itself."],
+   view:["dev-backups"], viewLabel:"Backups" },
+
+ { id:"dev-lists", phase:3, kinds:["developer"], title:"Edit the lists and export data", line:"Dropdowns, units, CSV.",
+   who:"The Developer.", what:"Manage Lists edits every dropdown (units, diagnoses, comorbidities, procedures by site, settings, designations). Data & Export downloads the whole logbook or the users list as CSV and shows storage status.",
+   why:"The lists decide what people can pick; the export is the department’s own copy of its data.",
+   when:"As needed.",
+   how:["Manage Lists: edit a list, or paste many options at once (you see what is new and what is already there before committing).","Data & Export: choose the file."],
+   next:"Changes are live for everyone immediately.", view:["developer-lists"], viewLabel:"Manage Lists" }
+];
+
+/* Cross-cutting questions people actually ask. */
+var GUIDE_FAQ = [
+  ["Why can’t I edit this record?", "Three possible reasons: it has been signed off (it is locked; use Ask to unlock), someone else has it open (they are named, and the hold lapses after 10 minutes), or it is not yours. Only the person who wrote a record can edit it."],
+  ["Can a consultant change my record?", "No. A consultant approves it or sends it back with a note. Corrections are always made by the person who wrote it."],
+  ["Who can see my entries?", "You can. So can the consultant you sent them to. A Head of Unit or Professor can see what you logged during postings in their unit. The Head of Department and Coordinator can see everything, including teaching entries. A Developer can see everything. Nobody sees a draft except you."],
+  ["Why don’t I see a trainee or a unit?", "Access follows permissions and units. A Head of Unit sees their own units; a Professor sees their home unit. Ask the Head of Department if you think you should see more."],
+  ["I forgot my password.", "Choose “Request a reset” on the sign-in page. A Developer sets a new one. Nothing is emailed, so also tell them in person if it is urgent."],
+  ["My consultant isn’t on the list.", "Choose “Someone not on the list” and type the name. The unit’s Head of Unit or the Head of Department signs it off until the doctor has an account; it then moves to them. Tell the Head of Department so the doctor can be added."],
+  ["I logged something under the wrong unit.", "An entry takes the unit of the posting active on its date. Fix the posting under My Postings. If two postings overlap, the one that started later wins."],
+  ["Is anything about patients stored?", "Only a Hospital Number, age and sex. Never a name. Please do not work around that."],
+  ["What happens if I leave?", "Request closure from My Account. The Head of Department decides, there is a 14-day countdown that either side can stop, and your entries and signatures stay."]
+];
+
+var GUIDE_GLOSSARY = [
+  ["Posting", "A unit, with a start date and an end date. Entries are filed under the posting active on their date."],
+  ["Appointment", "A time-limited role (Head of Department, Coordinator, Head of Unit) given by a Developer, with dates."],
+  ["Designation", "A consultant’s title. “Professor” also gives sight of the home unit’s roster and records."],
+  ["Scope", "Whether a permission applies to the whole department or only to particular units."],
+  ["Delegate", "Someone allowed to sign off a record that was sent to someone else. Their name is recorded as acting on that person’s behalf."],
+  ["Draft / Final", "A draft is yours alone and is not counted. Finalizing it makes it count and lets you send it for sign-off."],
+  ["Awaiting sign-off", "Sent to a consultant who has not yet replied."],
+  ["Locked", "Approved. It cannot be edited until it is released."],
+  ["Course", "A training programme with a length and named years. Your year of study is worked out from it and your joining month."],
+  ["Doctors list", "Everyone who can be named on a record, kept by the Head of Department, whether or not they have an account."],
+  ["Invite code", "A one-time code that lets a listed doctor create their own account and choose their own password."]
+];
+
+  /* ---- state ---------------------------------------------------------------- */
+  var GS = { data:null, who:"me", open:{}, matrix:false, err:"", tour:null, tip:null, checkedFor:null, loading:false };
+  function gdFill(t){ return String(t==null?"":t).replace(/\{days\}/g, String(GS.data ? GS.data.escalationDays : 7)); }
+  async function gdLoad(force){
+    if(GS.data && !force) return GS.data;
+    try{ GS.data = await api("GET","/guide"); GS.err = ""; }catch(e){ GS.err = e.message || "Could not load the guide."; }
+    return GS.data;
+  }
+
+  /* ---- who am I, and who is this guide being read as ------------------------ */
+  function gdMyPersonas(){
+    var u = state.user || {}, caps = state.capabilities || {}, out = [];
+    if(u.role==="developer") return ["developer"];
+    if(u.role==="consultant"){
+      if(caps.isHod) out.push("hod");
+      if(caps.isCoordinator) out.push("coordinator");
+      if(caps.isHeadOfUnit) out.push("head_of_unit");
+      if((u.designation||"").trim().toLowerCase()==="professor") out.push("professor");
+      out.push("consultant");
+      return out;
+    }
+    return [u.role];
+  }
+  function gdPrimary(){ return gdMyPersonas()[0]; }
+  function gdWho(){ return GS.who==="me" ? gdPrimary() : GS.who; }
+  function gdGroup(){ return PERSONA_GROUP[gdWho()]; }
+  function gdHas(perm){
+    if(GS.who==="me") return hasPerm(perm);
+    var p = GS.data && GS.data.personas.filter(function(x){ return x.key===GS.who; })[0];
+    return !!(p && p.perms[perm]);
+  }
+  function gdApplies(a){
+    if(a.kinds.indexOf(gdGroup())===-1) return false;
+    if(a.id==="signup" && GS.who==="me") return false;   // already signed in
+    if(a.perm && !gdHas(a.perm)) return false;
+    if(a.anyPerm && !a.anyPerm.some(gdHas)) return false;
+    return true;
+  }
+  function gdMyLine(){
+    var u = state.user || {}, bits = [];
+    var apps = (GS.data && GS.data.appointments) || [];
+    var withUnit = apps.filter(function(a){ return a.unit; }).map(function(a){ return (PERSONA_INFO[a.role]||{label:a.role}).label+" \u00b7 "+unitShort(a.unit); });
+    var hasUnitHead = apps.some(function(a){ return a.role==="head_of_unit" && a.unit; });
+    gdMyPersonas().forEach(function(k){ if(k==="head_of_unit" && hasUnitHead) return; bits.push(PERSONA_INFO[k].label); });
+    return { chips: bits, units: withUnit };
+  }
+  function gdView(a){
+    if(GS.who!=="me" || !a.view) return null;
+    var items = navItems();
+    for(var i=0;i<a.view.length;i++){ if(items.some(function(n){ return n[0]===a.view[i]; })) return a.view[i]; }
+    return null;
+  }
+
+  /* ---- pieces --------------------------------------------------------------- */
+  function gdActBody(a, withGo){
+    var rows = [["Who", a.who], ["What", a.what], ["Why", a.why], ["When", a.when]].filter(function(r){ return r[1]; });
+    return '<dl class="gd-5w">'+rows.map(function(r){ return '<div><dt>'+r[0]+'</dt><dd>'+esc(gdFill(r[1]))+'</dd></div>'; }).join("")+'</dl>'+
+      (a.how && a.how.length ? '<h4>How</h4><ol class="gd-how">'+a.how.map(function(s){ return '<li>'+esc(gdFill(s))+'</li>'; }).join("")+'</ol>' : '')+
+      (a.next ? '<h4>What happens next</h4><p>'+esc(gdFill(a.next))+'</p>' : '')+
+      (a.watch && a.watch.length ? '<h4>Watch out</h4><ul class="gd-watch">'+a.watch.map(function(s){ return '<li>'+esc(gdFill(s))+'</li>'; }).join("")+'</ul>' : '')+
+      (withGo && gdView(a) ? '<div class="gd-go"><button type="button" class="btn btn-sm btn-primary" data-gd="go" data-view="'+esc(gdView(a))+'">Open '+esc(a.viewLabel||"it")+'</button></div>' : '');
+  }
+  function gdActivity(a, idx){
+    var open = !!GS.open[a.id];
+    return '<div class="gd-act'+(open?" open":"")+'" id="gd-a-'+a.id+'">'+
+      '<button type="button" class="gd-act-head" data-gd="toggle" data-id="'+a.id+'" aria-expanded="'+(open?"true":"false")+'">'+
+        '<span class="gd-num" aria-hidden="true">'+idx+'</span>'+
+        '<span class="gd-act-text"><span class="gd-act-title">'+esc(a.title)+'</span><span class="gd-act-line">'+esc(a.line)+'</span></span>'+
+        '<span class="gd-chev" aria-hidden="true"></span></button>'+
+      (open ? '<div class="gd-act-body">'+gdActBody(a, true)+'</div>' : '')+'</div>';
+  }
+  function gdRoadmap(){
+    var list = GUIDE_ACTIVITIES.filter(gdApplies), n = 0, html = "";
+    GUIDE_PHASES.forEach(function(ph, pi){
+      var items = list.filter(function(a){ return a.phase===pi; });
+      if(!items.length) return;
+      html += '<div class="gd-phase"><div class="gd-phase-head"><span class="gd-phase-dot"></span><h3>'+esc(ph)+'</h3></div>'+
+        items.map(function(a){ n++; return gdActivity(a, n); }).join("")+'</div>';
+    });
+    return html || '<p class="muted">Nothing to show for this role.</p>';
+  }
+  function gdPersonaCan(key){
+    var p = GS.data.personas.filter(function(x){ return x.key===key; })[0]; if(!p) return [];
+    var byKey = {}; GS.data.catalogue.forEach(function(c){ byKey[c.key] = c; });
+    return Object.keys(p.perms).filter(function(k){ return byKey[k] && !byKey[k].reserved; }).map(function(k){
+      var c = byKey[k], sc = p.perms[k];
+      return { label:c.label, tag:(c.scoped ? (sc==="unit" ? "own unit(s)" : "all units") : "") };
+    });
+  }
+  function gdPersonaCard(key){
+    var info = PERSONA_INFO[key], mine = gdMyPersonas().indexOf(key)!==-1;
+    var can = gdPersonaCan(key), dev = key==="developer", open = !!GS.open["p-"+key] || mine;
+    var nRes = GS.data.catalogue.filter(function(c){ return c.reserved; }).length;
+    return '<div class="gd-persona'+(mine?" mine":"")+'"><div class="gd-persona-head"><h3>'+esc(info.label)+'</h3>'+(mine?'<span class="chip chip-teal">You</span>':'')+'</div>'+
+      '<p class="gd-who">'+esc(info.who)+'</p><p>'+esc(gdFill(info.does))+'</p>'+
+      '<div class="gd-can-h">Can do</div>'+
+      (dev ? '<p class="muted">Everything in this guide, plus the '+nRes+' Developer-only items.</p>' :
+        (!can.length ? '<p class="muted">No oversight permissions. Their own logbook only.</p>' :
+          (open ? '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'
+                : '<p class="muted">'+can.length+' permission'+(can.length===1?"":"s")+' from the live settings. <button type="button" class="link-btn" data-gd="toggle" data-id="p-'+key+'">Show</button></p>')))+
+      '<div class="gd-can-h">Never</div><ul class="gd-never">'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
+  }
+  function gdMatrix(){
+    var d = GS.data, ps = d.personas;
+    var groups = d.groups.filter(function(g){ return g.key!=="reserved"; });
+    var head = '<tr><th scope="col">Permission</th>'+ps.map(function(p){ return '<th scope="col">'+esc((PERSONA_INFO[p.key]||{label:p.label}).label)+'</th>'; }).join("")+'</tr>';
+    var body = "";
+    groups.forEach(function(g){
+      var rows = d.catalogue.filter(function(c){ return c.group===g.key && !c.reserved; });
+      if(!rows.length) return;
+      body += '<tr class="gd-mx-group"><th colspan="'+(ps.length+1)+'" scope="colgroup">'+esc(g.label)+'</th></tr>';
+      rows.forEach(function(c){
+        body += '<tr><th scope="row" title="'+esc(c.help)+'">'+esc(c.label)+'</th>'+ps.map(function(p){
+          var v = p.perms[c.key];
+          return '<td class="'+(v?(v==="unit"?"gd-unit":"gd-all"):"gd-no")+'">'+(v ? (c.scoped && v==="unit" ? "Own unit" : "Yes") : "—")+'</td>';
+        }).join("")+'</tr>';
+      });
+    });
+    var resv = d.catalogue.filter(function(c){ return c.reserved; });
+    body += '<tr class="gd-mx-group"><th colspan="'+(ps.length+1)+'" scope="colgroup">Developer only</th></tr>'+
+      resv.map(function(c){ return '<tr><th scope="row" title="'+esc(c.help)+'">'+esc(c.label)+'</th>'+ps.map(function(p){ return '<td class="'+(p.key==="developer"?"gd-all":"gd-no")+'">'+(p.key==="developer"?"Yes":"—")+'</td>'; }).join("")+'</tr>'; }).join("");
+    return '<div class="table-wrap"><table class="gd-matrix"><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'+
+      '<p class="hint">“Own unit” means the units that person heads, or their home unit for a Professor. This table is read from the live permission settings, so it changes when the Developer changes them.</p>';
+  }
+  function gdFlow(){
+    var steps = [
+      ["t","Trainee","Logs the entry","Saves a draft, then finalizes it. Only a finalized entry counts."],
+      ["t","Trainee","Sends it for sign-off","Names the consultant who supervised."],
+      ["c","Consultant","Reads it and decides","Approves, or asks for changes with a note."],
+      ["t","Trainee","If changes were asked","Edits the record and sends it again. The clock restarts."],
+      ["c","Consultant","If approved","The record is locked and counts as signed."],
+      ["o","Oversight","If it waits more than {days} days","The Head of Unit, Coordinator or Head of Department who oversees the unit sees it, and can sign as delegate."],
+      ["t","Trainee","Later, needs a correction?","Asks to unlock, with a reason. The signer or a delegate releases it."]
+    ];
+    var cls = { t:"gd-s-t", c:"gd-s-c", o:"gd-s-o" };
+    return '<ol class="gd-flow">'+steps.map(function(s, i){
+      return '<li class="gd-step '+cls[s[0]]+'"><span class="gd-step-who">'+s[1]+'</span><b>'+esc(gdFill(s[2]))+'</b><span>'+esc(gdFill(s[3]))+'</span></li>';
+    }).join("")+'</ol>';
+  }
+  function gdQuickCard(){
+    var key = gdWho(), info = PERSONA_INFO[key], list = GUIDE_ACTIVITIES.filter(gdApplies);
+    var site = (state.config && state.config.siteName) || "ENT Surgical Logbook";
+    return '<section class="gd-print" aria-hidden="true"><div class="gd-qc">'+
+      '<div class="gd-qc-top"><div><div class="gd-qc-eyebrow">Quick guide</div><h1>'+esc(info.label)+'</h1></div><div class="gd-qc-site">'+esc(site)+'<br>Department of Otorhinolaryngology</div></div>'+
+      '<p class="gd-qc-lead">'+esc(info.who)+' '+esc(gdFill(info.does))+'</p>'+
+      '<h2>Your first three steps</h2><ol>'+info.steps.map(function(s){ return '<li>'+esc(gdFill(s))+'</li>'; }).join("")+'</ol>'+
+      '<h2>What you will do, and when</h2><table class="gd-qc-tab"><tbody>'+list.map(function(a){ return '<tr><th>'+esc(a.title)+'</th><td>'+esc(a.line)+' <span class="gd-qc-ph">'+esc(GUIDE_PHASES[a.phase])+'</span></td></tr>'; }).join("")+'</tbody></table>'+
+      (function(){
+        var c = key==="developer" ? [{label:"Everything, including the Developer-only settings",tag:""}] : gdPersonaCan(key);
+        var own = (PERSONA_GROUP[key]==="trainee") ? [{label:"Log, edit and send your own entries",tag:""},{label:"See your own progress and export it",tag:""}] : [];
+        var can = own.concat(c), many = can.length > 9;
+        var canH = '<div><h2>You can</h2><ul'+(many?' class="gd-qc-two"':'')+'>'+can.map(function(x){ return '<li>'+esc(x.label)+(x.tag?' ('+esc(x.tag)+')':'')+'</li>'; }).join("")+'</ul></div>';
+        var neverH = '<div><h2>You cannot</h2><ul>'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
+        return many ? canH+neverH : '<div class="gd-qc-cols">'+canH+neverH+'</div>';
+      })()+
+      '<h2>Rules everyone follows</h2><ul>'+GUIDE_SITE.rules.slice(0,4).map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul>'+
+      '<div class="gd-qc-foot">Stuck? Open Guide in the menu for the full steps, press the ? beside a screen’s title, or use Feedback. Forgotten password: “Request a reset” on the sign-in page.</div>'+
+    '</div></section>';
+  }
+
+  /* ---- the Guide page --------------------------------------------------------- */
+  function renderGuide(){
+    if(!GS.data){
+      return '<div class="card">'+(GS.err ? '<div class="error-banner">'+esc(GS.err)+'</div>' : '<p class="muted">Opening the guide…</p>')+'</div>';
+    }
+    var me = gdMyLine(), who = gdWho();
+    var opts = [["me","Me ("+PERSONA_INFO[gdPrimary()].label+")"]].concat(GS.data.personas.map(function(p){ return [p.key, (PERSONA_INFO[p.key]||{label:p.label}).label]; }));
+    var picker = '<div class="field gd-pick"><label for="gd-who">Read this guide as</label><select id="gd-who" data-gd-who>'+
+      opts.map(function(o){ return '<option value="'+o[0]+'"'+(GS.who===o[0]?" selected":"")+'>'+esc(o[1])+'</option>'; }).join("")+'</select></div>';
+    var allOpen = GUIDE_ACTIVITIES.filter(gdApplies).every(function(a){ return GS.open[a.id]; });
+    return '<div class="gd-wrap">'+
+      '<div class="card gd-hero"><span class="eyebrow">Guide</span><h2>How this logbook works, and where you fit</h2>'+
+        '<p class="muted gd-lead">'+esc(GUIDE_SITE.what)+'</p>'+
+        '<div class="gd-you">'+(GS.who==="me" ?
+            '<span class="muted">You are</span> '+me.chips.map(function(c){ return '<span class="chip chip-teal">'+esc(c)+'</span>'; }).join(" ")+(me.units.length?' '+me.units.map(function(c){ return '<span class="chip chip-grey">'+esc(c)+'</span>'; }).join(" "):"")
+          : '<span class="notice-inline">Reading as <b>'+esc(PERSONA_INFO[who].label)+'</b>. This only changes what the guide shows. It does not change what you can do.</span>')+'</div>'+
+        '<div class="gd-ctrls">'+picker+
+          '<div class="btn-row gd-btns"><button type="button" class="btn" data-gd="tour">Take the welcome tour</button>'+
+          '<button type="button" class="btn" data-gd="print">Print a one-page quick guide</button></div></div>'+
+      '</div>'+
+      '<div class="card"><h2>Why it exists</h2><p>'+esc(GUIDE_SITE.why)+'</p><h3 class="gd-h3">Rules that apply to everyone</h3><ul class="gd-rules">'+GUIDE_SITE.rules.map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul></div>'+
+      '<div class="card"><div class="section-head"><h2>'+(GS.who==="me" ? "Your roadmap" : "Roadmap: "+esc(PERSONA_INFO[who].label))+'</h2>'+
+        '<button type="button" class="btn btn-sm" data-gd="'+(allOpen?"collapse":"expand")+'">'+(allOpen?"Collapse all":"Expand all")+'</button></div>'+
+        '<p class="muted gd-sub">Everything this role does, in the order it comes up. Each step answers who, what, why, when and how, and says what happens next.</p>'+
+        gdRoadmap()+'</div>'+
+      '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Every operative record and case write-up follows this path. Teaching entries stop at step one.</p>'+gdFlow()+'</div>'+
+      '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each kind of person can do, read from the live permission settings.</p>'+
+        '<div class="gd-personas">'+GS.data.personas.map(function(p){ return gdPersonaCard(p.key); }).join("")+'</div>'+
+        '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>'+
+      '<div class="card"><h2>Questions people ask</h2><div class="gd-faq">'+GUIDE_FAQ.map(function(f, i){
+          var open = !!GS.open["faq"+i];
+          return '<div class="gd-q'+(open?" open":"")+'"><button type="button" class="gd-q-head" data-gd="toggle" data-id="faq'+i+'" aria-expanded="'+(open?"true":"false")+'">'+esc(f[0])+'<span class="gd-chev" aria-hidden="true"></span></button>'+(open?'<p>'+esc(f[1])+'</p>':'')+'</div>';
+        }).join("")+'</div></div>'+
+      '<div class="card"><h2>Words used in this logbook</h2><dl class="gd-gloss">'+GUIDE_GLOSSARY.map(function(g){ return '<div><dt>'+esc(g[0])+'</dt><dd>'+esc(g[1])+'</dd></div>'; }).join("")+'</dl></div>'+
+      '<div class="card muted gd-foot">Anything here out of date, unclear or missing? Tell us under <b>Feedback</b>.</div>'+
+      gdQuickCard()+
+    '</div>';
+  }
+
+  /* ---- ? tips ------------------------------------------------------------------ */
+  function tipBtn(id){
+    return ' <button type="button" class="tip-btn" data-gd="tip" data-id="'+id+'" aria-label="How this works" title="How this works">?</button>';
+  }
+  function renderTipDialog(){
+    if(!GS.tip) return "";
+    var a = GUIDE_ACTIVITIES.filter(function(x){ return x.id===GS.tip; })[0]; if(!a) return "";
+    return '<div class="modal-overlay" data-gd-overlay="tip"><div class="modal-card gd-tip" style="max-width:560px;" role="dialog" aria-modal="true" aria-label="'+esc(a.title)+'">'+
+      '<button class="modal-close" data-gd="close" aria-label="Close">&times;</button>'+
+      '<span class="eyebrow">How this works</span><h2>'+esc(a.title)+'</h2>'+gdActBody(a, false)+
+      '<div class="btn-row"><button class="btn" data-gd="close">Close</button><button class="btn btn-primary" data-gd="open-guide" data-id="'+a.id+'">Open in the Guide</button></div></div></div>';
+  }
+
+  /* ---- welcome tour ------------------------------------------------------------ */
+  function gdTourCards(){
+    var u = state.user, grp = PERSONA_GROUP[gdPrimary()], me = gdMyLine(), days = GS.data ? GS.data.escalationDays : 7;
+    var name = esc((u.displayName||"").replace(/^Dr\.?\s+/i,"") || u.username);
+    var chips = me.chips.concat(me.units).map(function(c){ return '<span class="chip chip-teal">'+esc(c)+'</span>'; }).join(" ");
+    var cards = [];
+    if(grp==="trainee"){
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is your training logbook. You record what you do; the consultant who supervised you signs it. Over a few years it becomes the evidence of your training that nobody can quietly change.</p><p>You are signed in as '+chips+'.</p><p class="muted">Patients are never named here. Every entry uses a Hospital Number.</p>' });
+      cards.push({ k:"Step 1", t:"Tell it where you are posted", h:'<p>Each entry is filed under the unit you were posted to on that date, and consultants only see trainees posted to their unit. So start with <b>My Postings</b>: the unit, the start date, and the end date if you know it.</p>', go:{ view:"resident-postings", label:"Open My Postings" } });
+      cards.push({ k:"Step 2", t:"Log what you do", h:'<p>Five kinds of entry:</p><ul class="gd-t-list"><li><b>Surgical Procedure</b> — any operative case booked in theatre</li><li><b>Other Procedure</b> — OPD, bedside, ED or treatment room</li><li><b>Interesting Case</b> — a rare or instructive case</li><li><b>Academic Participation</b> — CME, journal club, meetings</li><li><b>Seminar / Presentation</b> — what you gave</li></ul><p class="muted">Half-filled forms are saved as you type, so leaving never loses your work.</p>', go:{ view:"resident-log", label:"Open Log Entry" } });
+      cards.push({ k:"Step 3", t:"Get it signed", h:'<p>Operations, procedures and cases are sent to the consultant who supervised you. They approve it, which locks it, or send it back with a note for you to correct. If they take longer than <b>'+days+' days</b>, the people who oversee that unit see it.</p><p class="muted">Teaching entries are yours alone and are not signed.</p>' });
+      cards.push({ k:"Help", t:"Who sees what, and where to look", h:'<p>You see your own entries. Your consultant sees what you send them. A Head of Unit sees what you did during postings in their unit. The Head of Department and Coordinator see everything.</p><p>The <b>Guide</b> in the menu has every step, with a one-page quick guide you can print. Look for the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help on that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
+    } else if(grp==="consultant"){
+      var key = gdPrimary(), info = PERSONA_INFO[key];
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is the department’s logbook. Trainees record what they do; you attest to the records that name you.</p><p>You are signed in as '+chips+'.</p><p>'+esc(gdFill(info.does))+'</p>' });
+      cards.push({ k:"Step 1", t:"Signing records off", h:'<p>Records trainees send you wait in <b>Case Sign-off</b>, oldest first. Open one and either sign it off, which locks it, or ask for changes with a note. You do not edit a record yourself; the trainee does.</p><p class="muted">Anything waiting more than '+days+' days is flagged to the people who oversee that unit.</p>', go:{ view:"approval-queue", label:"Open Case Sign-off" } });
+      if(hasPerm("view.roster")){
+        cards.push({ k:"Step 2", t:"Your trainees", h:'<p>The <b>Roster</b> shows trainees posted to the units you may see: how long each has been with you, and their counts. You see what was logged during postings in your unit, never their work elsewhere.</p>', go:{ view:"consultant-roster", label:"Open Roster" } });
+      }
+      if(hasPerm("signoff.delegate")){
+        cards.push({ k:"Delegate", t:"Signing for a colleague", h:'<p>Records sent to another consultant also appear under <b>You can also sign these off</b>, for the units you cover. Use this when someone is away. Your name is recorded as acting on their behalf.</p>' });
+      }
+      if(caps_canApproveAny()){
+        cards.push({ k:"Accounts", t:"New accounts", h:'<p>New sign-ups wait in <b>Approvals</b>. Approve people you recognise, and match them to the doctors list where it offers a match.</p>', go:{ view:"signup-approvals", label:"Open Approvals" } });
+      }
+      cards.push({ k:"Help", t:"Where to find more", h:'<p>The <b>Guide</b> in the menu has the full steps for your role, a table of who can do what, and a one-page quick guide to print. The <span class="tip-btn tip-demo">?</span> beside a screen’s title explains that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
+    } else {
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>You run this site: its structure, its permissions and its safety. Everyone else’s menu and buttons follow what you set here.</p><p>You hold every permission, and the last Developer account can never be deleted, deactivated or demoted.</p>' });
+      cards.push({ k:"Step 1", t:"Set it up in this order", h:'<ol class="gd-t-list"><li><b>Units & Roles</b> — units, then appoint the Head of Department, Coordinator(s) and each Head of Unit</li><li><b>Permissions</b> — what each kind of person may do</li><li><b>Courses</b> — confirm the starter courses</li><li><b>Manage Lists</b> — diagnoses and procedures</li><li><b>Doctors</b> — the Head of Department fills this in</li></ol>', go:{ view:"developer-roles", label:"Open Units & Roles" } });
+      cards.push({ k:"Step 2", t:"Permissions, in one minute", h:'<p>Every kind of person is a bundle of permissions you can edit, and any individual can be given something extra or have something removed. Ten permissions are Developer-only and cannot be delegated. Every change is written to an audit trail.</p>', go:{ view:"dev-permissions", label:"Open Permissions" } });
+      cards.push({ k:"Safety", t:"Back it up", h:'<p>The whole logbook is one file on one server. Download a backup from <b>Backups</b> now and keep it as carefully as the logbook: it holds every record and every password hash. A reminder appears when one is overdue.</p>', go:{ view:"dev-backups", label:"Open Backups" } });
+      cards.push({ k:"Help", t:"The Guide", h:'<p>The <b>Guide</b> explains every role’s steps and has a one-page quick guide per role you can print and hand out before launch.</p>', go:{ view:"guide", label:"Open the Guide" } });
+    }
+    return cards;
+  }
+  function caps_canApproveAny(){ return !!((state.capabilities||{}).canApprove); }
+  function renderTourDialog(){
+    var T = GS.tour; if(!T) return "";
+    var c = T.cards[T.i], last = T.i===T.cards.length-1;
+    return '<div class="modal-overlay gd-tour-ov" data-gd-overlay="tour"><div class="modal-card gd-tour" role="dialog" aria-modal="true" aria-label="Welcome tour">'+
+      '<button class="modal-close" data-gd="skip" aria-label="Skip the tour">&times;</button>'+
+      '<span class="eyebrow">'+esc(c.k)+' · '+(T.i+1)+' of '+T.cards.length+'</span><h2>'+c.t+'</h2><div class="gd-tour-body">'+c.h+'</div>'+
+      (c.go && c.go.view!=="guide" ? '<div class="gd-go"><button type="button" class="btn btn-sm" data-gd="tour-go" data-view="'+esc(c.go.view)+'">'+esc(c.go.label)+'</button></div>' : '')+
+      '<div class="gd-dots" aria-hidden="true">'+T.cards.map(function(_, i){ return '<span class="'+(i===T.i?"on":"")+'"></span>'; }).join("")+'</div>'+
+      '<div class="btn-row gd-tour-btns">'+(T.i>0 ? '<button class="btn" data-gd="tour-prev">Back</button>' : '<button class="btn" data-gd="skip">Skip</button>')+
+        (last ? '<button class="btn btn-primary" data-gd="'+(c.go&&c.go.view==="guide"?"tour-guide":"skip")+'">'+(c.go&&c.go.view==="guide"?"Open the Guide":"Done")+'</button>' : '<button class="btn btn-primary" data-gd="tour-next">Next</button>')+
+      '</div></div></div>';
+  }
+  async function gdMarkSeen(){
+    if(!state.user || state.user.tourSeen===GUIDE_TOUR_VERSION) return;
+    state.user.tourSeen = GUIDE_TOUR_VERSION;
+    try{ await api("POST","/me/tour",{ version: GUIDE_TOUR_VERSION }); }catch(e){}
+  }
+  async function gdStartTour(auto){
+    if(!state.user || GS.tour) return;
+    await gdLoad();
+    navOpenOverlay(function(){ GS.tour = { i:0, cards: gdTourCards() }; }, function(){ GS.tour = null; gdMarkSeen(); });
+  }
+  function gdMaybeTour(){
+    var u = state.user;
+    if(!u || GS.checkedFor===u.username) return;
+    GS.checkedFor = u.username;
+    if(u.approvalStatus==="pending" || u.tourSeen===GUIDE_TOUR_VERSION) return;
+    setTimeout(function(){ if(state.user && state.user.username===u.username && !GS.tour) gdStartTour(true); }, 600);
+  }
+
+  /* ---- clicks ---------------------------------------------------------------- */
+  function gdClose(){ if(GS.tour || GS.tip) navBack(); }
+  document.addEventListener("click", function(ev){
+    var t = ev.target.closest ? ev.target.closest("[data-gd]") : null;
+    var ov = ev.target.closest ? ev.target.closest("[data-gd-overlay]") : null;
+    if(!t){
+      if(ov && ev.target===ov && ov.getAttribute("data-gd-overlay")==="tip") gdClose();
+      return;
+    }
+    var act = t.getAttribute("data-gd"), id = t.getAttribute("data-id");
+    switch(act){
+      case "toggle": GS.open[id] = !GS.open[id]; render(); break;
+      case "expand": GUIDE_ACTIVITIES.filter(gdApplies).forEach(function(a){ GS.open[a.id] = true; }); render(); break;
+      case "collapse": GUIDE_ACTIVITIES.forEach(function(a){ GS.open[a.id] = false; }); render(); break;
+      case "matrix": GS.matrix = !GS.matrix; render(); break;
+      case "print": {
+        var card = document.querySelector(".gd-print"); if(!card) break;
+        var root = document.createElement("div"); root.id = "gd-print-root"; root.innerHTML = card.outerHTML;
+        document.body.appendChild(root); document.body.classList.add("gd-printing");
+        var undo = function(){
+          window.removeEventListener("afterprint", undo);
+          document.body.classList.remove("gd-printing");
+          if(root.parentNode) root.parentNode.removeChild(root);
+        };
+        window.addEventListener("afterprint", undo);
+        setTimeout(function(){ window.print(); setTimeout(undo, 2000); }, 30);
+        break; }
+      case "go": goView(t.getAttribute("data-view")); break;
+      case "tour": gdStartTour(false); break;
+      case "tour-next": if(GS.tour && GS.tour.i < GS.tour.cards.length-1){ GS.tour.i++; render(); } break;
+      case "tour-prev": if(GS.tour && GS.tour.i > 0){ GS.tour.i--; render(); } break;
+      case "tour-go": { var v = t.getAttribute("data-view"); gdClose(); setTimeout(function(){ if(navItems().some(function(i){ return i[0]===v; })) goView(v); }, 30); break; }
+      case "tour-guide": gdClose(); setTimeout(function(){ GS.who = "me"; goView("guide"); }, 30); break;
+      case "skip": gdClose(); break;
+      case "close": gdClose(); break;
+      case "tip":
+        navOpenOverlay(function(){ GS.tip = id; }, function(){ GS.tip = null; });
+        gdLoad().then(function(){ if(GS.tip) render(); });
+        break;
+      case "open-guide": { var open = id; gdClose(); setTimeout(function(){ GS.who = "me"; GS.open[open] = true; goView("guide"); setTimeout(function(){ var n = document.getElementById("gd-a-"+open); if(n && n.scrollIntoView) n.scrollIntoView({ block:"start" }); }, 250); }, 30); break; }
+    }
+  });
+  document.addEventListener("change", function(ev){
+    var t = ev.target;
+    if(t && t.getAttribute && t.hasAttribute("data-gd-who")){ GS.who = t.value; render(); }
+  });
 
 
   boot();
