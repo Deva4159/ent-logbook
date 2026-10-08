@@ -307,6 +307,8 @@
   // Sidebar navigation is lateral, not a step deeper, so it unwinds any
   // open frames rather than stacking on top of them.
   function goView(v){
+    // A completed stage is read-only: no new entries, no posting changes.
+    if(stageDone() && (v==="resident-log" || v==="resident-postings")) v = "dashboard";
     while(navFrames.length){
       var f = navFrames.pop();
       try{ f.undo(); }catch(e){}
@@ -1056,6 +1058,20 @@
     if(state.user) loadForView();
   }
 
+  // Re-read the signed-in person from the server, so a change made to their
+  // own account (display name, unit, designation...) shows at once instead of
+  // after the next sign-in. Keeps the postings already loaded.
+  async function refreshSelf(){
+    try{
+      var me = await api("GET","/auth/me");
+      if(!me.user || !state.user || me.user.username!==state.user.username) return;
+      var postings = state.user.postings;
+      state.user = me.user; state.user.postings = postings || [];
+      state.capabilities = me.capabilities || state.capabilities;
+      state.account = null;
+      if(state.view==="account"){ try{ state.account = await acctOverview(); }catch(e){} }
+    }catch(e){}
+  }
   function defaultViewFor(role){ return "dashboard"; }
 
   /* ============================================================
@@ -1148,6 +1164,7 @@
     state.passwordResetsLoaded=false; state.consultantsLoaded=false;
     state.signupRequestsLoaded=false; state.signupRequests=[]; state.manageUsersLoaded=false; state.manageUsers=[];
     state.remindersLoaded=false; state.reminders=[]; state.dismissedReminderKey=null;
+    state.stages=null; state.stageFilter=null; state.unitReqCount=0;
     render();
   }
 
@@ -1167,6 +1184,7 @@
   async function loadMyEntries(){
     state.loading = !state.myEntriesLoaded; render();
     try{ state.myEntries = await dListEntriesByAuthor(state.user.username); }catch(e){}
+    await loadMyStages();
     state.myEntriesLoaded = true; state.loading=false;
   }
   async function loadConsultants(){
@@ -1221,6 +1239,10 @@
     if(!canReadFeedback()){ state.feedbackOpenCount = 0; return; }
     try{ state.feedbackOpenCount = (await fbSummary()).open || 0; }catch(e){ state.feedbackOpenCount = 0; }
   }
+  async function refreshUnitReqBadge(){
+    if(!hasPerm("postings.decide_consultant")){ state.unitReqCount = 0; return; }
+    try{ state.unitReqCount = (await api("GET","/unit-requests/summary")).open || 0; }catch(e){ state.unitReqCount = 0; }
+  }
   async function refreshApprovalSummary(){
     try{ state.approvalSummary = await aSummary(); }catch(e){ state.approvalSummary = null; }
   }
@@ -1238,6 +1260,7 @@
         await refreshApprovalSummary();
         await refreshFeedbackBadge();
         await refreshAccountBadge();
+        await refreshUnitReqBadge();
         if(caps.canApprove){ await loadSignupRequests(); }
       }
       else if(role==="developer"){
@@ -1255,6 +1278,7 @@
         await loadSignupRequests();
         await refreshFeedbackBadge();
         await refreshAccountBadge();
+        await refreshUnitReqBadge();
       }
       state.loading=false; render(); return;
     }
@@ -2802,12 +2826,62 @@
   function pendingPasswordRequestCount(){
     return state.passwordResets.filter(function(r){ return r.status==="pending"; }).length;
   }
+  /* ---- v7.7 stages: the trainee's own side ----
+     One account all the way through. Entries logged before a stage was
+     completed carry its stageId and are read-only; new ones have none. */
+  async function loadMyStages(){
+    try{ state.stages = await api("GET","/me/stages"); }catch(e){ state.stages = state.stages || null; }
+  }
+  function stageDone(){ return !!(state.user && isTraineeRole(state.user.role) && state.user.stageStatus==="completed"); }
+  function entryClosed(e){ return e && e.stageId!=null; }
+  function pastStages(){ return ((state.stages||{}).stages)||[]; }
+  function stageFilterValue(){
+    if(!pastStages().length) return "all";
+    if(state.stageFilter!=null) return state.stageFilter;
+    return stageDone() ? "all" : "current";
+  }
+  function scopedEntries(){
+    var f = stageFilterValue(), all = state.myEntries || [];
+    if(f==="all") return all;
+    if(f==="current") return all.filter(function(e){ return e.stageId==null; });
+    return all.filter(function(e){ return String(e.stageId)===String(f); });
+  }
+  function stageName(st){
+    return (st.courseName || roleLabel(st.role)) + (st.joinedYm ? " · from "+fmtYm(st.joinedYm) : "");
+  }
+  function fmtYm(ym){
+    if(!/^\d{4}-\d{2}$/.test(ym||"")) return ym||"";
+    try{ return new Date(ym+"-01T00:00:00").toLocaleDateString(undefined,{month:"short",year:"numeric"}); }catch(e){ return ym; }
+  }
+  // Shown on Dashboard, My Entries and My Progress once a person has a
+  // finished stage on file. Defaults to the stage they are on now.
+  function stageFilterBar(){
+    var st = pastStages();
+    if(!st.length) return "";
+    var f = stageFilterValue(), opts = [];
+    if(!stageDone()) opts.push(["current","Current stage"+(state.user.courseName?" ("+state.user.courseName+")":"")]);
+    st.slice().reverse().forEach(function(x){ opts.push([String(x.id), stageName(x)+" · completed"]); });
+    opts.push(["all","All stages"]);
+    return '<div class="stage-bar"><label for="stage-filter">Showing</label>'+
+      '<select id="stage-filter" data-stage-filter>'+opts.map(function(o){ return '<option value="'+esc(o[0])+'"'+(o[0]===String(f)?" selected":"")+'>'+esc(o[1])+'</option>'; }).join("")+'</select>'+
+      (f!=="current" && f!=="all" ? '<span class="muted">Records from a completed stage are read-only.</span>' : '')+'</div>';
+  }
+  function stageDoneBanner(){
+    if(!stageDone()) return "";
+    var last = pastStages()[pastStages().length-1];
+    return '<div class="notice-banner stage-done"><span>'+
+      '<b>'+esc(last ? (last.courseName||roleLabel(last.role)) : "Your course")+' is complete.</b> '+
+      'Your records are saved and you can still view and export them. You cannot add new entries until the Head of Department moves you to your next stage, on this same login.</span></div>';
+  }
+
   function navItems(){
     var caps = state.capabilities || {};
     if(isTraineeRole(state.user.role)){
       // A Fellow can be given roster and sign-off rights from the Permissions
       // panel; the menu follows what the server says they hold.
-      var tItems = [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"]];
+      var tItems = stageDone()
+        ? [["dashboard","Dashboard"],["resident-entries","My Entries"],["resident-progress","My Progress"]]
+        : [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"]];
       if(state.user.role==="fellow" && hasPerm("view.roster")) tItems.push(["consultant-roster","Roster"]);
       if(state.user.role==="fellow" && hasPerm("signoff.approve")) tItems.push(["approval-queue","Case Sign-off"]);
       if(state.user.role==="fellow" && caps.canApprove) tItems.push(["signup-approvals","Approvals"]);
@@ -2815,7 +2889,9 @@
       return tItems;
     }
     if(state.user.role==="consultant"){
-      var items = [["dashboard","Dashboard"],["consultant-roster","Roster"]];
+      var items = [["dashboard","Dashboard"],["consultant-roster","Roster"],["unit-postings","Unit Postings"]];
+      if(hasPerm("postings.decide_consultant")) items.push(["unit-requests","Unit Requests"]);
+      if(caps.hasArchive) items.push(["archive","Archive"]);
       // "Approvals" already means account sign-ups in this app, so the case
       // sign-off queue gets its own name rather than a second Approvals.
       items.push(["approval-queue","Case Sign-off"]);
@@ -2829,7 +2905,7 @@
       items.push(["account","My Account"],["guide","Guide"],["about","About / Roadmap"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["unit-requests","Unit Requests"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -2850,6 +2926,7 @@
         if(item[0]==="feedback" && state.feedbackOpenCount>0) badge = '<span class="alert-count">'+state.feedbackOpenCount+'</span>';
         if(item[0]==="account-requests" && state.accountReqCount>0) badge = '<span class="alert-count">'+state.accountReqCount+'</span>';
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
+        if(item[0]==="unit-requests" && state.unitReqCount>0) badge = '<span class="alert-count">'+state.unitReqCount+'</span>';
         if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(vNavActive(item[0])?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
@@ -2922,22 +2999,24 @@
 
   function renderDashboardResident(){
     if(state.loading) return skeletonDash();
-    var s = computeStats(finalizedOnly(state.myEntries));
+    var pool = scopedEntries(), done = stageDone();
+    var s = computeStats(finalizedOnly(pool));
     var todayUnit = unitForDate(state.user.postings, todayISO());
-    var recent = finalizedOnly(state.myEntries).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
+    var recent = finalizedOnly(pool).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); }).slice(0,5);
     return ''+
-    resumeBanner()+
+    (done ? stageDoneBanner() : resumeBanner()+
     reminderBanner()+
     (todayUnit ? '<div class="notice-banner" style="background:var(--teal-bg); color:var(--teal-ink); border-color:var(--teal);">Current posting: '+unitShortHtml(todayUnit)+' — '+esc(unitFull(todayUnit))+'</div>'
-      : '<div class="notice-banner">You don’t have a current posting on file — add one under My Postings so your entries can be tagged with a unit.</div>')+
+      : '<div class="notice-banner">You don’t have a current posting on file — add one under My Postings so your entries can be tagged with a unit.</div>'))+
+    stageFilterBar()+
     '<div class="stat-grid">'+
       statTile(s.total,"Total entries")+statTile(s.surgical,"Surgical","surgical")+statTile(s.other,"Other procedures","other")+statTile(s["case"],"Interesting cases","case")+statTile(s.academic,"Academic","academic")+statTile(s.seminar,"Seminars given","seminar")+
     '</div>'+
-    '<div class="card"><span class="eyebrow">New entry</span><h2>Log a new entry</h2><div class="dash-grid dash-grid-photo" style="margin-top:14px;">'+
+    (done ? '' : '<div class="card"><span class="eyebrow">New entry</span><h2>Log a new entry</h2><div class="dash-grid dash-grid-photo" style="margin-top:14px;">'+
       ENTRY_TYPE_TILES.map(function(t){
         return dashCard("__new-"+t[0], t[1], t[3], null, t[0], ENTRY_TYPE_COLOR[t[0]], t[0]);
       }).join("")+
-    '</div></div>'+
+    '</div></div>')+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
       (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Summary</th><th>Unit</th></tr></thead><tbody>'+
@@ -3720,7 +3799,7 @@
           '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
           (opts.showStatusBadge && isDraft ? ' <span class="chip chip-amber">Draft</span>' : '')+
           (opts.showApproval && !isDraft ? '<span class="entry-card-approval">'+approvalChip(e)+'</span>' : '')+
-          (opts.selectable && isApprovable(e) && (e.approvalState==="not_submitted"||e.approvalState==="changes_requested")
+          (opts.selectable && !entryClosed(e) && isApprovable(e) && (e.approvalState==="not_submitted"||e.approvalState==="changes_requested")
             ? '<label class="row-pick" title="Select for bulk send"><input type="checkbox" data-pick="'+esc(idStr)+'"'+(state.approvalPick[idStr]?" checked":"")+'></label>' : '')+
           '<span class="entry-card-chevron" aria-hidden="true">▼</span>'+
           (menuItems ? (
@@ -3743,6 +3822,12 @@
 
   function residentEntryMenuItems(e, rows){
     var items = [];
+    // A record from a completed stage is kept exactly as it was.
+    if(entryClosed(e) || stageDone()){
+      if(isApprovable(e)) items.push('<button type="button" data-approval-history="'+e.id+'">Sign-off history</button>');
+      items.push('<button type="button" data-view-history="'+e.id+'">Edit history</button>');
+      return items.join("");
+    }
     var st = e.approvalState || "not_submitted";
     if(isApprovable(e)){
       if(st==="not_submitted" || st==="changes_requested")
@@ -3898,12 +3983,14 @@
 
   function renderResidentEntries(){
     if(state.loading) return skeletonDash();
-    var rows = state.myEntries;
+    var rows = scopedEntries();
     var picked = Object.keys(state.approvalPick).filter(function(k){ return state.approvalPick[k]; });
     var bulkBar = picked.length ? '<div class="bulk-bar"><span>'+picked.length+' selected</span>'+
       '<button class="btn btn-sm" data-pick-clear>Clear</button>'+
       '<button class="btn btn-sm btn-primary" data-bulk-send>Send '+picked.length+' for sign-off</button></div>' : '';
     return ''+
+    stageDoneBanner()+
+    stageFilterBar()+
     approvalCounters()+
     bulkBar+
     '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')'+tipBtn("send-signoff")+'</h2><button class="btn btn-sm" id="open-export">Export\u2026</button></div>'+
@@ -3912,8 +3999,8 @@
       entries: rows,
       showStatusBadge: true,
       showApproval: true,
-      selectable: true,
-      emptyText: "Nothing logged yet.",
+      selectable: !stageDone(),
+      emptyText: pastStages().length ? "Nothing logged in this stage yet." : "Nothing logged yet.",
       actions: function(e){ return residentEntryMenuItems(e, rows); },
       detail: function(e){
         var extra = '';
@@ -4089,7 +4176,7 @@
 
   function renderResidentProgress(){
     if(state.loading) return skeletonDash();
-    return renderStatsAndCharts(finalizedOnly(state.myEntries));
+    return stageDoneBanner()+stageFilterBar()+renderStatsAndCharts(finalizedOnly(scopedEntries()));
   }
 
   function renderResidentPostings(){
@@ -5144,6 +5231,19 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.7", date: "2026-10-09", title: "Training stages, Archive and consultant unit postings",
+      note: "Adds three tables and two columns; they are created automatically on start-up. Replace the whole backend and static folders. Take a backup first.",
+      changes: [
+        ["fixed", "<b>Changing your own display name now shows at once</b> in the top bar and on My Account, without signing out and in again."],
+        ["changed", "<b>The Guide is shorter for most people.</b> PG Residents, Senior Residents, Fellows and Consultants see what they can do, not a table of everyone’s permissions. The Head of Department, Course Coordinator, Heads of Unit and Developers still see the full “Who does what” section."],
+        ["added", "<b>Completing a course.</b> The Head of Department marks a trainee’s course complete from their page. The records are saved with a summary and become read-only. The trainee can still sign in, view and export."],
+        ["added", "<b>Moving on, on the same login.</b> A completed PG can be moved to Senior Resident, Fellow or Consultant, even years later. New entries belong to the new stage. Dashboard, My Entries and My Progress have a “Showing” box to pick a stage."],
+        ["added", "<b>Archive for consultants who trained here.</b> Their earlier records, read-only, with a CSV download."],
+        ["added", "<b>Consultant unit postings.</b> A consultant can ask to work in another unit for set dates (Unit Postings). The Head of Department, that unit’s Head or a Developer decides it in Unit Requests, or sets a posting directly. During the posting the consultant sees that unit’s roster and records, but cannot sign off for colleagues or approve accounts there."],
+        ["added", "<b>Two new permissions:</b> “Complete a stage and move a person on” and “Decide consultants’ unit requests and set their postings”. The Head of Department holds both; a Head of Unit holds the second for their own units. Change them under Permissions."]
+      ]
+    },
+    {
       version: "7.6.2", date: "2026-10-09", title: "Reset the welcome tour",
       note: "Adds one endpoint and no database change. Replace backend/guide_routes.py, static/app.js and static/styles.css.",
       changes: [
@@ -6151,6 +6251,8 @@
         });
       };
     });
+    var sf = document.querySelector("[data-stage-filter]");
+    if(sf) sf.onchange = function(){ state.stageFilter = sf.value; render(); };
     document.querySelectorAll("[data-entries-sort-key]").forEach(function(sel){
       sel.onchange = function(){ setEntriesSortKey(sel.getAttribute("data-entries-sort-key"), sel.value); };
     });
@@ -7228,7 +7330,8 @@
       // full definition (units, scope) is what this page describes.
       await vLoadCourses();
       var d = await api("GET","/users/"+encodeURIComponent(username)+"/detail");
-      V.ue.detail = d; vResetUserDraft(); 
+      V.ue.detail = d; vResetUserDraft();
+      await vLoadUserStage();
     }catch(e){ V.ue.err = e.message || "Could not open this person."; }
     render();
   }
@@ -7320,7 +7423,7 @@
         return '<div><span class="muted">'+fmtDateTime(e.createdAt)+'</span> · <b>'+esc(e.action.replace(/_/g," "))+'</b>'+(e.actorName?' · '+esc(e.actorName):'')+(e.detail?' — '+esc(e.detail):'')+'</div>'; }).join("")+'</div></div>' : '';
     var bar = '<div class="v-savebar'+(nChanged?" show":"")+'"><span>'+plural(nChanged,"unsaved change")+'</span>'+
       '<button class="btn btn-sm" data-v="user-discard">Discard</button> <button class="btn btn-sm btn-primary" data-v="user-save"'+(ue.busy?" disabled":"")+'>Save changes</button></div>';
-    return identity+rename+kind+placement+status+appts+events+bar;
+    return identity+rename+kind+placement+renderStageCard()+status+appts+events+bar;
   }
   function vRenameCard(){
     var r = V.ue.rename, u = V.ue.detail.user, d = V.ue.detail;
@@ -7402,6 +7505,7 @@
       await api("PATCH","/users/"+encodeURIComponent(ue.username), patch);
       var det = await api("GET","/users/"+encodeURIComponent(ue.username)+"/detail");
       ue.detail = det; vResetUserDraft(); ue.busy = false;
+      if(state.user && ue.username===state.user.username) await refreshSelf();
       render(); toast("Saved.");
     }catch(e){ ue.busy = false; render(); toast(e.message || "Could not save."); }
   }
@@ -7782,6 +7886,9 @@
       case "doctors": return renderDoctors();
       case "list-review": return renderListReview();
       case "guide": return renderGuide();
+      case "archive": return renderArchive();
+      case "unit-postings": return renderUnitPostings();
+      case "unit-requests": return renderUnitRequests();
     }
     return "";
   }
@@ -7799,6 +7906,9 @@
     else if(v==="list-review"){ await loadListReview(); }
     else if(v==="guide"){ await gdLoad(true); render(); }
     else if(v==="dev-alerts"){ await vLoadAlertsManage(); }
+    else if(v==="archive"){ V.ar.stages = null; V.ar.entries = null; render(); await vLoadArchive(); }
+    else if(v==="unit-postings"){ await vLoadMyUnitPostings(); }
+    else if(v==="unit-requests"){ V.q.inbox = null; render(); await vLoadUnitInbox(); }
     else if(v==="dev-user-edit" && !V.ue){ state.view = "developer-users"; loadForView(); return; }
     render();
   }
@@ -8604,7 +8714,7 @@
    What each kind of person is ALLOWED to do is not written here: it is read
    from the live permission bundles (GET /guide), so it cannot go stale.
    {days} is replaced by the department's current escalation period.        */
-var GUIDE_TOUR_VERSION = "7.6";
+var GUIDE_TOUR_VERSION = "7.6";   // unchanged in 7.7: nobody is shown the tour again just for this
 var GUIDE_PHASES = ["Start here", "Every case", "Regularly", "When needed"];
 var PERSONA_GROUP = { resident:"trainee", senior_resident:"trainee", fellow:"trainee", consultant:"consultant",
   professor:"consultant", head_of_unit:"consultant", coordinator:"consultant", hod:"consultant", developer:"developer" };
@@ -8625,26 +8735,31 @@ var GUIDE_SITE = {
 var PERSONA_INFO = {
   resident: { label:"PG Resident", who:"A postgraduate trainee who logs their own training.",
     does:"They log operations, procedures, cases and teaching, keep their postings up to date, send records to a consultant for sign-off and track their progress.",
+    can:["Log operations, procedures, interesting cases and teaching","Save a draft and finish it later","Send records to a consultant for sign-off","Ask to unlock a signed record so you can correct it","Add your postings and see your progress","Export your own entries to CSV","Keep your records and login when you move to your next stage"],
     never:["See other trainees’ entries.","Sign off any record.","Edit a signed record. They can ask for it to be unlocked."],
     steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard.","Send it to the consultant who supervised you."] },
   senior_resident: { label:"Senior Resident", who:"A senior resident, who uses the logbook in the same way as a PG Resident.",
     does:"They do everything a PG Resident does, under a Senior Residency course.",
+    can:["Log operations, procedures, interesting cases and teaching","Save a draft and finish it later","Send records to a consultant for sign-off","Ask to unlock a signed record so you can correct it","Add your postings and see your progress","Export your own entries to CSV","Keep your records and login when you move to your next stage"],
     never:["See other trainees’ entries.","Sign off any record.","Edit a signed record. They can ask for it to be unlocked."],
     steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard.","Send it to the consultant who supervised you."] },
   fellow: { label:"Fellow", who:"A fellow, who logs their own work in the same way as a resident.",
     does:"They do everything a resident does. The Head of Department can also give a fellow the roster, sign-off or some viewing permissions. A fellow’s menu shows whatever they have been given.",
+    can:["Log and send your own entries, as a resident does","Use the roster or sign-off, if the Head of Department has given them to you"],
     never:["Be given any permission other than viewing, exporting and sign-off.","Sign off their own record."],
     steps:["Add your postings under My Postings: your home unit and any peripheral posting.","Log your first entry from the Dashboard.","Check your menu. The roster and sign-off appear only if you have been given them."] },
   consultant: { label:"Consultant", who:"A consultant or faculty member who supervises trainees and signs their records.",
     does:"They sign off the records that trainees send them. They can see trainees only if they have been given the roster or records permission.",
+    can:["Sign off the records that trainees send you","Ask for changes, with a note","Sign off many records at once","Release a signed record when a trainee asks to unlock it","Ask to work in another unit for a set time, and see its roster while you are there"],
     never:["Edit a trainee’s record.","Sign off their own record.","See trainees outside the units they have been given access to."],
     steps:["Open Case Sign-off to see what is waiting.","Open a record. Sign it off, or ask for changes with a note.","If you have the Roster, open it to see who is posted with you."] },
   professor: { label:"Professor", who:"A consultant whose designation is Professor.",
     does:"They do everything a consultant does. They can also see the roster and records for their home unit.",
+    can:["Do everything a consultant does","See the roster and records for your home unit"],
     never:["See other units, unless they are Head of Unit there or have been given access."],
     steps:["Open Case Sign-off to see what is waiting.","Open Roster to see your unit’s trainees.","Open a trainee to see what they logged during their posting in your unit."] },
   head_of_unit: { label:"Head of Unit", who:"A consultant appointed to head a unit for a set period.",
-    does:"They oversee the units they head: the roster, the records logged there and overdue sign-offs. They can sign off on a colleague’s behalf when asked, or when the colleague is away.",
+    does:"They oversee the units they head: the roster, the records logged there and overdue sign-offs. They can sign off on a colleague’s behalf when asked, or when the colleague is away. They decide consultants’ requests to work in their unit.",
     never:["See a trainee’s work in other units.","Approve trainee or consultant sign-ups. A Head of Unit can approve Fellows only, unless given more."],
     steps:["Open Case Sign-off and check “You can also sign these off”.","Check the Dashboard for records waiting more than {days} days.","Open Roster to see who is posted to your unit and for how long."] },
   coordinator: { label:"Course Coordinator", who:"A consultant appointed to coordinate the training course across the department.",
@@ -8652,7 +8767,7 @@ var PERSONA_INFO = {
     never:["Change a trainee’s batch, or deactivate or delete accounts. The Head of Department does this.","Change roles, designations, passwords or permissions."],
     steps:["Open Approvals to see new sign-ups.","Open Roster to see where everyone is posted.","When a batch rotates, open Set Postings."] },
   hod: { label:"Head of Department", who:"The consultant appointed to lead the department.",
-    does:"They oversee everything: every unit, all records including teaching, accounts, postings, feedback, the doctors list and the dropdown lists.",
+    does:"They oversee everything: every unit, all records including teaching, accounts, postings, feedback, the doctors list and the dropdown lists. They complete trainees’ courses, move them to their next stage and decide consultants’ unit requests.",
     never:["Change permissions, roles, passwords, usernames, courses, alerts or backups. Only the Developer can.","Change a Developer account."],
     steps:["Open Approvals to check new sign-ups.","Open Doctors and keep the list of doctors who can be named on a record.","Open List Review to see what people typed that is not yet on a list."] },
   developer: { label:"Developer", who:"The person who runs the site: its structure, permissions and safety.",
@@ -8859,6 +8974,57 @@ var GUIDE_ACTIVITIES = [
    next:"Items you add appear in everyone’s dropdowns." },
 
  /* ---------------- developer ---------------- */
+ /* ---------------- v7.7: stages and unit moves ---------------- */
+ { id:"stage-done", phase:3, kinds:["trainee"], title:"When your course is complete", line:"Your records are kept, on the same login.",
+   who:"Every trainee, at the end of a course. The Head of Department marks the course complete.",
+   what:"Completing a course saves your records with a summary. You keep your login and can view and export everything. When you start your next stage (Senior Residency, a Fellowship or a consultant post), the Head of Department moves your account on.",
+   why:"One account for your whole training means your records and signatures never have to be copied anywhere.",
+   when:"At the end of each course, and again whenever you start a new stage, even years later.",
+   how:["Finish your drafts and get your records signed off before the end of the course.","After the Head of Department completes your course, your Dashboard says so. Log Entry and My Postings are hidden until you are moved on.","When you start your next stage, the Head of Department moves you on. Sign in with the same username and password.","Use the “Showing” box on the Dashboard, My Entries and My Progress to switch between your current stage, an earlier one, or all of them."],
+   next:"New entries belong to your new stage. Records from earlier stages stay read-only. If you become a consultant, they move to the Archive in your menu.",
+   watch:["A record from a completed stage cannot be edited or sent for sign-off again. One that was already waiting can still be signed.","If your course was completed by mistake, ask the Head of Department to undo it."] },
+
+ { id:"stages", phase:3, kinds:["consultant","developer"], perm:"accounts.change_stage", title:"Complete a course and move someone on", line:"From PG to Senior Resident, Fellow or Consultant, on one login.",
+   who:"The Head of Department and Developers. The Developer can give this to a Course Coordinator.",
+   what:"On a trainee’s page, the Training stage card completes their current course and moves them to the next stage: Senior Resident, Fellow or Consultant. It is always the same account.",
+   why:"Their records stay with the stage they were logged in, so a summary of each course is kept and nothing is copied or lost.",
+   when:"At the end of a course, and when a former trainee starts a new stage.",
+   how:["Open the person from Manage Users (or Users).","On the Training stage card, choose Complete this stage. If some records are unfinished, the card lists them; tick the box to go ahead anyway.","When they start their next stage, choose Move to next stage. Pick the stage, the course and the month they start. A fellow needs a parent unit. A consultant needs a home unit and a designation.","To do both at once, choose Complete and move on."],
+   next:"A completed trainee can only view and export. After a move, they log new entries in the new stage. A new consultant sees their trainee records under Archive.",
+   watch:["Only a Developer can set the Professor designation.","Undo completion is there for mistakes. It works until the person has been moved on.","Every step is recorded in the person’s history."],
+   view:["manage-users"], viewLabel:"Manage Users" },
+
+ { id:"archive", phase:3, kinds:["consultant"], title:"Look back at your training records", line:"Everything you logged as a trainee.",
+   onlyIf:function(){ return GS.who==="me" && !!(state.capabilities||{}).hasArchive; },
+   who:"A consultant who trained here.",
+   what:"Archive shows the records from each of your earlier stages, with the summary saved when each one was completed.",
+   why:"Your training record stays yours after promotion, without getting in the way of your work as a consultant.",
+   when:"Whenever you need it, for example for a portfolio or an appraisal.",
+   how:["Open Archive in the menu.","Choose a stage in the “Showing” box, or see all of them.","Open a record to see its details, or download everything as a CSV file."],
+   next:"Nothing to do. The records are read-only.",
+   watch:["Archive records cannot be edited."],
+   view:["archive"], viewLabel:"Archive" },
+
+ { id:"unit-request", phase:3, kinds:["consultant"], title:"Ask to work in another unit", line:"A request, like Feedback, decided by the people in charge.",
+   who:"Any consultant.",
+   what:"Unit Postings shows where you are now. From there you can ask to be posted to another unit for a set time.",
+   why:"While you are posted to a unit, you can see its roster and its trainees’ records, just as its Head of Unit does.",
+   when:"Before the move. The start date cannot be in the past.",
+   how:["Open Unit Postings.","Choose the unit, the start date and, if you know it, the end date. Add a short reason.","Press Send request. You can have up to three open requests."],
+   next:"The Head of Department, the Head of the unit you would join or a Developer approves or declines it. The answer and any note appear on Unit Postings. You can withdraw a request until it is decided.",
+   watch:["A posting does not let you sign off cases on another consultant’s behalf or approve accounts in that unit.","You see the unit only for the dates of the posting."],
+   view:["unit-postings"], viewLabel:"Unit Postings" },
+
+ { id:"unit-inbox", phase:3, kinds:["consultant","developer"], perm:"postings.decide_consultant", title:"Decide unit requests", line:"Approve, decline or post a consultant directly.",
+   who:"The Head of Department, Developers, and a Head of Unit for requests to join their unit.",
+   what:"Unit Requests lists consultants asking to move. Approving gives them a dated posting in that unit. You can also set or remove a posting without a request.",
+   why:"It keeps a record of who was posted where, and when, and gives the consultant the right view for exactly those dates.",
+   when:"When a request arrives. The menu shows how many are waiting.",
+   how:["Open Unit Requests.","Check the dates. You can change them before approving.","Press Approve, or write a note and press Decline.","To post someone directly, choose the consultant under Set a posting directly, then the unit and dates."],
+   next:"The consultant sees the decision on their Unit Postings page. An approved posting starts on its start date.",
+   watch:["A Head of Unit can decide only requests to join their own unit.","If a new posting starts while an earlier one is still running, the earlier one is ended the day before."],
+   view:["unit-requests"], viewLabel:"Unit Requests" },
+
  { id:"dev-setup", phase:0, kinds:["developer"], title:"Set up the department", line:"A checklist, in the order that works best.",
    who:"The Developer.",
    what:"Set up the structure first, then the people, then the safety measures.",
@@ -8930,10 +9096,14 @@ var GUIDE_FAQ = [
   ["My consultant isn’t on the list.", "Choose “Someone not on the list” and type the name. The unit’s Head of Unit or the Head of Department signs it off until the doctor has an account. The record then moves to that doctor. Tell the Head of Department so the doctor can be added to the list."],
   ["I logged something under the wrong unit.", "An entry takes the unit of the posting that was active on its date. Fix the posting under My Postings. If two postings overlap, the one that started later is used."],
   ["Is anything about patients stored?", "Only a Hospital Number, age and sex. Never a name. Please do not find ways around this."],
+  ["My course is over. Can I still sign in?", "Yes. Once the Head of Department completes your course, you can view and export your records but not add new ones. When you start your next stage, they move you on and you keep the same login."],
+  ["I became a consultant. Where are my old records?", "Under Archive in the menu. They are kept exactly as they were."],
   ["What happens if I leave?", "Request closure from My Account. The Head of Department decides. A 14-day countdown follows, and either side can stop it. Your entries and signatures stay."]
 ];
 
 var GUIDE_GLOSSARY = [
+  ["Stage", "A part of your training: PG Residency, Senior Residency, a Fellowship. When one is completed, its records are kept read-only and you move on to the next on the same login."],
+  ["Unit posting (consultant)", "A unit and dates for a consultant working outside their home unit. During it they see that unit’s roster and records."],
   ["Posting", "A unit with a start date and an end date. An entry is filed under the posting that was active on its date."],
   ["Appointment", "A role with an end date (Head of Department, Coordinator or Head of Unit). A Developer sets it."],
   ["Designation", "A consultant’s title. “Professor” also gives access to the roster and records of the consultant’s home unit."],
@@ -8971,6 +9141,12 @@ var GUIDE_GLOSSARY = [
     return [u.role];
   }
   function gdPrimary(){ return gdMyPersonas()[0]; }
+  // Only people who run units, the course or the site see the detailed
+  // permission tables. Everyone else sees what they can do, in plain words.
+  function gdPrivileged(){
+    var caps = state.capabilities || {}, u = state.user || {};
+    return u.role==="developer" || !!(caps.isHod || caps.isCoordinator || caps.isHeadOfUnit);
+  }
   function gdWho(){ return GS.who==="me" ? gdPrimary() : GS.who; }
   function gdGroup(){ return PERSONA_GROUP[gdWho()]; }
   function gdHas(perm){
@@ -8983,6 +9159,7 @@ var GUIDE_GLOSSARY = [
     if(a.id==="signup" && GS.who==="me") return false;   // already signed in
     if(a.perm && !gdHas(a.perm)) return false;
     if(a.anyPerm && !a.anyPerm.some(gdHas)) return false;
+    if(a.onlyIf && !a.onlyIf()) return false;
     return true;
   }
   function gdMyLine(){
@@ -9002,7 +9179,7 @@ var GUIDE_GLOSSARY = [
 
   /* ---- pieces --------------------------------------------------------------- */
   function gdActBody(a, withGo){
-    var rows = [["Who", a.who], ["What", a.what], ["Why", a.why], ["When", a.when]].filter(function(r){ return r[1]; });
+    var rows = [["Who", /^you[.,]?$/i.test(a.who||"") ? "" : a.who], ["What", a.what], ["Why", a.why], ["When", a.when]].filter(function(r){ return r[1]; });
     return '<dl class="gd-5w">'+rows.map(function(r){ return '<div><dt>'+r[0]+'</dt><dd>'+esc(gdFill(r[1]))+'</dd></div>'; }).join("")+'</dl>'+
       (a.how && a.how.length ? '<h4>How</h4><ol class="gd-how">'+a.how.map(function(s){ return '<li>'+esc(gdFill(s))+'</li>'; }).join("")+'</ol>' : '')+
       (a.next ? '<h4>What happens next</h4><p>'+esc(gdFill(a.next))+'</p>' : '')+
@@ -9035,6 +9212,10 @@ var GUIDE_GLOSSARY = [
       var c = byKey[k], sc = p.perms[k];
       return { label:c.label, tag:(c.scoped ? (sc==="unit" ? "own unit(s)" : "all units") : "") };
     });
+  }
+  function gdCanCard(key){
+    var info = PERSONA_INFO[key]; if(!info || !(info.can||[]).length) return "";
+    return '<div class="card"><h2>What you can do</h2><ul class="gd-rules">'+info.can.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
   }
   function gdPersonaCard(key){
     var info = PERSONA_INFO[key], mine = gdMyPersonas().indexOf(key)!==-1;
@@ -9089,18 +9270,24 @@ var GUIDE_GLOSSARY = [
   function gdQuickCard(){
     var key = gdWho(), info = PERSONA_INFO[key], list = GUIDE_ACTIVITIES.filter(gdApplies);
     var site = (state.config && state.config.siteName) || "ENT Surgical Logbook";
-    return '<section class="gd-print" aria-hidden="true"><div class="gd-qc">'+
+    // The Head of Department's sheet carries the most; a slightly smaller
+    // type keeps every role's quick guide to one A4 page.
+    return '<section class="gd-print" aria-hidden="true"><div class="gd-qc'+(list.length>13?" gd-qc-dense":"")+'">'+
       '<div class="gd-qc-top"><div><div class="gd-qc-eyebrow">Quick guide</div><h1>'+esc(info.label)+'</h1></div><div class="gd-qc-site">'+esc(site)+'<br>Department of Otorhinolaryngology</div></div>'+
       '<p class="gd-qc-lead">'+esc(info.who)+' '+esc(gdFill(info.does))+'</p>'+
       '<h2>Your first three steps</h2><ol>'+info.steps.map(function(s){ return '<li>'+esc(gdFill(s))+'</li>'; }).join("")+'</ol>'+
       '<h2>What you will do, and when</h2><table class="gd-qc-tab"><tbody>'+list.map(function(a){ return '<tr><th>'+esc(a.title)+'</th><td>'+esc(a.line)+' <span class="gd-qc-ph">'+esc(GUIDE_PHASES[a.phase])+'</span></td></tr>'; }).join("")+'</tbody></table>'+
       (function(){
-        var c = key==="developer" ? [{label:"Everything, including the Developer-only settings",tag:""}] : gdPersonaCan(key);
-        var own = (PERSONA_GROUP[key]==="trainee") ? [{label:"Log, edit and send your own entries",tag:""},{label:"See your own progress and export it",tag:""}] : [];
-        var can = own.concat(c), many = can.length > 9;
-        var canH = '<div><h2>You can</h2><ul'+(many?' class="gd-qc-two"':'')+'>'+can.map(function(x){ return '<li>'+esc(x.label)+(x.tag?' ('+esc(x.tag)+')':'')+'</li>'; }).join("")+'</ul></div>';
-        var neverH = '<div><h2>You cannot</h2><ul>'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
-        return many ? canH+neverH : '<div class="gd-qc-cols">'+canH+neverH+'</div>';
+        var priv = (PERSONA_GROUP[key]!=="trainee" && key!=="consultant" && key!=="professor" && key!=="fellow");
+        var can;
+        if(!priv){ can = (info.can||[]).map(function(t){ return {label:t, tag:""}; }); }
+        else if(key==="developer"){ can = [{label:"Everything, including the Developer-only settings",tag:""}]; }
+        else { can = gdPersonaCan(key); }
+        var many = can.length > 9;
+        var canH = '<h2>You can</h2><ul'+(many?' class="gd-qc-two"':'')+'>'+can.map(function(x){ return '<li>'+esc(x.label)+(x.tag?' ('+esc(x.tag)+')':'')+'</li>'; }).join("")+'</ul>';
+        var limits = (info.never||[]).slice(0,2);
+        var neverH = limits.length ? '<p class="gd-qc-limits"><b>You cannot:</b> '+limits.map(function(t){ return esc(t); }).join(" · ")+'</p>' : "";
+        return '<div>'+canH+neverH+'</div>';
       })()+
       '<h2>Rules everyone follows</h2><ul>'+GUIDE_SITE.rules.slice(0,4).map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul>'+
       '<div class="gd-qc-foot">Need help? Open Guide in the menu for the full steps, or press the ? beside a screen’s title. You can also use Feedback. If you forget your password, choose “Request a reset” on the sign-in page.</div>'+
@@ -9123,24 +9310,26 @@ var GUIDE_GLOSSARY = [
         '<div class="gd-you">'+(GS.who==="me" ?
             '<span class="muted">You are</span> '+me.chips.map(function(c){ return '<span class="chip chip-teal">'+esc(c)+'</span>'; }).join(" ")+(me.units.length?' '+me.units.map(function(c){ return '<span class="chip chip-grey">'+esc(c)+'</span>'; }).join(" "):"")
           : '<span class="notice-inline">You are reading as <b>'+esc(PERSONA_INFO[who].label)+'</b>. This changes only what the guide shows, not what you can do.</span>')+'</div>'+
-        '<div class="gd-ctrls">'+picker+
+        '<div class="gd-ctrls">'+(gdPrivileged() ? picker : "")+
           '<div class="btn-row gd-btns"><button type="button" class="btn" data-gd="tour">Take the welcome tour</button>'+
           '<button type="button" class="btn" data-gd="print">Print a one-page quick guide</button></div></div>'+
       '</div>'+
+      (gdPrivileged() ? "" : gdCanCard(who))+
       '<div class="card"><h2>Why it exists</h2><p>'+esc(GUIDE_SITE.why)+'</p><h3 class="gd-h3">Rules that apply to everyone</h3><ul class="gd-rules">'+GUIDE_SITE.rules.map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul></div>'+
       '<div class="card"><div class="section-head"><h2>'+(GS.who==="me" ? "Your roadmap" : "Roadmap: "+esc(PERSONA_INFO[who].label))+'</h2>'+
         '<button type="button" class="btn btn-sm" data-gd="'+(allOpen?"collapse":"expand")+'">'+(allOpen?"Collapse all":"Expand all")+'</button></div>'+
         '<p class="muted gd-sub">Everything this role does, in the order it usually comes up. Open a step to see who, what, why, when and how.</p>'+
         gdRoadmap()+'</div>'+
       '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Operations, procedures and case write-ups follow this path. Teaching entries are not signed, so they stop at step 1.</p>'+gdFlow()+'</div>'+
-      '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
+      (gdPrivileged() ? '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
         '<div class="gd-personas">'+GS.data.personas.map(function(p){ return gdPersonaCard(p.key); }).join("")+'</div>'+
-        '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>'+
+        '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>' : '')+
       '<div class="card"><h2>Questions people ask</h2><div class="gd-faq">'+GUIDE_FAQ.map(function(f, i){
           var open = !!GS.open["faq"+i];
           return '<div class="gd-q'+(open?" open":"")+'"><button type="button" class="gd-q-head" data-gd="toggle" data-id="faq'+i+'" aria-expanded="'+(open?"true":"false")+'">'+esc(f[0])+'<span class="gd-chev" aria-hidden="true"></span></button>'+(open?'<p>'+esc(f[1])+'</p>':'')+'</div>';
         }).join("")+'</div></div>'+
-      '<div class="card"><h2>Words used in this logbook</h2><dl class="gd-gloss">'+GUIDE_GLOSSARY.map(function(g){ return '<div><dt>'+esc(g[0])+'</dt><dd>'+esc(g[1])+'</dd></div>'; }).join("")+'</dl></div>'+
+      '<div class="card"><div class="section-head"><h2>Words used in this logbook</h2><button type="button" class="btn btn-sm" data-gd="toggle" data-id="gloss" aria-expanded="'+(GS.open.gloss?"true":"false")+'">'+(GS.open.gloss?"Hide":"Show")+'</button></div>'+
+        (GS.open.gloss ? '<dl class="gd-gloss">'+GUIDE_GLOSSARY.map(function(g){ return '<div><dt>'+esc(g[0])+'</dt><dd>'+esc(g[1])+'</dd></div>'; }).join("")+'</dl>' : '')+'</div>'+
       '<div class="card muted gd-foot">Is anything here out of date, unclear or missing? Tell us through <b>Feedback</b>.</div>'+
       gdQuickCard()+
     '</div>';
@@ -9184,7 +9373,7 @@ var GUIDE_GLOSSARY = [
       if(caps_canApproveAny()){
         cards.push({ k:"Accounts", t:"Approve new accounts", h:'<p>New sign-ups wait in <b>Approvals</b>. Approve people you recognise. If the doctors list has a matching name, pick it so the account links to it.</p>', go:{ view:"signup-approvals", label:"Open Approvals" } });
       }
-      cards.push({ k:"Help", t:"Where to get help", h:'<p>The <b>Guide</b> in the menu has the full steps for your role, a table of who can do what, and a one-page quick guide you can print. Press the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help with that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
+      cards.push({ k:"Help", t:"Where to get help", h:'<p>The <b>Guide</b> in the menu has the full steps for your role'+(gdPrivileged()?', a table of who can do what,':',')+' and a one-page quick guide you can print. Press the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help with that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
     } else {
       cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>You run this site: its structure, its permissions and its safety. Everyone else’s menu and buttons follow the settings you choose here.</p><p>You hold every permission. The last Developer account can never be deleted, deactivated or demoted.</p>' });
       cards.push({ k:"Set up", t:"Set up in this order", h:'<ol class="gd-t-list"><li><b>Units & Roles:</b> add the units, then appoint the Head of Department, the Coordinator(s) and each Head of Unit</li><li><b>Permissions:</b> choose what each role can do</li><li><b>Courses:</b> confirm the starter courses</li><li><b>Manage Lists:</b> check the diagnoses and procedures</li><li><b>Doctors:</b> the Head of Department fills this in</li></ol>', go:{ view:"developer-roles", label:"Open Units & Roles" } });
@@ -9280,6 +9469,337 @@ var GUIDE_GLOSSARY = [
   document.addEventListener("change", function(ev){
     var t = ev.target;
     if(t && t.getAttribute && t.hasAttribute("data-gd-who")){ GS.who = t.value; render(); }
+  });
+
+
+  /* ============================================================
+     v7.7  --  STAGES, THE ARCHIVE, CONSULTANT UNIT POSTINGS
+     ============================================================
+       * a "Training stage" card on a person's page (accounts.change_stage):
+         complete the stage, move them on, reopen a completion by mistake
+       * Archive (a consultant who trained here): earlier stages, read-only
+       * Unit Postings (every consultant): where they are, ask to move
+       * Unit Requests (postings.decide_consultant): decide, or set directly
+  ============================================================ */
+  V.q = { mine:null, form:{ toUnit:"", startDate:"", endDate:"", reason:"" }, err:"", busy:false,
+          inbox:null, status:"open", dec:{}, cons:null, who:"", posts:null, pf:{ unit:"", startDate:"", endDate:"", note:"" }, perr:"" };
+  V.ar = { stages:null, entries:null, pick:"all" };
+  RERENDER_ON_CHANGE["ue.sf.role"] = 1;
+  RERENDER_ON_CHANGE["ue.sf.ack"] = 1;
+  RERENDER_ON_CHANGE["q.who"] = 1;
+  RERENDER_ON_CHANGE["ar.pick"] = 1;
+  V_VIEWS.push("archive", "unit-postings", "unit-requests");
+
+  function vDate(iso){ return iso ? fmtDate(String(iso).slice(0,10)) : '<span class="muted">open</span>'; }
+  function vCounts(c){
+    if(!c) return "";
+    var bits = [plural(c.final||0,"entry","entries")];
+    if(c.approved) bits.push(c.approved+" signed off");
+    if(c.pending) bits.push(c.pending+" waiting for sign-off");
+    if(c.changesRequested) bits.push(c.changesRequested+" with changes asked");
+    if(c.drafts) bits.push(plural(c.drafts,"draft"));
+    return bits.join(" · ");
+  }
+  function vStageTable(list){
+    if(!list || !list.length) return "";
+    return '<div class="table-wrap"><table><thead><tr><th>Stage</th><th>Joined</th><th>Completed</th><th>Records</th><th>Moved to</th></tr></thead><tbody>'+
+      list.map(function(s){
+        return '<tr><td><b>'+esc(s.courseName || roleLabel(s.role))+'</b><div class="muted" style="font-size:12px;">'+esc(roleLabel(s.role))+'</div></td>'+
+          '<td class="tabular">'+esc(s.joinedYm ? fmtYm(s.joinedYm) : "—")+'</td>'+
+          '<td class="tabular">'+fmtDate((s.completedAt||"").slice(0,10))+(s.completedByName?'<div class="muted" style="font-size:12px;">by '+esc(s.completedByName)+'</div>':'')+'</td>'+
+          '<td>'+esc(vCounts(s.summary))+(s.note?'<div class="muted" style="font-size:12px;">'+esc(s.note)+'</div>':'')+'</td>'+
+          '<td>'+(s.movedToRole ? esc(roleLabel(s.movedToRole))+'<div class="muted" style="font-size:12px;">'+fmtDate((s.movedAt||"").slice(0,10))+'</div>' : '<span class="muted">not yet</span>')+'</td></tr>';
+      }).join("")+'</tbody></table></div>';
+  }
+
+  /* ---- person page: the stage card ---------------------------------------- */
+  async function vLoadUserStage(){
+    var ue = V.ue; if(!ue || !ue.detail || !hasPerm("accounts.change_stage")) return;
+    var u = ue.detail.user; if(u.role==="developer" || u.approvalStatus==="pending") return;
+    try{ ue.stage = (await api("GET","/users/"+encodeURIComponent(ue.username)+"/stage")).stage; }catch(e){ ue.stage = null; }
+  }
+  function vStageForm(kind){
+    var st = V.ue.stage, u = V.ue.detail.user;
+    var role = (st.nextRoles||[])[0] || "";
+    V.ue.sf = { kind: kind, note:"", ack:false, unfinished:null, err:"", busy:false,
+      role: role, courseId:"", joinedYm: todayISO().slice(0,7), unit: u.unit||"", designation:"" };
+    vStageCourseDefault();
+  }
+  function vStageCourseDefault(){
+    var sf = V.ue.sf; if(!sf) return;
+    var cs = coursesForRole(sf.role).filter(function(c){ return c.active!==false; });
+    if(!cs.some(function(c){ return c.id===sf.courseId; })) sf.courseId = cs.length ? cs[0].id : "";
+  }
+  function renderStageCard(){
+    var ue = V.ue, st = ue && ue.stage;
+    if(!st) return "";
+    var u = ue.detail.user, isTrainee = isTraineeRole(st.role);
+    if(!isTrainee && !(st.stages||[]).length) return "";
+    var done = st.status==="completed";
+    var head = '<div class="section-head"><div class="form-section-title" style="margin:0;">Training stage'+tipBtn("stages")+'</div>'+
+      (isTrainee ? chipHtml(done ? "Completed" : "In progress", done ? "chip-amber" : "chip-green") : '')+'</div>';
+    var now = "";
+    if(isTrainee){
+      now = done
+        ? '<p style="font-size:13px;">'+esc(u.displayName)+' has finished this stage. They can sign in, view and export their records, but cannot add new ones until you move them to their next stage.</p>'
+        : '<p style="font-size:13px;">On file for this stage: '+esc(vCounts(st.current))+'.</p>';
+    }
+    var btns = "";
+    if(!ue.sf){
+      var b = [];
+      if(st.canComplete) b.push('<button type="button" class="btn btn-sm btn-primary" data-v="stage-open" data-kind="complete">Complete this stage…</button>');
+      if(st.canComplete && (st.nextRoles||[]).length) b.push('<button type="button" class="btn btn-sm" data-v="stage-open" data-kind="move">Complete and move on…</button>');
+      if(st.canMove) b.push('<button type="button" class="btn btn-sm btn-primary" data-v="stage-open" data-kind="move">Move to next stage…</button>');
+      if(st.canReopen) b.push('<button type="button" class="btn btn-sm" data-v="stage-reopen">Undo completion</button>');
+      btns = b.length ? '<div class="v-btns" style="margin-top:10px;">'+b.join(" ")+'</div>' : '';
+    }
+    var past = (st.stages||[]).length ? '<div class="form-section-title" style="margin-top:16px;">Earlier stages</div>'+vStageTable(st.stages) : '';
+    return '<div class="card" id="ue-stage">'+head+now+btns+(ue.sf ? renderStagePanel() : '')+past+'</div>';
+  }
+  function renderStagePanel(){
+    var ue = V.ue, sf = ue.sf, st = ue.stage, u = ue.detail.user, dev = !!(state.capabilities||{}).isDeveloper;
+    var needsComplete = st.status!=="completed";
+    var uf = sf.unfinished, ufBits = [];
+    if(uf){
+      if(uf.drafts) ufBits.push(plural(uf.drafts,"draft"));
+      if(uf.pending) ufBits.push(uf.pending+" waiting for sign-off");
+      if(uf.changesRequested) ufBits.push(uf.changesRequested+" with changes asked");
+    }
+    var warn = uf ? '<div class="v-note stage-warn"><b>Not everything is finished:</b> '+esc(ufBits.join(", "))+'. '+
+        'These stay exactly as they are and become read-only: a waiting sign-off can still be signed, but nothing can be edited or sent again.'+
+        '<div style="margin-top:6px;">'+vcheck("ue.sf.ack","I understand. Complete the stage anyway.")+'</div></div>' : '';
+    var note = '<div class="field"><label for="ue-sf-note">Note <span class="muted">(optional, kept with the stage)</span></label>'+
+      '<textarea id="ue-sf-note" rows="2" maxlength="500" data-vin="ue.sf.note" placeholder="For example: MS ENT completed, results declared">'+esc(sf.note||"")+'</textarea></div>';
+    var body = "";
+    if(sf.kind==="complete"){
+      body = '<p style="font-size:13px;">Their records are saved with a summary and become read-only. They keep their login and can still view and export everything.</p>'+note+warn;
+    } else {
+      var roles = (st.nextRoles||[]).map(function(r){ return [r, roleLabel(r)]; });
+      var fields = vsel("ue.sf.role","Next stage",roles);
+      if(sf.role==="consultant"){
+        var desigs = (state.config.consultantDesignations||[]).filter(function(d){ return dev || String(d).toLowerCase()!=="professor"; });
+        fields += '<div class="row2">'+
+          '<div class="field"><label for="ue-sf-unit">Home unit</label><select id="ue-sf-unit" data-vin="ue.sf.unit"><option value="">— choose —</option>'+unitOptions(sf.unit)+'</select></div>'+
+          vsel("ue.sf.designation","Designation",[["","— choose —"]].concat(desigs.map(function(d){ return [d,d]; })),{hint: dev ? "" : "Only a Developer can set Professor."})+'</div>'+
+          '<p class="hint">Their earlier records move to an Archive they can open from the menu.</p>';
+      } else {
+        var cs = coursesForRole(sf.role).filter(function(c){ return c.active!==false; });
+        fields += '<div class="row2">'+
+          vsel("ue.sf.courseId","Course", cs.length ? cs.map(function(c){ return [c.id, c.name+" · "+c.durationMonths+" months"]; }) : [["","— none set up —"]])+
+          vtext("ue.sf.joinedYm","Starts (month and year)",{type:"month"})+'</div>'+
+          (sf.role==="fellow" ? '<div class="field"><label for="ue-sf-unit">Parent unit</label><select id="ue-sf-unit" data-vin="ue.sf.unit"><option value="">— choose —</option>'+unitOptions(sf.unit)+'</select></div>' : '');
+      }
+      body = (needsComplete ? '<p style="font-size:13px;">This completes the current stage and moves them on in one step. Same login; the old records stay with the stage they were logged in.</p>'
+                            : '<p style="font-size:13px;">Same login. Their earlier records stay with the stage they were logged in.</p>')+
+        fields+(needsComplete ? note+warn : '');
+    }
+    var can = !sf.busy && (!sf.unfinished || sf.ack);
+    var go = sf.kind==="complete" ? "Complete stage" : (needsComplete ? "Complete and move" : "Move to "+roleLabel(sf.role));
+    return '<div class="stage-panel">'+(sf.err ? vErr(sf.err) : '')+body+
+      '<div class="btn-row"><button type="button" class="btn" data-v="stage-cancel">Cancel</button> '+
+      '<button type="button" class="btn btn-primary" data-v="stage-go"'+(can?"":" disabled")+'>'+esc(go)+'</button></div></div>';
+  }
+  async function vStageGo(){
+    var ue = V.ue, sf = ue.sf; if(!sf) return;
+    var path = "/users/"+encodeURIComponent(ue.username)+"/stage/"+(sf.kind==="complete" ? "complete" : "move");
+    var body = { note: sf.note || "", acknowledge: !!sf.ack };
+    if(sf.kind==="move"){
+      body.role = sf.role; body.complete = ue.stage.status!=="completed";
+      if(sf.role==="consultant"){ body.unit = sf.unit; body.designation = sf.designation; }
+      else {
+        body.courseId = sf.courseId || null; body.joinedYm = normJoin(sf.joinedYm || "");
+        if(sf.role==="fellow") body.unit = sf.unit;
+      }
+    }
+    sf.busy = true; sf.err = ""; render();
+    try{
+      var r = await api("POST", path, body);
+      ue.stage = r.stage; ue.sf = null;
+      ue.detail = await api("GET","/users/"+encodeURIComponent(ue.username)+"/detail"); vResetUserDraft();
+      render();
+      toast(sf.kind==="complete" ? "Stage completed. Their records are saved." : "Moved to "+roleLabel(r.user.role)+".");
+    }catch(e){
+      sf.busy = false;
+      if(e.code==="unfinished"){ sf.unfinished = e.data.current; sf.ack = false; }
+      else sf.err = e.message || "Could not save.";
+      render();
+    }
+  }
+  async function vStageReopen(){
+    var ue = V.ue;
+    if(!confirm("Undo the completion?\n\nTheir records from this stage become editable again and they can log new entries.")) return;
+    try{
+      var r = await api("POST","/users/"+encodeURIComponent(ue.username)+"/stage/reopen");
+      ue.stage = r.stage; ue.detail = await api("GET","/users/"+encodeURIComponent(ue.username)+"/detail"); vResetUserDraft();
+      render(); toast("Completion undone.");
+    }catch(e){ toast(e.message || "Could not undo it."); }
+  }
+  CLICK["stage-open"] = function(t){ vStageForm(t.getAttribute("data-kind")); render(); };
+  CLICK["stage-cancel"] = function(){ V.ue.sf = null; render(); };
+  CLICK["stage-go"] = vStageGo;
+  CLICK["stage-reopen"] = vStageReopen;
+
+  /* ---- Archive ------------------------------------------------------------ */
+  async function vLoadArchive(){
+    try{ V.ar.stages = (await api("GET","/me/stages")).stages || []; }catch(e){ V.ar.stages = []; }
+    try{ V.ar.entries = await dListEntriesByAuthor(state.user.username); }catch(e){ V.ar.entries = []; }
+  }
+  function renderArchive(){
+    if(V.ar.stages==null || V.ar.entries==null) return skeletonDash();
+    var st = V.ar.stages, pick = V.ar.pick || "all";
+    var pool = V.ar.entries.filter(function(e){ return pick==="all" || String(e.stageId)===String(pick); });
+    var opts = [["all","All earlier stages"]].concat(st.slice().reverse().map(function(s){ return [String(s.id), stageName(s)]; }));
+    return '<div class="card"><span class="eyebrow">Archive</span><h2>Your training records'+tipBtn("archive")+'</h2>'+
+        '<p class="muted" style="margin:6px 0 12px;">Everything you logged as a trainee, kept as it was. Read-only.</p>'+
+        vStageTable(st)+'</div>'+
+      '<div class="card"><div class="section-head"><h2>Records ('+pool.length+')</h2><a class="btn btn-sm" href="/api/entries/export/mine.csv">Download CSV</a></div>'+
+        (st.length > 1 ? '<div class="stage-bar">'+vsel("ar.pick","Showing",opts)+'</div>' : '')+
+        renderEntriesList({ uiKey:"archive", entries: pool, showStatusBadge:true, showApproval:true, emptyText:"No records in this stage.",
+          actions: function(e){ return (isApprovable(e) ? '<button type="button" data-approval-history="'+e.id+'">Sign-off history</button>' : '')+'<button type="button" data-view-history="'+e.id+'">Edit history</button>'; } })+
+      '</div>';
+  }
+
+  /* ---- Unit Postings (a consultant's own) --------------------------------- */
+  var UREQ_CHIP = { open:["Waiting","chip-amber"], approved:["Approved","chip-green"], declined:["Declined","chip-red"], withdrawn:["Withdrawn","chip-grey"] };
+  function vReqChip(r){ var c = UREQ_CHIP[r.status] || [r.status,"chip-grey"]; return chipHtml(c[0], c[1]); }
+  async function vLoadMyUnitPostings(){
+    try{ V.q.mine = await api("GET","/consultant-postings/mine"); }catch(e){ V.q.mine = { error: e.message }; }
+  }
+  function renderUnitPostings(){
+    var m = V.q.mine; if(!m) return skeletonDash();
+    if(m.error) return vErr(m.error);
+    var f = V.q.form, today = todayISO();
+    var posts = (m.postings||[]).map(function(p){
+      var live = p.startDate<=today && (!p.endDate || p.endDate>=today);
+      return '<tr><td>'+unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>'+(live?' '+chipHtml("Now","chip-green"):'')+'</td><td class="tabular">'+vDate(p.startDate)+'</td><td class="tabular">'+vDate(p.endDate)+'</td></tr>';
+    }).join("");
+    var reqs = (m.requests||[]).map(function(r){
+      return '<div class="v-urow ureq-row"><div><b>'+esc(unitShort(r.toUnit))+'</b> from '+fmtDate(r.startDate)+(r.endDate?' to '+fmtDate(r.endDate):'')+' '+vReqChip(r)+
+        (r.reason?'<div class="muted" style="font-size:12.5px;">'+esc(r.reason)+'</div>':'')+
+        (r.status!=="open" && r.status!=="withdrawn" ? '<div style="font-size:12.5px;">'+esc(r.status==="approved"?"Approved":"Declined")+(r.decidedByName?' by '+esc(r.decidedByName):'')+(r.decisionNote?': '+esc(r.decisionNote):'')+'</div>' : '')+'</div>'+
+        (r.status==="open" ? '<button type="button" class="btn btn-sm" data-v="ureq-withdraw" data-id="'+r.id+'">Withdraw</button>' : '')+'</div>';
+    }).join("");
+    var nOpen = (m.requests||[]).filter(function(r){ return r.status==="open"; }).length;
+    return '<div class="card"><span class="eyebrow">Unit Postings</span><h2>You are in '+(m.currentUnit ? unitShortHtml(m.currentUnit) : 'no unit')+'</h2>'+
+        (m.currentUnit ? '<div class="muted" style="font-size:13px;">'+esc(unitFull(m.currentUnit))+'</div>' : '')+
+        '<p class="muted" style="margin:6px 0 12px;">Home unit: '+(m.homeUnit ? unitShortHtml(m.homeUnit) : '—')+'. While you are posted to a unit you can see its roster and its trainees’ records.</p>'+
+        (posts ? '<div class="table-wrap"><table><thead><tr><th>Unit</th><th>From</th><th>To</th></tr></thead><tbody>'+posts+'</tbody></table></div>' : '<p class="muted" style="font-size:13px;">No postings outside your home unit.</p>')+'</div>'+
+      '<div class="card"><div class="form-section-title">Ask to change unit'+tipBtn("unit-request")+'</div>'+
+        '<p class="muted" style="font-size:13px; margin-bottom:10px;">The Head of Department, the Head of the unit you would join, or a Developer decides. You will see the answer here.</p>'+
+        (V.q.err ? vErr(V.q.err) : '')+
+        '<div class="row3">'+
+          '<div class="field"><label for="uq-unit">Unit</label><select id="uq-unit" data-vin="q.form.toUnit"><option value="">— choose —</option>'+unitOptions(f.toUnit)+'</select></div>'+
+          vtext("q.form.startDate","From",{type:"date", extra:' min="'+today+'"'})+
+          vtext("q.form.endDate",'To <span class="muted">(optional)</span>',{type:"date"})+'</div>'+
+        '<div class="field"><label for="uq-reason">Reason <span class="muted">(optional)</span></label><textarea id="uq-reason" rows="2" maxlength="1000" data-vin="q.form.reason" placeholder="For example: to join the skull base list for six months">'+esc(f.reason||"")+'</textarea></div>'+
+        '<button type="button" class="btn btn-primary" data-v="ureq-send"'+(V.q.busy || nOpen>=3 ? " disabled" : "")+'>Send request</button>'+
+        (nOpen>=3 ? ' <span class="muted" style="font-size:12.5px;">You have 3 open requests. Withdraw one to send another.</span>' : '')+'</div>'+
+      (reqs ? '<div class="card"><div class="form-section-title">Your requests</div>'+reqs+'</div>' : '');
+  }
+  CLICK["ureq-send"] = async function(){
+    var f = V.q.form;
+    if(!f.toUnit || !f.startDate){ V.q.err = "Choose the unit and the date you would start."; render(); return; }
+    V.q.busy = true; V.q.err = ""; render();
+    try{
+      await api("POST","/unit-requests",{ toUnit:f.toUnit, startDate:f.startDate, endDate:f.endDate||null, reason:f.reason||"" });
+      V.q.form = { toUnit:"", startDate:"", endDate:"", reason:"" };
+      await vLoadMyUnitPostings(); toast("Request sent.");
+    }catch(e){ V.q.err = e.message || "Could not send it."; }
+    V.q.busy = false; render();
+  };
+  CLICK["ureq-withdraw"] = async function(t){
+    if(!confirm("Withdraw this request?")) return;
+    try{ await api("POST","/unit-requests/"+t.getAttribute("data-id")+"/withdraw"); await vLoadMyUnitPostings(); render(); toast("Request withdrawn."); }
+    catch(e){ toast(e.message); }
+  };
+
+  /* ---- Unit Requests (deciders) ------------------------------------------- */
+  async function vLoadUnitInbox(){
+    try{ V.q.inbox = (await api("GET","/unit-requests"+(V.q.status?"?status="+V.q.status:""))).requests; }catch(e){ V.q.inbox = []; V.q.perr = e.message; }
+    if(!V.q.cons){ try{ V.q.cons = (await api("GET","/users/consultants")).users || []; }catch(e){ V.q.cons = []; } }
+    if(V.q.who){ await vLoadPostingsFor(); }
+    await refreshUnitReqBadge();
+  }
+  async function vLoadPostingsFor(){
+    V.q.posts = null;
+    if(!V.q.who) return;
+    try{ V.q.posts = await api("GET","/consultant-postings?username="+encodeURIComponent(V.q.who)); }catch(e){ V.q.posts = { error: e.message }; }
+  }
+  function vDecideUnits(){
+    var p = permUnits("postings.decide_consultant");
+    if(hasPerm("postings.decide_consultant") && (!p || p.scope==="all")) return null;   // every unit
+    return p ? (p.units||[]) : [];
+  }
+  function vUnitOptionsIn(allowed, sel){
+    if(allowed==null) return unitOptions(sel);
+    return allowed.map(function(u){ return '<option value="'+esc(u)+'"'+(u===sel?" selected":"")+'>'+esc(unitShort(u))+' — '+esc(unitFull(u))+'</option>'; }).join("");
+  }
+  function renderUnitRequests(){
+    if(V.q.inbox==null) return skeletonDash();
+    var tabs = [["open","Waiting"],["approved","Approved"],["declined","Declined"],["","All"]];
+    var rows = V.q.inbox.map(function(r){
+      var d = V.q.dec[r.id] || (V.q.dec[r.id] = { startDate:r.startDate, endDate:r.endDate||"", note:"" });
+      var decide = r.canDecide ? '<div class="ureq-decide"><div class="row3">'+
+          vtext("q.dec."+r.id+".startDate","From",{type:"date"})+vtext("q.dec."+r.id+".endDate",'To <span class="muted">(optional)</span>',{type:"date"})+
+          vtext("q.dec."+r.id+".note",'Note <span class="muted">(needed to decline)</span>',{max:500})+'</div>'+
+          '<div class="btn-row"><button type="button" class="btn btn-sm" data-v="ureq-decide" data-id="'+r.id+'" data-d="decline">Decline</button> '+
+          '<button type="button" class="btn btn-sm btn-primary" data-v="ureq-decide" data-id="'+r.id+'" data-d="approve">Approve</button></div></div>'
+        : (r.status==="open" ? '<p class="muted" style="font-size:12.5px;">The Head of '+esc(unitShort(r.toUnit))+', the Head of Department or a Developer decides this one.</p>' : '');
+      return '<div class="card ureq-card"><div class="section-head"><div><b>'+esc(r.requesterName)+'</b>'+(r.designation?' <span class="muted">· '+esc(r.designation)+'</span>':'')+
+          '<div style="font-size:13px;">'+(r.fromUnit?esc(unitShort(r.fromUnit)):'—')+' → <b>'+esc(unitShort(r.toUnit))+'</b> · from '+fmtDate(r.startDate)+(r.endDate?' to '+fmtDate(r.endDate):'')+'</div></div>'+vReqChip(r)+'</div>'+
+        (r.reason?'<p style="font-size:13px; margin:4px 0 8px;">'+esc(r.reason)+'</p>':'')+
+        (r.status!=="open" && r.decidedByName ? '<p class="muted" style="font-size:12.5px;">'+esc(r.status==="approved"?"Approved":"Declined")+' by '+esc(r.decidedByName)+(r.decisionNote?': '+esc(r.decisionNote):'')+'</p>' : '')+
+        decide+'</div>';
+    }).join("");
+    var allowed = vDecideUnits(), pf = V.q.pf, ps = V.q.posts;
+    var consOpts = [["","— choose a consultant —"]].concat((V.q.cons||[]).filter(function(c){ return !c.role || c.role==="consultant"; }).map(function(c){ return [c.username, c.displayName+(c.unit?" · "+unitShort(c.unit):"")]; }));
+    var plist = "";
+    if(V.q.who && ps && !ps.error){
+      plist = (ps.postings||[]).length ? '<div class="table-wrap"><table><thead><tr><th>Unit</th><th>From</th><th>To</th><th></th></tr></thead><tbody>'+
+          ps.postings.map(function(p){ return '<tr><td>'+unitShortHtml(p.unit)+(p.note?' <span class="muted">'+esc(p.note)+'</span>':'')+'</td><td class="tabular">'+vDate(p.startDate)+'</td><td class="tabular">'+vDate(p.endDate)+'</td><td>'+
+            (p.canRemove ? '<button type="button" class="btn btn-sm btn-danger" data-v="upost-del" data-id="'+p.id+'">Remove</button>' : '')+'</td></tr>'; }).join("")+'</tbody></table></div>'
+        : '<p class="muted" style="font-size:13px;">Home unit '+(ps.homeUnit?esc(unitShort(ps.homeUnit)):'—')+'; no other postings.</p>';
+      plist += '<div class="row3" style="margin-top:10px;">'+
+          '<div class="field"><label for="up-unit">Unit</label><select id="up-unit" data-vin="q.pf.unit"><option value="">— choose —</option>'+vUnitOptionsIn(allowed, pf.unit)+'</select></div>'+
+          vtext("q.pf.startDate","From",{type:"date"})+vtext("q.pf.endDate",'To <span class="muted">(optional)</span>',{type:"date"})+'</div>'+
+        vtext("q.pf.note",'Note <span class="muted">(optional)</span>',{max:300})+
+        '<button type="button" class="btn btn-primary btn-sm" data-v="upost-add">Add posting</button>';
+    } else if(ps && ps.error) plist = vErr(ps.error);
+    return '<div class="card"><span class="eyebrow">Unit Requests</span><h2>Consultants asking to change unit'+tipBtn("unit-inbox")+'</h2>'+
+        '<p class="muted" style="margin:6px 0 10px;">Approving gives them a dated posting: for those dates they can see that unit’s roster and records. It does not let them sign off cases or approve accounts there.</p>'+
+        '<div class="v-tabs">'+tabs.map(function(t){ return '<button type="button" class="v-tab'+(V.q.status===t[0]?" active":"")+'" data-v="ureq-tab" data-s="'+t[0]+'">'+t[1]+'</button>'; }).join("")+'</div></div>'+
+      (rows || '<div class="card"><div class="empty-state">Nothing here.</div></div>')+
+      '<div class="card"><div class="form-section-title">Set a posting directly</div>'+
+        '<p class="muted" style="font-size:13px; margin-bottom:10px;">No request needed. '+(allowed==null ? 'You can post a consultant to any unit.' : 'You can post a consultant only to '+(allowed.length?allowed.map(unitShort).join(", "):"no unit")+'.')+'</p>'+
+        (V.q.perr ? vErr(V.q.perr) : '')+vsel("q.who","Consultant",consOpts)+plist+'</div>';
+  }
+  CLICK["ureq-tab"] = async function(t){ V.q.status = t.getAttribute("data-s"); V.q.inbox = null; render(); await vLoadUnitInbox(); render(); };
+  CLICK["ureq-decide"] = async function(t){
+    var id = t.getAttribute("data-id"), d = V.q.dec[id] || {}, what = t.getAttribute("data-d");
+    if(what==="decline" && !(d.note||"").trim()){ toast("Add a note saying why, then decline."); return; }
+    try{
+      await api("POST","/unit-requests/"+id+"/decide",{ decision: what, note: d.note||"", startDate: d.startDate, endDate: d.endDate||null });
+      delete V.q.dec[id]; await vLoadUnitInbox(); render(); toast(what==="approve" ? "Approved. The posting is on file." : "Declined.");
+    }catch(e){ toast(e.message || "Could not save."); }
+  };
+  CLICK["upost-add"] = async function(){
+    var pf = V.q.pf; V.q.perr = "";
+    if(!pf.unit || !pf.startDate){ V.q.perr = "Choose the unit and the start date."; render(); return; }
+    try{
+      await api("POST","/consultant-postings",{ username: V.q.who, unit: pf.unit, startDate: pf.startDate, endDate: pf.endDate||null, note: pf.note||"" });
+      V.q.pf = { unit:"", startDate:"", endDate:"", note:"" }; await vLoadPostingsFor(); render(); toast("Posting added.");
+    }catch(e){ V.q.perr = e.message || "Could not add it."; render(); }
+  };
+  CLICK["upost-del"] = async function(t){
+    if(!confirm("Remove this posting? They lose access to that unit’s roster for those dates.")) return;
+    try{ await api("DELETE","/consultant-postings/"+t.getAttribute("data-id")); await vLoadPostingsFor(); render(); toast("Posting removed."); }
+    catch(e){ toast(e.message); }
+  };
+  document.addEventListener("change", function(ev){
+    var t = ev.target;
+    if(t && t.getAttribute && t.getAttribute("data-vin")==="q.who"){
+      setTimeout(function(){ V.q.posts = null; V.q.perr = ""; render(); vLoadPostingsFor().then(render); }, 0);
+    }
   });
 
 

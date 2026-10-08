@@ -1361,13 +1361,31 @@ input[type=email]:disabled, input[type=tel]:disabled, input[type=month]:disabled
   .gd-qc li{margin:0 0 1.5pt;}
   .gd-qc-lead{margin:0 0 4pt;}
   .gd-qc-tab{border-collapse:collapse; width:100%; font-size:9pt;}
+  .gd-qc-dense{font-size:9.4pt; line-height:1.26;}
+  .gd-qc-dense .gd-qc-tab{font-size:8.5pt;}
+  .gd-qc-dense h2{margin:5pt 0 2pt;}
   .gd-qc-tab th{text-align:left; width:34%; padding:1pt 6pt 1pt 0; vertical-align:top; font-weight:600;}
   .gd-qc-tab td{padding:1pt 0; vertical-align:top; border-bottom:.5pt solid #ddd;}
   .gd-qc-tab th{border-bottom:.5pt solid #ddd;}
   .gd-qc-ph{color:#777; font-size:8.5pt;}
   .gd-qc-two{columns:2; column-gap:14pt;}
+  .gd-qc-limits{margin:6pt 0 0; font-size:9pt; color:#444;}
   .gd-qc-two li{break-inside:avoid;}
   .gd-qc-cols{display:grid; grid-template-columns:1fr 1fr; gap:14pt;}
   .gd-qc-foot{margin-top:6pt; border-top:.5pt solid #bbb; padding-top:5pt; font-size:9pt; color:#444;}
   @page{ size:A4; margin:11mm 13mm; }
 }
+
+/* v7.7 stages, Archive, unit postings */
+.stage-bar{display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; margin:0 0 14px; font-size:13px;}
+.stage-bar > label{font-weight:600;}
+.stage-bar select{width:auto; min-width:240px; max-width:100%;}
+.stage-bar .field{margin:0; min-width:220px;}
+.stage-panel{border-top:1px solid var(--line, #e5e7eb); margin-top:12px; padding-top:12px;}
+.stage-warn{background:var(--amber-bg); color:var(--amber); margin:4px 0 12px;}
+.stage-warn .v-check span{color:var(--ink, inherit);}
+.ureq-row{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; padding:10px 0; border-bottom:1px solid var(--line, #e5e7eb);}
+.ureq-row:last-child{border-bottom:0;}
+.ureq-card .section-head{align-items:flex-start;}
+.ureq-decide{border-top:1px dashed var(--line, #e5e7eb); margin-top:8px; padding-top:10px;}
+@media (max-width: 640px){ .ureq-row{flex-direction:column;} .stage-bar{flex-direction:column; align-items:stretch;} }
