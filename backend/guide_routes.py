@@ -12,7 +12,7 @@ import datetime
 from flask import Blueprint, g, jsonify, request
 
 import perms
-from api import approval_escalation_days
+from api import _account_event, approval_escalation_days
 from auth import login_required
 from db import get_db
 
@@ -84,3 +84,19 @@ def tour_seen():
     db.execute("UPDATE users SET tour_seen = ? WHERE username = ?", (v, g.user["username"]))
     db.commit()
     return jsonify({"ok": True, "tourSeen": v})
+
+
+@gd.post("/users/<username>/tour-reset")
+@login_required("developer")
+def tour_reset(username):
+    """Developer only: forget that this account has seen the welcome tour, so
+    it is offered again the next time they sign in. Nothing else about the
+    account changes. Recorded in the account's history."""
+    db = get_db()
+    row = db.execute("SELECT username FROM users WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    db.execute("UPDATE users SET tour_seen = NULL WHERE username = ?", (username,))
+    _account_event(db, username, "tour_reset", g.user["username"], "Welcome tour reset")
+    db.commit()
+    return jsonify({"ok": True, "tourSeen": None})
