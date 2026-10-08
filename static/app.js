@@ -1143,6 +1143,7 @@
     state.user = null;
     state.capabilities = null;
     state.authMode = "login";
+    if(typeof GS !== "undefined" && GS){ GS.checkedFor = null; GS.tour = null; GS.tip = null; }
     state.myEntriesLoaded=false; state.rosterLoaded=false; state.devUsersLoaded=false; state.detailUser=null;
     state.passwordResetsLoaded=false; state.consultantsLoaded=false;
     state.signupRequestsLoaded=false; state.signupRequests=[]; state.manageUsersLoaded=false; state.manageUsers=[];
@@ -4250,7 +4251,15 @@
         '<button class="btn btn-primary" id="btn-change-password">Update password</button></div>'+
     '</div>';
 
-    return identity + appts + mine + postings + unitCard + password + renderAccountClosure(a);
+    // Welcome tour: the person can have it shown again, now or at next sign-in.
+    var seen = state.user && state.user.tourSeen;
+    var tourCard = '<div class="card"><h2 style="font-size:15px;">Welcome tour</h2>'+
+      '<p class="muted" style="font-size:13px; margin:0 0 10px;">'+(seen
+        ? 'You have seen the welcome tour. You can watch it again now, or reset it so it shows the next time you sign in. You can do this as often as you like.'
+        : 'The welcome tour will show the next time you sign in. You can also watch it now.')+'</p>'+
+      '<div class="btn-row"><button type="button" class="btn" data-gd="tour">Show it now</button>'+
+      (seen ? '<button type="button" class="btn" data-gd="tour-reset">Reset it for my next sign-in</button>' : '')+'</div></div>';
+    return identity + appts + mine + postings + unitCard + tourCard + password + renderAccountClosure(a);
   }
 
   /* ------------------------------------------------------------
@@ -5134,6 +5143,14 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.6.2", date: "2026-10-09", title: "Reset the welcome tour",
+      note: "Adds one endpoint and no database change. Replace backend/guide_routes.py, static/app.js and static/styles.css.",
+      changes: [
+        ["added", "<b>My Account has a Welcome tour card.</b> Show it now, or reset it so it appears the next time you sign in. You can do this as often as you like."],
+        ["added", "<b>A Developer can reset the welcome tour for any account</b> from that person’s page in Users. The page also shows whether they have seen it. The reset is recorded in the account’s history."]
+      ]
+    },
     {
       version: "7.6.1", date: "2026-10-08", title: "Plainer wording in the Guide",
       note: "Wording only. No database change. Replace backend/perms.py, static/app.js and static/styles.css. People who have already seen the welcome tour are not shown it again.",
@@ -7286,9 +7303,10 @@
     }
     var counts = d.entryCounts||{}, nEntries = Object.keys(counts).reduce(function(a,k){ return a+counts[k]; },0);
     var status = '<div class="card"><div class="form-section-title">Account</div>'+
-      '<div class="v-facts">'+kv("Opened", fmtDate((u.createdAt||"").slice(0,10)))+kv("Last signed in", u.lastSeenAt?fmtDateTime(u.lastSeenAt):"")+kv("Entries logged", String(nEntries))+(isTrainee?kv("Postings", String((d.postings||[]).length)):"")+'</div>'+
+      '<div class="v-facts">'+kv("Opened", fmtDate((u.createdAt||"").slice(0,10)))+kv("Last signed in", u.lastSeenAt?fmtDateTime(u.lastSeenAt):"")+kv("Entries logged", String(nEntries))+kv("Welcome tour", u.tourSeen ? "Seen" : "Not seen yet")+(isTrainee?kv("Postings", String((d.postings||[]).length)):"")+'</div>'+
       (isSelf ? '<p class="muted" style="font-size:12.5px;">This is your own account; switching it off or closing it is done from My Account.</p>' :
         '<div class="v-btns" style="margin-top:12px;">'+
+          (dev ? '<button type="button" class="btn btn-sm" data-v="user-tour-reset" title="Show this person the welcome tour again the next time they sign in">Reset welcome tour</button> ' : '')+
           '<button type="button" class="btn btn-sm '+(u.active===false?"":"btn-danger")+'" data-v="user-active" data-next="'+(u.active===false?"true":"false")+'">'+(u.active===false?"Reactivate":"Deactivate")+'</button> '+
           (hasPerm("accounts.delete") || dev ? '<button type="button" class="btn btn-sm btn-danger" data-v="user-delete">Delete…</button>' : '')+'</div>')+
     '</div>';
@@ -7386,6 +7404,14 @@
       ue.detail = det; vResetUserDraft(); ue.busy = false;
       render(); toast("Saved.");
     }catch(e){ ue.busy = false; render(); toast(e.message || "Could not save."); }
+  }
+  async function vUserTourReset(){
+    var ue = V.ue, who = ue.username;
+    try{
+      await api("POST","/users/"+encodeURIComponent(who)+"/tour-reset");
+      var det = await api("GET","/users/"+encodeURIComponent(who)+"/detail"); ue.detail = det; vResetUserDraft(); render();
+      toast("Reset. They will see the welcome tour the next time they sign in.");
+    }catch(e){ toast(e.message || "Could not reset the tour."); }
   }
   async function vUserActive(next){
     var ue = V.ue, who = ue.username;
@@ -7981,6 +8007,7 @@
     "rename-go": vDoRename,
     "user-save": vSaveUser,
     "user-discard": function(){ vResetUserDraft(); render(); },
+    "user-tour-reset": function(){ vUserTourReset(); },
     "user-active": function(t){ vUserActive(t.getAttribute("data-next")==="true"); },
     "user-delete": vUserDelete,
     // courses
@@ -9180,6 +9207,15 @@ var GUIDE_GLOSSARY = [
         (last ? '<button class="btn btn-primary" data-gd="'+(c.go&&c.go.view==="guide"?"tour-guide":"skip")+'">'+(c.go&&c.go.view==="guide"?"Open the Guide":"Done")+'</button>' : '<button class="btn btn-primary" data-gd="tour-next">Next</button>')+
       '</div></div></div>';
   }
+  async function gdResetMine(){
+    if(!state.user) return;
+    try{
+      await api("POST","/me/tour",{ version: null });
+      state.user.tourSeen = null;
+      toast("Done. The welcome tour will show the next time you sign in.");
+      render();
+    }catch(e){ toast(e.message || "Could not reset the tour."); }
+  }
   async function gdMarkSeen(){
     if(!state.user || state.user.tourSeen===GUIDE_TOUR_VERSION) return;
     state.user.tourSeen = GUIDE_TOUR_VERSION;
@@ -9227,6 +9263,7 @@ var GUIDE_GLOSSARY = [
         break; }
       case "go": goView(t.getAttribute("data-view")); break;
       case "tour": gdStartTour(false); break;
+      case "tour-reset": gdResetMine(); break;
       case "tour-next": if(GS.tour && GS.tour.i < GS.tour.cards.length-1){ GS.tour.i++; render(); } break;
       case "tour-prev": if(GS.tour && GS.tour.i > 0){ GS.tour.i--; render(); } break;
       case "tour-go": { var v = t.getAttribute("data-view"); gdClose(); setTimeout(function(){ if(navItems().some(function(i){ return i[0]===v; })) goView(v); }, 30); break; }
