@@ -207,6 +207,7 @@ def row_to_user(row, contact=False):
         "courseName": course["name"] if course else None,
         "joinedYm": d.get("joined_ym"),
         "study": study,
+        "tourSeen": d.get("tour_seen"),
     }
     if contact:
         out["email"] = d.get("email")

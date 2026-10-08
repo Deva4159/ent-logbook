@@ -320,6 +320,16 @@ def migrate_v75(conn):
     conn.commit()
 
 
+def migrate_v76(conn):
+    """v7.6: which version of the welcome tour this person has seen or skipped,
+    so it is offered once per account, on whatever device they sign in from."""
+    if "users" in _existing_tables(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "tour_seen" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN tour_seen TEXT")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -335,6 +345,7 @@ def init_db():
     migrate_entry_locks(conn)
     migrate_v74(conn)
     migrate_v75(conn)
+    migrate_v76(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))

@@ -9,6 +9,7 @@ from flask import Flask, g, jsonify, request, send_from_directory
 
 from admin_routes import admin
 from doctor_routes import dr
+from guide_routes import gd
 from api import api
 from db import init_db
 
@@ -207,6 +208,7 @@ def health():
 app.register_blueprint(api)
 app.register_blueprint(admin)
 app.register_blueprint(dr)
+app.register_blueprint(gd)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
