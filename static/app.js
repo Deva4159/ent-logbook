@@ -5135,6 +5135,18 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.6.1", date: "2026-10-08", title: "Plainer wording in the Guide",
+      note: "Wording only. No database change. Replace backend/perms.py, static/app.js and static/styles.css. People who have already seen the welcome tour are not shown it again.",
+      changes: [
+        ["changed", "<b>The Guide, role descriptions, welcome tour, ? tips and printable quick guides were rewritten in plainer language.</b> Shorter sentences, one word for each idea (“sign off”, not also “attest” or “approve”), and no unexplained terms such as “in scope” or “bundle”."],
+        ["changed", "<b>Role descriptions now read the same way everywhere:</b> a short “who” line, then what they do, then what they cannot do. The “cannot” lists are now complete sentences."],
+        ["changed", "<b>The permission names shown in Permissions and in the Guide’s “can do” lists were reworded</b> (for example “Be a sign-off approver” is now “Sign off trainees’ records”)."],
+        ["changed", "<b>Tour cards are named by topic</b> (Postings, Entries, Sign-off, Help) instead of “Step 1, Step 2”, which clashed with the “1 of 5” counter."],
+        ["fixed", "<b>The Coordinator’s first steps</b> pointed to Manage Users, which a Coordinator does not have. They now point to Set Postings."],
+        ["fixed", "<b>The quick guide now prints on a white page</b> and fits on one A4 sheet for every role, including the Head of Department and Coordinator."]
+      ]
+    },
+    {
       version: "7.6", date: "2026-10-08", title: "A guide for everyone, and a welcome tour",
       note: "Adds one column (which tour a person has seen). Replace backend/guide_routes.py (new), app.py, api.py, db.py, static/app.js and static/styles.css.",
       changes: [
@@ -5592,7 +5604,7 @@
     else if(state.view==="developer-data") inner = renderDeveloperData();
     else if(state.view==="signup-approvals") inner = renderSignupApprovals();
     else if(state.view==="manage-users") inner = renderUsersConcise();
-    else if(state.view==="set-postings") inner = '<div class="card"><h2>Set postings</h2><p class="muted" style="margin:6px 0 0;">Move a batch of trainees into a unit for a block of dates. You are shown exactly who would be added, who clashes with an existing posting and who is skipped before anything is saved.</p></div>'+renderBulkPostings();
+    else if(state.view==="set-postings") inner = '<div class="card"><h2>Set postings</h2><p class="muted" style="margin:6px 0 0;">Add a batch of trainees to a unit for a set of dates. Before anything is saved, you see who would be added, who clashes with an existing posting and who is skipped.</p></div>'+renderBulkPostings();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
     else if(state.view==="feedback") inner = renderFeedback();
@@ -8566,345 +8578,345 @@
    from the live permission bundles (GET /guide), so it cannot go stale.
    {days} is replaced by the department's current escalation period.        */
 var GUIDE_TOUR_VERSION = "7.6";
-var GUIDE_PHASES = ["Start here", "Every case", "Regularly", "When it comes up"];
+var GUIDE_PHASES = ["Start here", "Every case", "Regularly", "When needed"];
 var PERSONA_GROUP = { resident:"trainee", senior_resident:"trainee", fellow:"trainee", consultant:"consultant",
   professor:"consultant", head_of_unit:"consultant", coordinator:"consultant", hod:"consultant", developer:"developer" };
 
 var GUIDE_SITE = {
-  what: "A shared logbook for the Department of Otorhinolaryngology. Trainees record what they do — operations, procedures, interesting cases, teaching — and the consultants who supervised them attest to it. Heads of Unit and the Head of Department can see where everyone is and how training is going.",
-  why: "A training record that is written down once, signed by the person who was there, and impossible to quietly change afterwards is worth more than a spreadsheet kept by each person. It also gives the department one place to see rotations, case numbers and what is waiting to be signed.",
+  what: "A shared logbook for the Department of Otorhinolaryngology. Trainees record the operations, procedures, cases and teaching they do, and the consultant who supervised each one signs it off. Heads of Unit and the Head of Department can see where each trainee is posted and how training is going.",
+  why: "A record that is written once, signed by the person who was there and cannot be quietly changed is worth more than a private spreadsheet. The logbook also gives the department one place to see rotations, case numbers and what is waiting to be signed.",
   rules: [
-    "Patients are never named. Every entry uses a Hospital Number only.",
+    "Never enter a patient’s name. Use the Hospital Number only.",
     "Nobody can sign off their own record, whatever else they are allowed to do.",
-    "Consultants sign records; they do not rewrite them. Correcting a record is the trainee’s job.",
-    "A signed record is locked. Changing it needs the signer (or a Head of Unit, Coordinator or HOD) to release it first.",
-    "Academic and Seminar entries are the trainee’s own record; nobody signs for them.",
-    "Closing an account never deletes work. Entries and signatures stay where they are."
+    "Consultants sign records but do not edit them. The trainee makes any correction.",
+    "A signed record is locked. To change it, the signer (or a Head of Unit, Coordinator or Head of Department) must unlock it first.",
+    "Academic and Seminar entries are not signed. They are the trainee’s own record.",
+    "Closing an account never deletes its work. Entries and signatures stay."
   ]
 };
 
 var PERSONA_INFO = {
-  resident: { label:"PG Resident", who:"A postgraduate registrar logging their own training.",
-    does:"Logs operations, procedures, cases and teaching; keeps their postings up to date; sends records to a consultant for sign-off; tracks progress.",
-    never:["See other trainees’ entries.","Sign anything off.","Edit a record after it has been signed (ask to unlock it instead)."],
-    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard tiles.","Send it to the consultant who supervised you."] },
-  senior_resident: { label:"Senior Resident", who:"A senior resident using the same logbook as a PG Resident.",
-    does:"Everything a PG Resident does, under a Senior Residency course.",
-    never:["See other trainees’ entries.","Sign anything off.","Edit a record after it has been signed."],
-    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard tiles.","Send it to the consultant who supervised you."] },
-  fellow: { label:"Fellow", who:"A fellow: logs their own work like a resident, and can be given a few oversight tools.",
-    does:"Everything a resident does. The Head of Department can additionally give a fellow the roster, sign-off or a few viewing permissions; the menu then shows them.",
-    never:["Hold anything beyond viewing, exporting and sign-off permissions, whatever they are given.","Sign off their own record."],
-    steps:["Add your postings under My Postings (your home unit plus any peripheral posting).","Log your first entry from the Dashboard tiles.","Check the menu: roster and sign-off appear only if you have been given them."] },
+  resident: { label:"PG Resident", who:"A postgraduate trainee who logs their own training.",
+    does:"They log operations, procedures, cases and teaching, keep their postings up to date, send records to a consultant for sign-off and track their progress.",
+    never:["See other trainees’ entries.","Sign off any record.","Edit a signed record. They can ask for it to be unlocked."],
+    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard.","Send it to the consultant who supervised you."] },
+  senior_resident: { label:"Senior Resident", who:"A senior resident, who uses the logbook in the same way as a PG Resident.",
+    does:"They do everything a PG Resident does, under a Senior Residency course.",
+    never:["See other trainees’ entries.","Sign off any record.","Edit a signed record. They can ask for it to be unlocked."],
+    steps:["Add your current posting under My Postings.","Log your first entry from the Dashboard.","Send it to the consultant who supervised you."] },
+  fellow: { label:"Fellow", who:"A fellow, who logs their own work in the same way as a resident.",
+    does:"They do everything a resident does. The Head of Department can also give a fellow the roster, sign-off or some viewing permissions. A fellow’s menu shows whatever they have been given.",
+    never:["Be given any permission other than viewing, exporting and sign-off.","Sign off their own record."],
+    steps:["Add your postings under My Postings: your home unit and any peripheral posting.","Log your first entry from the Dashboard.","Check your menu. The roster and sign-off appear only if you have been given them."] },
   consultant: { label:"Consultant", who:"A consultant or faculty member who supervises trainees and signs their records.",
-    does:"Signs off the records trainees send to them. Sees trainees only if given a roster or records permission.",
-    never:["Edit a trainee’s record.","Sign off their own record.","See trainees outside the units they have been given."],
-    steps:["Open Case Sign-off to see what is waiting.","Open a record and sign it off, or ask for changes with a note.","Check Roster, if you have it, to see who is posted with you."] },
+    does:"They sign off the records that trainees send them. They can see trainees only if they have been given the roster or records permission.",
+    never:["Edit a trainee’s record.","Sign off their own record.","See trainees outside the units they have been given access to."],
+    steps:["Open Case Sign-off to see what is waiting.","Open a record. Sign it off, or ask for changes with a note.","If you have the Roster, open it to see who is posted with you."] },
   professor: { label:"Professor", who:"A consultant whose designation is Professor.",
-    does:"Everything a consultant does, plus sight of the roster and records for their home unit.",
-    never:["See other units unless they hold an appointment or a permission for them."],
-    steps:["Open Case Sign-off to see what is waiting.","Open Roster to see your unit’s trainees.","Open a trainee to see what was logged during their posting in your unit."] },
-  head_of_unit: { label:"Head of Unit", who:"A consultant appointed Head of a unit for a period.",
-    does:"Oversees the units they head: roster, records logged there, overdue sign-offs, and signing off on a colleague’s behalf when asked or when they are away.",
-    never:["See a trainee’s work in other units.","Approve new trainee or consultant accounts (fellows only, unless extra permissions are given)."],
-    steps:["Open Case Sign-off, including the “You can also sign these off” section.","Check the Dashboard for records waiting more than {days} days.","Open Roster to see who is posted to your unit and for how long."] },
+    does:"They do everything a consultant does. They can also see the roster and records for their home unit.",
+    never:["See other units, unless they are Head of Unit there or have been given access."],
+    steps:["Open Case Sign-off to see what is waiting.","Open Roster to see your unit’s trainees.","Open a trainee to see what they logged during their posting in your unit."] },
+  head_of_unit: { label:"Head of Unit", who:"A consultant appointed to head a unit for a set period.",
+    does:"They oversee the units they head: the roster, the records logged there and overdue sign-offs. They can sign off on a colleague’s behalf when asked, or when the colleague is away.",
+    never:["See a trainee’s work in other units.","Approve trainee or consultant sign-ups. A Head of Unit can approve Fellows only, unless given more."],
+    steps:["Open Case Sign-off and check “You can also sign these off”.","Check the Dashboard for records waiting more than {days} days.","Open Roster to see who is posted to your unit and for how long."] },
   coordinator: { label:"Course Coordinator", who:"A consultant appointed to coordinate the training course across the department.",
-    does:"Sees every unit’s roster and records, approves new accounts, assigns postings in groups, reads feedback, and can sign off on a colleague’s behalf.",
-    never:["Edit batches, deactivate or delete accounts (that is the Head of Department).","Change roles, designations, passwords or permissions."],
-    steps:["Open Approvals to see new sign-ups.","Open Roster to see where everyone is posted.","Use Manage Users → Set postings when a batch rotates."] },
+    does:"They see the roster and records of every unit, approve new accounts, set postings for groups of trainees and read feedback. They can also sign off on a colleague’s behalf.",
+    never:["Change a trainee’s batch, or deactivate or delete accounts. The Head of Department does this.","Change roles, designations, passwords or permissions."],
+    steps:["Open Approvals to see new sign-ups.","Open Roster to see where everyone is posted.","When a batch rotates, open Set Postings."] },
   hod: { label:"Head of Department", who:"The consultant appointed to lead the department.",
-    does:"Oversees everything: all units, all records including teaching, accounts, postings, feedback, the doctors list and the lists people choose from.",
-    never:["Change permissions, roles, passwords, usernames, courses, alerts or backups (Developer only).","Touch a Developer account."],
-    steps:["Open Approvals for new sign-ups.","Open Doctors to keep the list of everyone who can be named on a record.","Open List Review to see what people typed that is not on a list yet."] },
-  developer: { label:"Developer", who:"The person who runs the site: structure, permissions and safety.",
-    does:"Holds every permission. Sets up units and appointments, permissions, courses, lists, alerts and backups, and creates or repairs accounts.",
-    never:["Be locked out: the last Developer account cannot be deleted, deactivated or demoted."],
+    does:"They oversee everything: every unit, all records including teaching, accounts, postings, feedback, the doctors list and the dropdown lists.",
+    never:["Change permissions, roles, passwords, usernames, courses, alerts or backups. Only the Developer can.","Change a Developer account."],
+    steps:["Open Approvals to check new sign-ups.","Open Doctors and keep the list of doctors who can be named on a record.","Open List Review to see what people typed that is not yet on a list."] },
+  developer: { label:"Developer", who:"The person who runs the site: its structure, permissions and safety.",
+    does:"They hold every permission. They set up units, appointments, permissions, courses, lists, alerts and backups, and they create or repair accounts.",
+    never:["Delete, deactivate or demote the last Developer account.","Decide a trainee’s account closure. That is the Head of Department’s decision."],
     steps:["Open Units & Roles and check the units and appointments.","Open Permissions and review what each role can do.","Open Backups and download one."] }
 };
 
 /* One activity = one thing a person does. Each answers who / what / why / when / how / next. */
 var GUIDE_ACTIVITIES = [
  /* ---------------- everyone new ---------------- */
- { id:"signup", phase:0, kinds:["trainee","consultant"], title:"Get your account", line:"Create it, wait for approval, sign in.",
+ { id:"signup", phase:0, kinds:["trainee","consultant"], title:"Get your account", line:"Sign up, wait for approval, then sign in.",
    who:"Anyone joining: PG Residents, Senior Residents, Fellows and Consultants.",
-   what:"Make an account on the sign-in page. A doctor who has been given an invite code skips the form and only chooses a password.",
-   why:"Approval keeps the logbook to real members of the department, and it ties every record to a named person.",
-   when:"Once, when you join. Approval is done by people, so it can take a day.",
-   how:["Open the site and choose “Create one” under the sign-in box.","Choose what you are: PG Resident, Senior Resident, Fellow or Consultant.","Pick a username (letters, numbers, dots, underscores, hyphens), a password of at least 8 characters, and your name as you want it shown.","Trainees choose their course and the month and year they joined; the year of study is worked out from that. Fellows choose a home unit; consultants a designation and unit.","Press Create account. You will see “Awaiting approval”.","Have an invite code instead? Choose “Use it here” on the sign-in page, enter the code and set a password."],
-   next:"The Head of Department or a Course Coordinator approves you (a Head of Unit can approve fellows). You can then sign in with your username and password.",
-   watch:["You cannot sign in until you are approved.","Forgotten password: “Request a reset” on the sign-in page. A Developer sets a new one; there is no email, so also tell them in person if it is urgent."] },
+   what:"You create an account on the sign-in page. If you were given an invite code, you skip the form and only choose a password.",
+   why:"Approval keeps the logbook to real members of the department and links every record to a named person.",
+   when:"Once, when you join. People approve new accounts, so it can take a day.",
+   how:["Open the site and choose “Create one” under the sign-in box.","Choose what you are: PG Resident, Senior Resident, Fellow or Consultant.","Pick a username (letters, numbers, dots, underscores and hyphens), a password of at least 8 characters, and your name as you want it shown.","Trainees choose their course and the month and year they joined. The year of study is worked out from that. Fellows choose a home unit. Consultants choose a designation and a unit.","Press Create account. You will see “Awaiting approval”.","If you have an invite code, choose “Use it here” on the sign-in page, enter the code and set a password."],
+   next:"The Head of Department or a Course Coordinator approves you. A Head of Unit can approve fellows. After that you can sign in with your username and password.",
+   watch:["You cannot sign in until you are approved.","If you forget your password, choose “Request a reset” on the sign-in page. A Developer sets a new one. Nothing is emailed, so tell them in person if it is urgent."] },
 
  /* ---------------- trainees ---------------- */
- { id:"postings", phase:0, kinds:["trainee"], title:"Add your unit postings", line:"So every entry is filed under the right unit.",
-   who:"Every trainee. The Head of Department, a Coordinator or a Developer can also set postings for you, a whole group at a time.",
-   what:"A posting is a unit with a start date and an end date. My Postings is your rotation history.",
+ { id:"postings", phase:0, kinds:["trainee"], title:"Add your unit postings", line:"So each entry is filed under the right unit.",
+   who:"Every trainee. The Head of Department, a Coordinator or a Developer can also set postings for a whole group at once.",
+   what:"A posting is a unit with a start date and an end date. My Postings shows your rotation history.",
    why:"Each entry is filed under the posting that was active on its date. Consultants and Heads of Unit see only the trainees posted to their unit, and only what was logged there.",
-   when:"When you join, and each time you rotate. Add a future posting if you already know it; add the end date once it is known.",
-   how:["Open My Postings.","Choose the unit, the start date and, if you know it, the end date.","Press Add posting.","If it overlaps another posting you are shown the dates it clashes with. Add it anyway only if you mean it, for example a peripheral block inside a main posting."],
-   next:"Your Dashboard shows your current posting and new entries pick up the unit automatically. Alerts warn you when a posting is about to end or when you have none.",
-   watch:["While two postings overlap, an entry is filed under whichever started later.","An entry dated outside every posting has no unit, so a Head of Unit will not see it in their unit.","A posting outside your course’s normal pattern is flagged and needs a confirmation; it is never blocked."],
+   when:"When you join and each time you rotate. If you already know your next posting, add it early. Add the end date when you know it.",
+   how:["Open My Postings.","Choose the unit, the start date and, if you know it, the end date.","Press Add posting.","If the dates overlap another posting, the screen shows where they clash. Add it anyway only if you mean to, for example a peripheral block inside a main posting."],
+   next:"Your Dashboard shows your current posting, and new entries pick up that unit automatically. Alerts warn you when a posting is about to end or when you have none.",
+   watch:["When two postings overlap, an entry is filed under the one that started later.","An entry dated outside every posting has no unit, so a Head of Unit will not see it.","A posting that is outside your course’s normal pattern is flagged and needs your confirmation. It is never blocked."],
    view:["resident-postings"], viewLabel:"My Postings" },
 
  { id:"log-procedure", phase:1, kinds:["trainee"], title:"Log an operation or procedure", line:"Surgical Procedure or Other Procedure.",
-   who:"You, as the trainee who did or assisted the case.",
-   what:"Surgical Procedure is any operative case booked in theatre. Other Procedure covers OPD, bedside, emergency-department and treatment-room procedures.",
-   why:"It is your operative log, and the record a consultant attests to. Everything on your Progress page comes from these entries.",
+   who:"You, as the trainee who did or assisted with the case.",
+   what:"Surgical Procedure is any operation booked in theatre. Other Procedure covers procedures done in OPD, at the bedside, in the emergency department or in a treatment room.",
+   why:"This is your operative log and the record a consultant signs off. Everything on your Progress page comes from these entries.",
    when:"As soon after the case as you can. The app sets no deadline, but sign-off is easier while the case is fresh.",
-   how:["From the Dashboard choose Surgical Procedure or Other Procedure (or Log Entry in the menu).","Enter the date, Emergency or Elective, the Hospital Number, age and sex. Never a patient’s name.","Pick the primary diagnosis, any secondary diagnosis and comorbidities. Once a procedure is chosen the usual diagnoses for it are offered as one-tap chips.","Under Sites & procedures choose the site, the side, the procedures and your role (the entrustment level). Use “Add another site” for a combined case.","Under Consultant & sign-off choose the doctor who will sign it. Doctors in the posting unit are listed first, highest rank first. Others involved (assistants, anaesthetist, a consultant from another unit) go in “Also involved”.","Press Finalize entry, or Save as draft to finish later."],
-   next:"A finalized entry counts in your stats. Send it for sign-off when you are ready. A draft is not counted and nobody else can see it.",
-   watch:["Not on a list? Type it in the “Add one not on the list” box. It is kept for the Head of Department to review.","Leaving the form half-filled never loses it: it is saved as you type and offered back from the Dashboard.","“Start from my last entry” and the recent-doctor chips save typing for similar cases."],
+   how:["On the Dashboard, choose Surgical Procedure or Other Procedure. You can also use Log Entry in the menu.","Enter the date, Emergency or Elective, the Hospital Number, age and sex. Never enter a patient’s name.","Pick the primary diagnosis, any secondary diagnosis and any comorbidities. After you choose a procedure, its usual diagnoses appear as chips that you can tap to select.","Under Sites & procedures, choose the site, the side, the procedures and your role (your level of involvement). For a combined case, use “Add another site”.","Under Consultant & sign-off, choose the doctor who will sign it off. Doctors from the posting unit are listed first, most senior first. Put others who were involved (assistants, the anaesthetist, a consultant from another unit) under “Also involved”.","Press Finalize entry, or Save as draft to finish later."],
+   next:"A finalized entry counts in your statistics. Send it for sign-off when you are ready. A draft is not counted and nobody else can see it.",
+   watch:["If something is not on a list, type it in the “Add one not on the list” box. The Head of Department reviews it later.","A half-filled form is never lost. It is saved as you type and offered back on the Dashboard.","“Start from my last entry” and the recent-doctor chips save typing for similar cases."],
    view:["resident-log"], viewLabel:"Log Entry" },
 
  { id:"log-case", phase:1, kinds:["trainee"], title:"Log an interesting case", line:"Rare presentations, dilemmas and teaching cases.",
    who:"You.",
-   what:"An Interesting Case is a write-up record for something worth teaching from: a rare presentation or a diagnostic dilemma. It can be linked to the operation it came from.",
-   why:"It builds a register of teaching cases and lets a consultant attest to the write-up on its own, separately from the operation.",
-   when:"When a case is worth writing up. You can do it straight from the operation form.",
-   how:["On a procedure form, answer “Will you be writing a case report?” with Yes. The new entry is pre-filled with the hospital number, age, sex, diagnoses and procedures.","Or choose Interesting Case on the Dashboard to start from scratch.","Fill in the case, keep the write-up status up to date, and finalize."],
-   next:"Send it for sign-off like any operative record.",
-   watch:["A linked case and its operation are two independent sign-offs. Signing one never signs the other."] },
+   what:"An Interesting Case is a written record of a case worth teaching from, such as a rare presentation or a diagnostic dilemma. You can link it to the operation it came from.",
+   why:"It builds a register of teaching cases. A consultant can sign off the write-up on its own, separately from the operation.",
+   when:"Whenever a case is worth writing up. You can start it straight from the operation form.",
+   how:["On a procedure form, answer “Will you be writing a case report?” with Yes. The new entry is pre-filled with the hospital number, age, sex, diagnoses and procedures.","Or choose Interesting Case on the Dashboard to start from scratch.","Fill in the case, keep the write-up status up to date, and finalize it."],
+   next:"Send it for sign-off in the same way as an operation.",
+   watch:["A linked case and its operation are signed off separately. Signing one does not sign the other."] },
 
  { id:"log-teaching", phase:1, kinds:["trainee"], title:"Log teaching and attendance", line:"Academic Participation and Seminar / Presentation.",
    who:"You.",
-   what:"Academic Participation is what you attended: CME, journal club, a paper presented at a meeting, university activity. Seminar / Presentation is what you gave: a talk or a case presentation.",
-   why:"It is your own record of teaching and academic work. Nobody signs for it, so it is not sent for sign-off.",
+   what:"Academic Participation is what you attended: CME, journal club, a paper presented at a meeting or a university activity. Seminar / Presentation is what you gave: a talk or a case presentation.",
+   why:"It is your own record of teaching and academic work. Nobody signs these entries, so you do not send them for sign-off.",
    when:"After the event.",
-   how:["Choose Academic Participation or Seminar / Presentation on the Dashboard.","Fill in the date and details and finalize."],
-   next:"It counts in your stats. By default only the Head of Department and the Coordinator can see teaching records.",
-   watch:["Use Academic for what you attended and Seminar for what you presented."] },
+   how:["On the Dashboard, choose Academic Participation or Seminar / Presentation.","Fill in the date and details, then finalize."],
+   next:"It counts in your statistics. By default, only the Head of Department and the Coordinator can see teaching entries.",
+   watch:["Use Academic Participation for what you attended and Seminar / Presentation for what you gave."] },
 
- { id:"send-signoff", phase:1, kinds:["trainee"], title:"Send a record for sign-off", line:"Ask the consultant to attest to it.",
+ { id:"send-signoff", phase:1, kinds:["trainee"], title:"Send a record for sign-off", line:"Ask the consultant to sign it off.",
    who:"You, to the consultant who supervised the case.",
-   what:"You name a consultant, who then approves the record or sends it back with a note.",
-   why:"It turns what you reported into something a consultant has put their name to.",
-   when:"After finalizing. You can send many at once (up to 200), which is how to bring an older back-catalogue in gradually.",
-   how:["Open My Entries.","On a finalized record choose Send for sign-off from its menu, or tick several records and send them together.","Choose the consultant. Doctors in the posting unit come first. Someone who is not on the list can be typed in.","Add a note if it helps, and press Send."],
-   next:"The record shows “Awaiting sign-off”. If it waits more than {days} days it also shows to the Head of Unit, Coordinator and Head of Department who oversee that unit, so a consultant being away does not stall your logbook.",
-   watch:["Drafts cannot be sent.","Sending again to the same consultant is refused. Choosing a different one is recorded as a reassignment.","A consultant with no account yet is signed for by the unit’s Head of Unit or the Head of Department until the account exists, and then the record moves to them.","You can Withdraw a record from sign-off any time before it is approved."],
+   what:"You choose a consultant. They either approve the record or send it back with a note.",
+   why:"It turns what you reported into a record that a consultant has put their name to.",
+   when:"After you finalize the entry. You can send up to 200 at once, which helps if you are adding older cases a batch at a time.",
+   how:["Open My Entries.","On a finalized record, choose Send for sign-off from its menu. Or tick several records and send them together.","Choose the consultant. Doctors from the posting unit come first. If the doctor is not listed, you can type the name.","Add a note if it helps, then press Send."],
+   next:"The record shows “Awaiting sign-off”. If it waits more than {days} days, the Head of Unit, Coordinator and Head of Department who oversee that unit can also see it. This means one consultant being away does not hold up your logbook.",
+   watch:["You cannot send a draft.","You cannot send a record to the same consultant twice. If you choose a different consultant, it is recorded as a reassignment.","If the consultant has no account yet, the unit’s Head of Unit or the Head of Department signs for them until the account exists. The record then moves to the consultant.","You can withdraw a record from sign-off at any time before it is approved."],
    view:["resident-entries"], viewLabel:"My Entries" },
 
  { id:"after-signoff", phase:1, kinds:["trainee"], title:"When a consultant replies", line:"Approved and locked, or changes asked.",
    who:"You.",
-   what:"A record comes back approved, or with a note asking for changes.",
-   why:"The consultant attested to one specific version, so an approved record is locked. Anything they ask for is a correction only you can make.",
+   what:"The record comes back approved, or with a note asking for changes.",
+   why:"The consultant signed off one specific version, so an approved record is locked. Only you can make the corrections they ask for.",
    when:"When you see “Changes asked” on your Dashboard or in My Entries.",
-   how:["Changes asked: open the record, read the note, edit it, and send it again. The waiting clock restarts.","Approved: nothing to do. It is locked and cannot be edited or deleted.","Need to change a locked record? Choose Ask to unlock and give a reason. The signer, or a Head of Unit, Coordinator or Head of Department, can release it."],
-   next:"After an edit that changes the case itself, a released record goes back to “Awaiting sign-off”. Changing only comments or the write-up status does not.",
-   watch:["A reason is required to ask for an unlock.","Only one person can edit a record at a time. Others are told who has it; the hold lapses after 10 minutes."],
+   how:["If changes were asked: open the record, read the note, edit it and send it again. The waiting time starts again.","If it was approved: there is nothing to do. The record is locked and cannot be edited or deleted.","To change a locked record, choose Ask to unlock and give a reason. The signer, or a Head of Unit, Coordinator or Head of Department, can unlock it."],
+   next:"If you edit the case itself after an unlock, the record goes back to “Awaiting sign-off”. If you change only comments or the write-up status, it does not.",
+   watch:["You must give a reason to ask for an unlock.","Only one person can edit a record at a time. Others see who has it open, and the hold ends after 10 minutes."],
    view:["resident-entries"], viewLabel:"My Entries" },
 
  { id:"progress", phase:2, kinds:["trainee"], title:"Track your progress and export", line:"Counts, charts and a CSV of your own entries.",
    who:"You.",
-   what:"My Progress charts your finalized entries. My Entries lists everything and has an Export button.",
+   what:"My Progress shows charts of your finalized entries. My Entries lists everything and has an Export button.",
    why:"For your own portfolio and for review meetings.",
-   when:"Any time; before an annual review or a rotation meeting is the usual one.",
-   how:["Open My Progress for the counts and charts.","In My Entries choose Export…, pick which entries and which columns, and download the CSV. Your choices are remembered in your browser."],
-   next:"Drafts are not counted. Signed-off numbers are shown separately on your Dashboard.",
+   when:"Any time. Before an annual review or a rotation meeting is usual.",
+   how:["Open My Progress to see your counts and charts.","In My Entries, choose Export…, pick the entries and columns you want, and download the CSV. Your choices are remembered in your browser."],
+   next:"Drafts are not counted. Your Dashboard shows signed-off numbers separately.",
    view:["resident-progress"], viewLabel:"My Progress" },
 
  { id:"account-care", phase:3, kinds:["trainee","consultant"], title:"Look after your account", line:"Password, leave, closure and feedback.",
    who:"You.",
-   what:"My Account holds your details, appointments, postings, and your password. It is also where you pause or close your account.",
-   why:"People leave, go on long leave and change their minds, and the logbook has to cope without losing anyone’s work.",
-   when:"As it arises.",
-   how:["Change your password: My Account → Password.","Going on leave: Deactivate your account from My Account. It is immediate and undone simply by signing in again.","Leaving: Request closure with a reason. The Head of Department decides (for trainees; a Developer can for others). A 14-day countdown follows, and you or the department can stop it at any point.","Anything else: Feedback takes complaints, suggestions and praise. Send it under your name to follow its status, or anonymously, in which case no author is stored and nobody can reply."],
-   next:"Closing an account never removes the work. Entries and signatures stay, flagged as a closed account.",
-   watch:["An account switched off by an administrator needs an administrator to switch it back on."],
+   what:"My Account holds your details, appointments, postings and password. You also use it to pause or close your account.",
+   why:"People leave, take long leave and change their minds. The logbook has to cope without losing anyone’s work.",
+   when:"When you need it.",
+   how:["To change your password, open My Account → Password.","If you are going on leave, choose Deactivate your account in My Account. It takes effect at once, and you undo it by signing in again.","If you are leaving, choose Request closure and give a reason. The Head of Department decides for trainees, and a Developer decides for others. A 14-day countdown follows, and you or the department can stop it at any point.","For anything else, use Feedback. It takes complaints, suggestions and praise. Send it under your name to follow its status, or send it anonymously. An anonymous message stores no author, so nobody can reply."],
+   next:"Closing an account never removes the work. Entries and signatures stay, marked as belonging to a closed account.",
+   watch:["If an administrator switches your account off, only an administrator can switch it back on."],
    view:["account"], viewLabel:"My Account" },
 
  /* ---------------- consultants ---------------- */
  { id:"signoff", phase:1, kinds:["consultant"], perm:"signoff.approve", title:"Sign off trainees’ records", line:"Approve, or send back with a note.",
-   who:"Any consultant a trainee has named. Fellows with the sign-off permission can too.",
-   what:"The Case Sign-off queue lists records waiting for you, oldest first. You approve a record, or ask for changes with a note.",
-   why:"Your signature is what makes a trainee’s entry a training record. You are attesting to one specific version of it.",
-   when:"As soon as you can. Anything waiting more than {days} days is flagged to the people who oversee that unit.",
-   how:["Open Case Sign-off.","Open a record to read it in full.","Choose Sign this off, or Ask for changes and say what needs correcting (a note is required).","Many records at once: tick them and use Sign off N (up to 200)."],
-   next:"An approved record is locked. A record sent back returns to the trainee, who corrects it and resends. If a trainee asks to unlock a signed record, the request appears in your queue and you can release it.",
-   watch:["You cannot approve your own record.","You never edit the record; the trainee does.","An operation and a linked case write-up are separate sign-offs.","Teaching entries are not signed."],
+   who:"Any consultant a trainee has named. Fellows with the sign-off permission can also do this.",
+   what:"The Case Sign-off queue lists the records waiting for you, oldest first. You approve a record, or ask for changes with a note.",
+   why:"Your signature is what turns a trainee’s entry into a training record. You are signing off one specific version of it.",
+   when:"As soon as you can. Records waiting more than {days} days are flagged to the people who oversee that unit.",
+   how:["Open Case Sign-off.","Open a record and read it in full.","Choose Sign this off, or choose Ask for changes and say what needs correcting. A note is required.","To sign off many records at once, tick them and choose Sign off N (up to 200)."],
+   next:"An approved record is locked. A record you send back returns to the trainee, who corrects it and sends it again. If a trainee asks to unlock a signed record, the request appears in your queue and you can unlock it.",
+   watch:["You cannot approve your own record.","You never edit the record. The trainee does.","An operation and its linked case write-up are signed off separately.","Teaching entries are not signed."],
    view:["approval-queue"], viewLabel:"Case Sign-off" },
 
- { id:"signoff-delegate", phase:2, kinds:["consultant"], perm:"signoff.delegate", title:"Sign off for a colleague who is away", line:"Acting on someone’s behalf, on the record.",
-   who:"Head of Unit (for their units), Coordinator and Head of Department, as shipped.",
+ { id:"signoff-delegate", phase:2, kinds:["consultant"], perm:"signoff.delegate", title:"Sign off for a colleague who is away", line:"Act on their behalf, on the record.",
+   who:"By default: Heads of Unit (for their own units), Coordinators and the Head of Department.",
    what:"Records sent to another consultant also appear under “You can also sign these off”.",
-   why:"One consultant on leave should not hold up a trainee’s logbook.",
-   when:"When a record has waited too long, or a colleague has asked you to.",
-   how:["Open Case Sign-off and scroll to “You can also sign these off”.","Approve or ask for changes exactly as for your own queue."],
+   why:"One consultant being on leave should not hold up a trainee’s logbook.",
+   when:"When a record has waited too long, or when a colleague asks you to.",
+   how:["Open Case Sign-off and scroll to “You can also sign these off”.","Approve the record or ask for changes, in the same way as for your own queue."],
    next:"The record shows that you acted on their behalf, and for whom.",
-   watch:["A Head of Unit can only do this for their own units."],
+   watch:["A Head of Unit can do this only for their own units."],
    view:["approval-queue"], viewLabel:"Case Sign-off" },
 
- { id:"roster", phase:2, kinds:["consultant"], anyPerm:["view.roster","view.records"], title:"See your trainees", line:"Roster and each trainee’s page, within your scope.",
-   who:"Anyone given the roster or records permission. As shipped: Heads of Unit and Professors for their unit, Coordinators and the Head of Department for every unit.",
-   what:"The Roster lists trainees posted to the units you may see, with their counts and how long they have been in your unit. Opening a trainee shows their postings and the records logged during postings in your unit.",
-   why:"To know who is with you, how they are getting on, and who has not logged anything.",
+ { id:"roster", phase:2, kinds:["consultant"], anyPerm:["view.roster","view.records"], title:"See your trainees", line:"The roster and each trainee’s page.",
+   who:"Anyone who has been given the roster or records permission. By default: Heads of Unit and Professors for their unit, and Coordinators and the Head of Department for every unit.",
+   what:"The Roster lists the trainees posted to the units you can see, with their counts and how long they have been in your unit. Opening a trainee shows their postings and the records logged during postings in your unit.",
+   why:"So you know who is with you, how they are getting on and who has not logged anything.",
    when:"Before reviews and rotation meetings, and whenever you want to see who is posted where.",
-   how:["Open Roster.","Search or sort; choose a trainee to open their page.","Use Export on the Roster to download what you may see."],
-   next:"A trainee who has been posted to your unit but logged nothing is listed too, and a trainee due to arrive shows as upcoming.",
-   watch:["You see only what was logged during postings in your unit, never the trainee’s work elsewhere.","Everyone is told where each trainee is posted today, but not their rotation history.","Academic and Seminar columns need the teaching permission."],
+   how:["Open Roster.","Search or sort, then choose a trainee to open their page.","Use Export on the Roster to download what you can see."],
+   next:"A trainee who is posted to your unit but has logged nothing is still listed. A trainee who is due to arrive shows as upcoming.",
+   watch:["You see only what was logged during postings in your unit, never the trainee’s work elsewhere.","Everyone can see where each trainee is posted today, but not their rotation history.","Seeing Academic and Seminar entries needs the teaching permission."],
    view:["consultant-roster"], viewLabel:"Roster" },
 
- { id:"escalations", phase:2, kinds:["consultant"], perm:"view.escalations", title:"Chase what has waited too long", line:"Overdue sign-offs in the units you oversee.",
-   who:"Heads of Unit (their units), Coordinators and the Head of Department.",
-   what:"Your Dashboard lists records unsigned for more than {days} days, in the units you oversee.",
-   why:"So that a record is never stuck because one person is away.",
-   when:"Whenever the Dashboard shows the panel.",
-   how:["Open the Dashboard and look for “Waiting more than {days} days”.","Open a record and, if you have delegate rights, sign it yourself, or ask the named consultant."],
-   next:"Once signed it drops off the list for everyone.",
+ { id:"escalations", phase:2, kinds:["consultant"], perm:"view.escalations", title:"Follow up overdue sign-offs", line:"Records waiting too long in your units.",
+   who:"Heads of Unit (for their units), Coordinators and the Head of Department.",
+   what:"Your Dashboard lists records that have been unsigned for more than {days} days, in the units you oversee.",
+   why:"So that no record is stuck because one person is away.",
+   when:"Whenever the Dashboard shows this panel.",
+   how:["Open the Dashboard and look for “Waiting more than {days} days”.","Open a record. If you can sign off for others, sign it yourself. Otherwise, contact the named consultant."],
+   next:"Once the record is signed, it disappears from the list for everyone.",
    view:["dashboard"], viewLabel:"Dashboard" },
 
  { id:"approve-signups", phase:3, kinds:["consultant","developer"], anyPerm:["accounts.approve_trainees","accounts.approve_fellows","accounts.approve_consultants"], title:"Approve new accounts", line:"Let genuine members in.",
-   who:"As shipped: Head of Department and Coordinator for everyone; Head of Unit for fellows only.",
-   what:"Approvals lists sign-ups waiting for a decision. You approve or reject each one.",
-   why:"It is the only thing keeping outsiders out, and it is where a new doctor is matched to the doctors list.",
+   who:"By default: the Head of Department and Coordinator approve everyone, and a Head of Unit approves fellows only.",
+   what:"Approvals lists the sign-ups waiting for a decision. You approve or reject each one.",
+   why:"This is the only thing that keeps outsiders out. It is also where a new doctor is matched to the doctors list.",
    when:"When the Approvals badge shows a number.",
-   how:["Open Approvals.","Check the name, kind, unit and course.","If a name on the doctors list looks like the same person you are shown it. Pick it from the list so the account links to that row, or leave it to add a new row.","Press Approve, or Reject (which deletes the request)."],
-   next:"An approved person can sign in immediately.",
-   watch:["You see every pending sign-up but can act only on the kinds you are allowed to approve."],
+   how:["Open Approvals.","Check the name, kind, unit and course.","If a name on the doctors list looks like the same person, it is shown to you. Pick it so the account links to that entry, or leave it to add a new one.","Press Approve, or Reject. Rejecting deletes the request."],
+   next:"An approved person can sign in straight away.",
+   watch:["You can see every pending sign-up, but you can act only on the kinds you are allowed to approve."],
    view:["signup-approvals"], viewLabel:"Approvals" },
 
- { id:"manage-users", phase:3, kinds:["consultant"], anyPerm:["accounts.edit_profile","accounts.deactivate","accounts.delete"], title:"Manage users", line:"Batches, deactivation, deletion.",
-   who:"As shipped: Head of Department.",
-   what:"Manage Users lists people. You can change a trainee’s batch or year, deactivate an account, or delete one that has no entries.",
-   why:"People rotate, leave and join. The department needs to tidy accounts without ever losing a record.",
+ { id:"manage-users", phase:3, kinds:["consultant"], anyPerm:["accounts.edit_profile","accounts.deactivate","accounts.delete"], title:"Manage users", line:"Batches, deactivation and deletion.",
+   who:"By default: the Head of Department.",
+   what:"Manage Users lists everyone. You can change a trainee’s batch or year, deactivate an account, or delete an account that has no entries.",
+   why:"People rotate, leave and join. The department needs to keep accounts tidy without losing any record.",
    when:"At the start of a batch, and when someone leaves.",
-   how:["Open Manage Users and choose a person.","Edit batch or year, or deactivate. Deleting is refused if the account has entries; deactivate it instead."],
-   next:"Every account change, who asked, who decided, when and why, is recorded permanently.",
-   watch:["Designation, role and passwords are Developer-only.","The Developer account cannot be touched from here."],
+   how:["Open Manage Users and choose a person.","Edit the batch or year, or deactivate the account. You cannot delete an account that has entries. Deactivate it instead."],
+   next:"Every account change is recorded permanently: who asked, who decided, when and why.",
+   watch:["Only a Developer can change designations, roles and passwords.","You cannot change the Developer account here."],
    view:["manage-users"], viewLabel:"Manage Users" },
 
  { id:"account-requests", phase:3, kinds:["consultant"], perm:"accounts.requests_view", title:"Handle account requests", line:"Closures waiting or counting down.",
-   who:"As shipped: Head of Department and Coordinator can read them; the Head of Department decides a trainee’s closure.",
-   what:"Account Requests shows closures waiting for a decision, closures counting down and how long is left, and who is deactivated (and whether they did it themselves).",
-   why:"Leaving should be deliberate and reversible, and somebody senior should know it is happening.",
+   who:"By default: the Head of Department and Coordinator can read requests. The Head of Department decides on a trainee’s closure.",
+   what:"Account Requests shows closures waiting for a decision, closures counting down (with the time left) and deactivated accounts, including whether the person did it themselves.",
+   why:"Leaving should be deliberate and reversible, and a senior person should know it is happening.",
    when:"When the Account Requests badge shows a number.",
    how:["Open Account Requests.","Decide a closure if it is yours to decide, or stop one that is counting down."],
-   next:"After a closure is approved a 14-day countdown starts, which either side can stop. A full copy of the account is taken when it is approved; a Developer can download it or restore the login.",
-   watch:["Closing an account never removes the work. Entries and signatures stay, flagged as a closed account."],
+   next:"After a closure is approved, a 14-day countdown starts, and either side can stop it. A full copy of the account is saved when the closure is approved. A Developer can download it or restore the login.",
+   watch:["Closing an account never removes the work. Entries and signatures stay, marked as belonging to a closed account."],
    view:["account-requests"], viewLabel:"Account Requests" },
 
- { id:"set-postings", phase:3, kinds:["consultant","developer"], perm:"postings.assign_others", title:"Set postings for trainees", line:"A batch at a time, checked before it is saved.",
-   who:"Head of Department, Coordinator and Developer.",
-   what:"Add the same posting to a group of trainees in one go.",
-   why:"At rotation time a whole batch moves together, and individual trainees forget.",
+ { id:"set-postings", phase:3, kinds:["consultant","developer"], perm:"postings.assign_others", title:"Set postings for trainees", line:"A batch at a time, checked before saving.",
+   who:"The Head of Department, Coordinators and Developers.",
+   what:"You add the same posting to a group of trainees in one go.",
+   why:"At rotation time a whole batch moves together, and individual trainees often forget to update their own postings.",
    when:"Whenever a batch rotates.",
-   how:["Open Manage Users (Users for a Developer) and choose + Set postings.","Choose the trainees, the unit and the dates and press Check. It shows exactly who would be added, who already has a clashing posting, and who is skipped and why.","If it is right, commit."],
-   next:"Each posting is recorded against that person’s account, and the trainee sees it under My Postings.",
-   view:["developer-users","manage-users","set-postings"], viewLabel:"Set postings" },
+   how:["Open Set Postings in the menu. The Head of Department can also use Manage Users, and a Developer can use Users. In both, choose + Set postings.","Choose the trainees, the unit and the dates, then press Check. The screen shows who would be added, who already has a clashing posting, and who is skipped and why.","If it looks right, confirm to save."],
+   next:"Each posting is recorded on that person’s account, and the trainee sees it under My Postings.",
+   view:["set-postings","manage-users","developer-users"], viewLabel:"Set postings" },
 
  { id:"feedback-inbox", phase:3, kinds:["consultant","developer"], perm:"feedback.manage", title:"Read and handle feedback", line:"Complaints, suggestions and praise.",
-   who:"Head of Department, Coordinator and Developer.",
+   who:"The Head of Department, Coordinators and Developers.",
    what:"The Feedback screen is the inbox for everything people send in.",
-   why:"The logbook should improve from what the people using it say.",
+   why:"The logbook should improve based on what its users say.",
    when:"Regularly.",
-   how:["Open Feedback.","Open a submission, set it to Open, Being looked at or Closed, and add internal notes if useful."],
-   next:"The sender sees the status, never the notes.",
-   watch:["Anonymous submissions store no author at all, so nobody can look it up and nobody can reply."],
+   how:["Open Feedback.","Open a message, set its status to Open, Being looked at or Closed, and add internal notes if useful."],
+   next:"The sender sees the status but never the notes.",
+   watch:["Anonymous messages store no author, so you cannot look up who sent one and you cannot reply."],
    view:["feedback"], viewLabel:"Feedback" },
 
  { id:"doctors-list", phase:3, kinds:["consultant","developer"], perm:"directory.manage", title:"Keep the doctors list", line:"Everyone who can be named, with or without an account.",
-   who:"Head of Department and Developer.",
-   what:"The Doctors screen lists consultants, fellows and senior residents by name, designation and unit, whether or not they have a login. It fills the pickers on the entry form.",
-   why:"Trainees can name the right doctor from a list instead of free text, and a doctor who has no account yet can still be named and signed for.",
+   who:"The Head of Department and Developers.",
+   what:"The Doctors screen lists consultants, fellows and senior residents by name, designation and unit, whether or not they have a login. It fills the doctor pickers on the entry form.",
+   why:"Trainees can choose the right doctor from a list instead of typing a name. A doctor with no account yet can still be named and signed for.",
    when:"At the start, and whenever someone joins or leaves.",
-   how:["Add one doctor with Add a doctor, or a whole unit with Add many (paste one per line, check the preview, then apply). A name already listed is merged, not duplicated.","Give a listed doctor an account: Create account, choose the username, and give them the one-time code. They enter it on the sign-in page and set their own password.","Or link an existing account to a row, or mark someone as left so they stop appearing in pickers."],
-   next:"Entries that named a doctor before they had an account are waiting with the unit’s Head of Unit or the Head of Department; when the account is linked they move to the doctor.",
-   watch:["An invite code is shown once, works once and expires after 7 days.","Nobody can see this list without signing in.","Once a doctor has an account, their name and designation change on the account."],
+   how:["Add one doctor with Add a doctor, or a whole unit with Add many. For Add many, paste one name per line, check the preview, then apply. A name that is already listed is merged, not duplicated.","To give a listed doctor an account, choose Create account, pick a username and give the doctor the one-time code. They enter it on the sign-in page and set their own password.","You can also link an existing account to a listed doctor, or mark someone as left so they stop appearing in pickers."],
+   next:"If a trainee named a doctor before that doctor had an account, the unit’s Head of Unit or the Head of Department signs for them. When the account is linked, those records move to the doctor.",
+   watch:["An invite code is shown once, works once and expires after 7 days.","Nobody can see this list without signing in.","Once a doctor has an account, their name and designation are changed on the account."],
    view:["doctors"], viewLabel:"Doctors" },
 
- { id:"list-review", phase:3, kinds:["consultant","developer"], perm:"lists.review", title:"Review what people typed", line:"Promote it to the lists, or dismiss it.",
-   who:"Head of Department (and Developer).",
-   what:"List Review gathers diagnoses, comorbidities and procedures that people typed because they were not on a list.",
-   why:"The lists should match what is seen in theatre, and the gaps are shown by what people have to type.",
+ { id:"list-review", phase:3, kinds:["consultant","developer"], perm:"lists.review", title:"Review typed-in entries", line:"Add them to the lists, or dismiss them.",
+   who:"The Head of Department and Developers.",
+   what:"List Review gathers the diagnoses, comorbidities and procedures that people typed because they were not on a list.",
+   why:"The lists should match what is seen in theatre, and what people have to type shows where the lists have gaps.",
    when:"Every few weeks.",
-   how:["Open List Review → Typed by users.","Tick what belongs, correct the spelling, and promote it; dismiss what does not.","Starter lists offers ready-made diagnoses and procedures to tick through in bulk."],
-   next:"Promoted items appear in everyone’s dropdowns."},
+   how:["Open List Review → Typed by users.","Tick the items that belong, correct the spelling and add them to the lists. Dismiss the rest.","Use Starter lists to tick through ready-made diagnoses and procedures in bulk."],
+   next:"Items you add appear in everyone’s dropdowns." },
 
  /* ---------------- developer ---------------- */
- { id:"dev-setup", phase:0, kinds:["developer"], title:"Set the department up", line:"A checklist, in the order that works.",
+ { id:"dev-setup", phase:0, kinds:["developer"], title:"Set up the department", line:"A checklist, in the order that works best.",
    who:"The Developer.",
-   what:"Structure first, then people, then safety.",
-   why:"Most of what a person can see or do follows from units, appointments and permissions, so those come before anything else.",
-   when:"Once, then whenever the structure changes.",
-   how:["Units & Roles: confirm the units; appoint the Head of Department, Coordinator(s) and each Head of Unit, with dates.","Permissions: review what each kind of person can do; change a bundle or give one person something extra.","Courses: confirm the starter courses (PG, Senior Residency, Fellowship) and their years.","Manage Lists: check diagnoses, comorbidities and procedures; Restore default procedure lists if any are missing.","Alerts: check which automatic alerts are on.","Backups: download one now.","Doctors: have the Head of Department enter the list of doctors."],
+   what:"Set up the structure first, then the people, then the safety measures.",
+   why:"What a person can see or do depends mostly on units, appointments and permissions, so set those up before anything else.",
+   when:"Once, and again whenever the structure changes.",
+   how:["Units & Roles: confirm the units. Appoint the Head of Department, the Coordinator(s) and each Head of Unit, with dates.","Permissions: review what each kind of person can do. Change a role’s permissions, or give one person something extra.","Courses: confirm the starter courses (PG, Senior Residency, Fellowship) and their years.","Manage Lists: check the diagnoses, comorbidities and procedures. Use Restore default procedure lists if any are missing.","Alerts: check which automatic alerts are on.","Backups: download one now.","Doctors: ask the Head of Department to enter the list of doctors."],
    next:"Then approve the first sign-ups.",
    view:["developer-roles"], viewLabel:"Units & Roles" },
 
- { id:"dev-people", phase:2, kinds:["developer"], title:"Look after accounts", line:"Create, promote, rename, reset.",
+ { id:"dev-people", phase:2, kinds:["developer"], title:"Look after accounts", line:"Create, promote, rename and reset.",
    who:"The Developer.",
-   what:"Users lists everyone. A person’s page holds their details and everything only a Developer may change: role, designation, username, password, deactivation, closure.",
-   why:"These change what people can see or do, so they are kept to one role, and each change is recorded.",
-   when:"As requests arrive. Password Requests shows anyone locked out.",
-   how:["Open Users and search for the person.","Change what you need on their page.","Password Requests: set a new password for someone who asked, and tell them in person."],
-   next:"A username change rewrites every record, signature and history line in one step and ends their sessions.",
-   watch:["The last Developer account cannot be deleted, deactivated or demoted.","Designation “Professor” gives sight of the home unit’s records, which is why it is Developer-only."],
+   what:"Users lists everyone. Each person’s page holds their details and the things only a Developer can change: role, designation, username, password, deactivation and closure.",
+   why:"These settings change what people can see or do, so only one role holds them, and every change is recorded.",
+   when:"As requests arrive. Password Requests shows anyone who is locked out.",
+   how:["Open Users and search for the person.","Change what you need on their page.","In Password Requests, set a new password for the person who asked, then tell them in person."],
+   next:"A username change updates every record, signature and history line in one step, and ends the person’s sessions.",
+   watch:["The last Developer account cannot be deleted, deactivated or demoted.","The designation “Professor” gives access to the home unit’s records. That is why only a Developer can set it."],
    view:["developer-users"], viewLabel:"Users" },
 
- { id:"dev-permissions", phase:2, kinds:["developer"], title:"Decide who can do what", line:"Bundles per role, extras per person.",
+ { id:"dev-permissions", phase:2, kinds:["developer"], title:"Decide who can do what", line:"Permissions for each role, and extras for individuals.",
    who:"The Developer.",
-   what:"Every kind of person (Head of Department, Coordinator, Head of Unit, Professor, every Consultant, every Fellow) is a bundle of permissions you can edit, and individuals can be given extras or have something taken away.",
-   why:"So that “this Associate Professor may see ENT 2’s roster but sign nothing” is a setting, not a code change.",
+   what:"Each role (Head of Department, Coordinator, Head of Unit, Professor, Consultant and Fellow) has a set of permissions that you can edit. You can also give an individual extra permissions or take some away.",
+   why:"So that a rule such as “this Associate Professor may see ENT 2’s roster but sign nothing” is a setting, not a code change.",
    when:"When the department decides.",
-   how:["Open Permissions.","Choose a role or a person, change what they hold, and save. Each change is written to an audit trail."],
-   next:"Menus and buttons follow at once. This guide’s “can do” lists follow too.",
-   watch:["Ten permissions are Developer-only and can never be delegated.","Residents and Senior Residents can hold no delegated permission; Fellows only viewing, export and sign-off ones.","The Developer always holds everything."],
+   how:["Open Permissions.","Choose a role or a person, change what they can do and save. Each change is written to an audit trail."],
+   next:"Menus and buttons change straight away. The “can do” lists in this guide change too.",
+   watch:["Ten permissions are for Developers only and can never be given to anyone else.","Residents and Senior Residents cannot be given any extra permission. Fellows can be given viewing, export and sign-off permissions only.","The Developer always holds every permission, except deciding a trainee’s closure."],
    view:["dev-permissions"], viewLabel:"Permissions" },
 
- { id:"dev-courses", phase:3, kinds:["developer"], title:"Define courses", line:"Duration, scope, peripheral postings.",
-   who:"The Developer.", what:"A course sets how long a programme runs, whether it covers the whole department or particular units, whether it allows peripheral postings and for how long, and what each year is called.",
-   why:"The year of study shown everywhere is worked out from the course and the month a trainee joined.",
+ { id:"dev-courses", phase:3, kinds:["developer"], title:"Define courses", line:"Length, scope and peripheral postings.",
+   who:"The Developer.", what:"A course sets how long a programme runs and what each year is called. It also sets whether the course covers the whole department or particular units, and whether it allows peripheral postings and for how long.",
+   why:"The year of study shown everywhere is worked out from the course and the month the trainee joined.",
    when:"When a programme is created or changes.",
-   how:["Open Courses.","Create or edit a course and save."],
-   next:"Trainees pick a course when they sign up.", view:["dev-courses"], viewLabel:"Courses" },
+   how:["Open Courses.","Create or edit a course, then save."],
+   next:"Trainees choose a course when they sign up.", view:["dev-courses"], viewLabel:"Courses" },
 
- { id:"dev-alerts", phase:3, kinds:["developer"], title:"Send alerts", line:"By hand, and the automatic ones.",
-   who:"The Developer.", what:"Write an alert, aim it at everyone, a group, particular people or whoever holds a permission, with dates and an importance. Automatic alerts cover postings about to end, trainees with no posting, appointments ending, vacant posts, courses finishing and overdue backups.",
-   why:"To tell people something without relying on them to look.",
+ { id:"dev-alerts", phase:3, kinds:["developer"], title:"Send alerts", line:"Write your own, and manage the automatic ones.",
+   who:"The Developer.", what:"You can write an alert and send it to everyone, a group, particular people or anyone who holds a permission. You choose its dates and how important it is. Automatic alerts cover postings about to end, trainees with no posting, appointments ending, vacant posts, courses finishing and overdue backups.",
+   why:"To tell people something without relying on them to look for it.",
    when:"When there is something to say.",
-   how:["Open Alerts, write the alert, choose who it is for and when it runs.","Automatic alerts can each be switched off or given a different lead time."],
-   next:"People see a bell in the top bar, and urgent ones as a banner on the Dashboard. Automatic alerts are worked out when someone uses the app, not on a timer.",
+   how:["Open Alerts, write the alert, then choose who it is for and when it runs.","Each automatic alert can be switched off or given a different lead time."],
+   next:"People see a bell in the top bar, and urgent alerts also appear as a banner on the Dashboard. Automatic alerts are worked out when someone uses the app, not on a timer.",
    view:["dev-alerts"], viewLabel:"Alerts" },
 
  { id:"dev-backups", phase:2, kinds:["developer"], title:"Back up and restore", line:"One file holds the whole logbook.",
-   who:"The Developer.", what:"Download the whole logbook as a file, and restore from one if the server’s disk is ever lost.",
-   why:"The database is a single file on one server. Without a backup, one bad day is the end of the logbook.",
-   when:"Regularly. A reminder appears when one is overdue.",
-   how:["Open Backups and press Download.","To restore: upload the file, review what it would change, enter your password and type RESTORE."],
-   next:"A restore copies the current data aside first, so a mistaken restore can be undone.",
+   who:"The Developer.", what:"You download the whole logbook as one file. If the server’s disk is ever lost, you restore from that file.",
+   why:"The database is a single file on one server. Without a backup, one bad day could mean losing the whole logbook.",
+   when:"Regularly. A reminder appears when a backup is overdue.",
+   how:["Open Backups and press Download.","To restore, upload the file, review what it would change, enter your password and type RESTORE."],
+   next:"A restore first copies the current data aside, so you can undo a mistaken restore.",
    watch:["The file holds every record and every password hash. Keep it as carefully as the logbook itself."],
    view:["dev-backups"], viewLabel:"Backups" },
 
- { id:"dev-lists", phase:3, kinds:["developer"], title:"Edit the lists and export data", line:"Dropdowns, units, CSV.",
-   who:"The Developer.", what:"Manage Lists edits every dropdown (units, diagnoses, comorbidities, procedures by site, settings, designations). Data & Export downloads the whole logbook or the users list as CSV and shows storage status.",
-   why:"The lists decide what people can pick; the export is the department’s own copy of its data.",
+ { id:"dev-lists", phase:3, kinds:["developer"], title:"Edit the lists and export data", line:"Dropdowns, units and CSV files.",
+   who:"The Developer.", what:"Manage Lists edits every dropdown: units, diagnoses, comorbidities, procedures by site, settings and designations. Data & Export downloads the whole logbook or the users list as CSV, and shows the storage status.",
+   why:"The lists decide what people can choose. The export is the department’s own copy of its data.",
    when:"As needed.",
-   how:["Manage Lists: edit a list, or paste many options at once (you see what is new and what is already there before committing).","Data & Export: choose the file."],
+   how:["In Manage Lists, edit a list, or paste many options at once. You see what is new and what is already there before you confirm.","In Data & Export, choose the file you want."],
    next:"Changes are live for everyone immediately.", view:["developer-lists"], viewLabel:"Manage Lists" }
 ];
 
-/* Cross-cutting questions people actually ask. */
+/* Questions people actually ask. */
 var GUIDE_FAQ = [
-  ["Why can’t I edit this record?", "Three possible reasons: it has been signed off (it is locked; use Ask to unlock), someone else has it open (they are named, and the hold lapses after 10 minutes), or it is not yours. Only the person who wrote a record can edit it."],
-  ["Can a consultant change my record?", "No. A consultant approves it or sends it back with a note. Corrections are always made by the person who wrote it."],
-  ["Who can see my entries?", "You can. So can the consultant you sent them to. A Head of Unit or Professor can see what you logged during postings in their unit. The Head of Department and Coordinator can see everything, including teaching entries. A Developer can see everything. Nobody sees a draft except you."],
-  ["Why don’t I see a trainee or a unit?", "Access follows permissions and units. A Head of Unit sees their own units; a Professor sees their home unit. Ask the Head of Department if you think you should see more."],
-  ["I forgot my password.", "Choose “Request a reset” on the sign-in page. A Developer sets a new one. Nothing is emailed, so also tell them in person if it is urgent."],
-  ["My consultant isn’t on the list.", "Choose “Someone not on the list” and type the name. The unit’s Head of Unit or the Head of Department signs it off until the doctor has an account; it then moves to them. Tell the Head of Department so the doctor can be added."],
-  ["I logged something under the wrong unit.", "An entry takes the unit of the posting active on its date. Fix the posting under My Postings. If two postings overlap, the one that started later wins."],
-  ["Is anything about patients stored?", "Only a Hospital Number, age and sex. Never a name. Please do not work around that."],
-  ["What happens if I leave?", "Request closure from My Account. The Head of Department decides, there is a 14-day countdown that either side can stop, and your entries and signatures stay."]
+  ["Why can’t I edit this record?", "There are three possible reasons. It has been signed off, so it is locked (use Ask to unlock). Someone else has it open (their name is shown, and the hold ends after 10 minutes). Or it is not your record. Only the person who wrote a record can edit it."],
+  ["Can a consultant change my record?", "No. A consultant approves it or sends it back with a note. The person who wrote the record always makes the corrections."],
+  ["Who can see my entries?", "You can, and so can the consultant you sent them to. A Head of Unit or Professor can see what you logged during postings in their unit. The Head of Department, the Coordinator and Developers can see everything, including teaching entries. Nobody else can see your drafts."],
+  ["Why can’t I see a trainee or a unit?", "What you can see depends on your permissions and units. A Head of Unit sees their own units, and a Professor sees their home unit. If you think you should see more, ask the Head of Department."],
+  ["I forgot my password.", "Choose “Request a reset” on the sign-in page. A Developer will set a new one. Nothing is emailed, so tell them in person if it is urgent."],
+  ["My consultant isn’t on the list.", "Choose “Someone not on the list” and type the name. The unit’s Head of Unit or the Head of Department signs it off until the doctor has an account. The record then moves to that doctor. Tell the Head of Department so the doctor can be added to the list."],
+  ["I logged something under the wrong unit.", "An entry takes the unit of the posting that was active on its date. Fix the posting under My Postings. If two postings overlap, the one that started later is used."],
+  ["Is anything about patients stored?", "Only a Hospital Number, age and sex. Never a name. Please do not find ways around this."],
+  ["What happens if I leave?", "Request closure from My Account. The Head of Department decides. A 14-day countdown follows, and either side can stop it. Your entries and signatures stay."]
 ];
 
 var GUIDE_GLOSSARY = [
-  ["Posting", "A unit, with a start date and an end date. Entries are filed under the posting active on their date."],
-  ["Appointment", "A time-limited role (Head of Department, Coordinator, Head of Unit) given by a Developer, with dates."],
-  ["Designation", "A consultant’s title. “Professor” also gives sight of the home unit’s roster and records."],
-  ["Scope", "Whether a permission applies to the whole department or only to particular units."],
-  ["Delegate", "Someone allowed to sign off a record that was sent to someone else. Their name is recorded as acting on that person’s behalf."],
-  ["Draft / Final", "A draft is yours alone and is not counted. Finalizing it makes it count and lets you send it for sign-off."],
-  ["Awaiting sign-off", "Sent to a consultant who has not yet replied."],
-  ["Locked", "Approved. It cannot be edited until it is released."],
-  ["Course", "A training programme with a length and named years. Your year of study is worked out from it and your joining month."],
-  ["Doctors list", "Everyone who can be named on a record, kept by the Head of Department, whether or not they have an account."],
+  ["Posting", "A unit with a start date and an end date. An entry is filed under the posting that was active on its date."],
+  ["Appointment", "A role with an end date (Head of Department, Coordinator or Head of Unit). A Developer sets it."],
+  ["Designation", "A consultant’s title. “Professor” also gives access to the roster and records of the consultant’s home unit."],
+  ["Scope", "Whether a permission covers the whole department or only particular units."],
+  ["Delegate", "Someone who can sign off a record that was sent to another consultant. The record shows they acted on that consultant’s behalf."],
+  ["Draft / Final", "A draft is visible only to you and is not counted. When you finalize it, it counts and you can send it for sign-off."],
+  ["Awaiting sign-off", "Sent to a consultant who has not replied yet."],
+  ["Locked", "Approved. It cannot be edited unless someone unlocks it."],
+  ["Course", "A training programme with a length and named years. Your year of study is worked out from your course and the month you joined."],
+  ["Doctors list", "Everyone who can be named on a record, whether or not they have an account. The Head of Department keeps it."],
   ["Invite code", "A one-time code that lets a listed doctor create their own account and choose their own password."]
 ];
 
@@ -9004,11 +9016,11 @@ var GUIDE_GLOSSARY = [
     return '<div class="gd-persona'+(mine?" mine":"")+'"><div class="gd-persona-head"><h3>'+esc(info.label)+'</h3>'+(mine?'<span class="chip chip-teal">You</span>':'')+'</div>'+
       '<p class="gd-who">'+esc(info.who)+'</p><p>'+esc(gdFill(info.does))+'</p>'+
       '<div class="gd-can-h">Can do</div>'+
-      (dev ? '<p class="muted">Everything in this guide, plus the '+nRes+' Developer-only items.</p>' :
-        (!can.length ? '<p class="muted">No oversight permissions. Their own logbook only.</p>' :
+      (dev ? '<p class="muted">Everything in this guide, plus '+nRes+' Developer-only permissions.</p>' :
+        (!can.length ? '<p class="muted">No extra permissions. They use their own logbook only.</p>' :
           (open ? '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'
-                : '<p class="muted">'+can.length+' permission'+(can.length===1?"":"s")+' from the live settings. <button type="button" class="link-btn" data-gd="toggle" data-id="p-'+key+'">Show</button></p>')))+
-      '<div class="gd-can-h">Never</div><ul class="gd-never">'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
+                : '<p class="muted">'+can.length+' thing'+(can.length===1?"":"s")+' they can do. <button type="button" class="link-btn" data-gd="toggle" data-id="p-'+key+'">Show</button></p>')))+
+      '<div class="gd-can-h">Cannot do</div><ul class="gd-never">'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
   }
   function gdMatrix(){
     var d = GS.data, ps = d.personas;
@@ -9030,17 +9042,17 @@ var GUIDE_GLOSSARY = [
     body += '<tr class="gd-mx-group"><th colspan="'+(ps.length+1)+'" scope="colgroup">Developer only</th></tr>'+
       resv.map(function(c){ return '<tr><th scope="row" title="'+esc(c.help)+'">'+esc(c.label)+'</th>'+ps.map(function(p){ return '<td class="'+(p.key==="developer"?"gd-all":"gd-no")+'">'+(p.key==="developer"?"Yes":"—")+'</td>'; }).join("")+'</tr>'; }).join("");
     return '<div class="table-wrap"><table class="gd-matrix"><thead>'+head+'</thead><tbody>'+body+'</tbody></table></div>'+
-      '<p class="hint">“Own unit” means the units that person heads, or their home unit for a Professor. This table is read from the live permission settings, so it changes when the Developer changes them.</p>';
+      '<p class="hint">“Own unit” means the units a person heads, or a Professor’s home unit. This table updates when the Developer changes permissions.</p>';
   }
   function gdFlow(){
     var steps = [
       ["t","Trainee","Logs the entry","Saves a draft, then finalizes it. Only a finalized entry counts."],
-      ["t","Trainee","Sends it for sign-off","Names the consultant who supervised."],
-      ["c","Consultant","Reads it and decides","Approves, or asks for changes with a note."],
-      ["t","Trainee","If changes were asked","Edits the record and sends it again. The clock restarts."],
-      ["c","Consultant","If approved","The record is locked and counts as signed."],
-      ["o","Oversight","If it waits more than {days} days","The Head of Unit, Coordinator or Head of Department who oversees the unit sees it, and can sign as delegate."],
-      ["t","Trainee","Later, needs a correction?","Asks to unlock, with a reason. The signer or a delegate releases it."]
+      ["t","Trainee","Sends it for sign-off","Chooses the consultant who supervised the case."],
+      ["c","Consultant","Reads it and decides","Approves it, or asks for changes with a note."],
+      ["t","Trainee","If changes were asked","Edits the record and sends it again. The waiting time starts again."],
+      ["c","Consultant","If approved","The record is locked and counts as signed off."],
+      ["o","Senior staff","If it waits more than {days} days","The Head of Unit, Coordinator or Head of Department who oversees the unit can see it and sign it off as a delegate."],
+      ["t","Trainee","Later, needs a correction?","Asks to unlock the record and gives a reason. The signer or a delegate unlocks it."]
     ];
     var cls = { t:"gd-s-t", c:"gd-s-c", o:"gd-s-o" };
     return '<ol class="gd-flow">'+steps.map(function(s, i){
@@ -9064,7 +9076,7 @@ var GUIDE_GLOSSARY = [
         return many ? canH+neverH : '<div class="gd-qc-cols">'+canH+neverH+'</div>';
       })()+
       '<h2>Rules everyone follows</h2><ul>'+GUIDE_SITE.rules.slice(0,4).map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul>'+
-      '<div class="gd-qc-foot">Stuck? Open Guide in the menu for the full steps, press the ? beside a screen’s title, or use Feedback. Forgotten password: “Request a reset” on the sign-in page.</div>'+
+      '<div class="gd-qc-foot">Need help? Open Guide in the menu for the full steps, or press the ? beside a screen’s title. You can also use Feedback. If you forget your password, choose “Request a reset” on the sign-in page.</div>'+
     '</div></section>';
   }
 
@@ -9083,7 +9095,7 @@ var GUIDE_GLOSSARY = [
         '<p class="muted gd-lead">'+esc(GUIDE_SITE.what)+'</p>'+
         '<div class="gd-you">'+(GS.who==="me" ?
             '<span class="muted">You are</span> '+me.chips.map(function(c){ return '<span class="chip chip-teal">'+esc(c)+'</span>'; }).join(" ")+(me.units.length?' '+me.units.map(function(c){ return '<span class="chip chip-grey">'+esc(c)+'</span>'; }).join(" "):"")
-          : '<span class="notice-inline">Reading as <b>'+esc(PERSONA_INFO[who].label)+'</b>. This only changes what the guide shows. It does not change what you can do.</span>')+'</div>'+
+          : '<span class="notice-inline">You are reading as <b>'+esc(PERSONA_INFO[who].label)+'</b>. This changes only what the guide shows, not what you can do.</span>')+'</div>'+
         '<div class="gd-ctrls">'+picker+
           '<div class="btn-row gd-btns"><button type="button" class="btn" data-gd="tour">Take the welcome tour</button>'+
           '<button type="button" class="btn" data-gd="print">Print a one-page quick guide</button></div></div>'+
@@ -9091,10 +9103,10 @@ var GUIDE_GLOSSARY = [
       '<div class="card"><h2>Why it exists</h2><p>'+esc(GUIDE_SITE.why)+'</p><h3 class="gd-h3">Rules that apply to everyone</h3><ul class="gd-rules">'+GUIDE_SITE.rules.map(function(r){ return '<li>'+esc(r)+'</li>'; }).join("")+'</ul></div>'+
       '<div class="card"><div class="section-head"><h2>'+(GS.who==="me" ? "Your roadmap" : "Roadmap: "+esc(PERSONA_INFO[who].label))+'</h2>'+
         '<button type="button" class="btn btn-sm" data-gd="'+(allOpen?"collapse":"expand")+'">'+(allOpen?"Collapse all":"Expand all")+'</button></div>'+
-        '<p class="muted gd-sub">Everything this role does, in the order it comes up. Each step answers who, what, why, when and how, and says what happens next.</p>'+
+        '<p class="muted gd-sub">Everything this role does, in the order it usually comes up. Open a step to see who, what, why, when and how.</p>'+
         gdRoadmap()+'</div>'+
-      '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Every operative record and case write-up follows this path. Teaching entries stop at step one.</p>'+gdFlow()+'</div>'+
-      '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each kind of person can do, read from the live permission settings.</p>'+
+      '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Operations, procedures and case write-ups follow this path. Teaching entries are not signed, so they stop at step 1.</p>'+gdFlow()+'</div>'+
+      '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
         '<div class="gd-personas">'+GS.data.personas.map(function(p){ return gdPersonaCard(p.key); }).join("")+'</div>'+
         '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>'+
       '<div class="card"><h2>Questions people ask</h2><div class="gd-faq">'+GUIDE_FAQ.map(function(f, i){
@@ -9102,7 +9114,7 @@ var GUIDE_GLOSSARY = [
           return '<div class="gd-q'+(open?" open":"")+'"><button type="button" class="gd-q-head" data-gd="toggle" data-id="faq'+i+'" aria-expanded="'+(open?"true":"false")+'">'+esc(f[0])+'<span class="gd-chev" aria-hidden="true"></span></button>'+(open?'<p>'+esc(f[1])+'</p>':'')+'</div>';
         }).join("")+'</div></div>'+
       '<div class="card"><h2>Words used in this logbook</h2><dl class="gd-gloss">'+GUIDE_GLOSSARY.map(function(g){ return '<div><dt>'+esc(g[0])+'</dt><dd>'+esc(g[1])+'</dd></div>'; }).join("")+'</dl></div>'+
-      '<div class="card muted gd-foot">Anything here out of date, unclear or missing? Tell us under <b>Feedback</b>.</div>'+
+      '<div class="card muted gd-foot">Is anything here out of date, unclear or missing? Tell us through <b>Feedback</b>.</div>'+
       gdQuickCard()+
     '</div>';
   }
@@ -9127,31 +9139,31 @@ var GUIDE_GLOSSARY = [
     var chips = me.chips.concat(me.units).map(function(c){ return '<span class="chip chip-teal">'+esc(c)+'</span>'; }).join(" ");
     var cards = [];
     if(grp==="trainee"){
-      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is your training logbook. You record what you do; the consultant who supervised you signs it. Over a few years it becomes the evidence of your training that nobody can quietly change.</p><p>You are signed in as '+chips+'.</p><p class="muted">Patients are never named here. Every entry uses a Hospital Number.</p>' });
-      cards.push({ k:"Step 1", t:"Tell it where you are posted", h:'<p>Each entry is filed under the unit you were posted to on that date, and consultants only see trainees posted to their unit. So start with <b>My Postings</b>: the unit, the start date, and the end date if you know it.</p>', go:{ view:"resident-postings", label:"Open My Postings" } });
-      cards.push({ k:"Step 2", t:"Log what you do", h:'<p>Five kinds of entry:</p><ul class="gd-t-list"><li><b>Surgical Procedure</b> — any operative case booked in theatre</li><li><b>Other Procedure</b> — OPD, bedside, ED or treatment room</li><li><b>Interesting Case</b> — a rare or instructive case</li><li><b>Academic Participation</b> — CME, journal club, meetings</li><li><b>Seminar / Presentation</b> — what you gave</li></ul><p class="muted">Half-filled forms are saved as you type, so leaving never loses your work.</p>', go:{ view:"resident-log", label:"Open Log Entry" } });
-      cards.push({ k:"Step 3", t:"Get it signed", h:'<p>Operations, procedures and cases are sent to the consultant who supervised you. They approve it, which locks it, or send it back with a note for you to correct. If they take longer than <b>'+days+' days</b>, the people who oversee that unit see it.</p><p class="muted">Teaching entries are yours alone and are not signed.</p>' });
-      cards.push({ k:"Help", t:"Who sees what, and where to look", h:'<p>You see your own entries. Your consultant sees what you send them. A Head of Unit sees what you did during postings in their unit. The Head of Department and Coordinator see everything.</p><p>The <b>Guide</b> in the menu has every step, with a one-page quick guide you can print. Look for the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help on that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is your training logbook. You record what you do, and the consultant who supervised you signs it off. Over the years it becomes evidence of your training that nobody can quietly change.</p><p>You are signed in as '+chips+'.</p><p class="muted">Never enter a patient’s name. Use the Hospital Number only.</p>' });
+      cards.push({ k:"Postings", t:"Add where you are posted", h:'<p>Each entry is filed under the unit you were posted to on that date. Consultants see only the trainees posted to their unit. So start with <b>My Postings</b>: add the unit, the start date and, if you know it, the end date.</p>', go:{ view:"resident-postings", label:"Open My Postings" } });
+      cards.push({ k:"Entries", t:"Log what you do", h:'<p>There are five kinds of entry:</p><ul class="gd-t-list"><li><b>Surgical Procedure:</b> any operation booked in theatre</li><li><b>Other Procedure:</b> OPD, bedside, emergency department or treatment room</li><li><b>Interesting Case:</b> a rare or instructive case</li><li><b>Academic Participation:</b> CME, journal club or meetings you attended</li><li><b>Seminar / Presentation:</b> talks you gave</li></ul><p class="muted">A half-filled form is saved as you type, so you never lose your work by leaving.</p>', go:{ view:"resident-log", label:"Open Log Entry" } });
+      cards.push({ k:"Sign-off", t:"Get it signed off", h:'<p>Send operations, procedures and cases to the consultant who supervised you. They either approve the record, which locks it, or send it back with a note for you to correct. If a record waits more than <b>'+days+' days</b>, the people who oversee that unit can also see it.</p><p class="muted">Teaching entries are not signed off.</p>' });
+      cards.push({ k:"Help", t:"Who sees what, and where to get help", h:'<p>You can see your own entries. Your consultant sees what you send them. A Head of Unit sees what you logged during postings in their unit. The Head of Department and the Coordinator see everything.</p><p>The <b>Guide</b> in the menu has every step, and a one-page quick guide you can print. Press the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help with that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
     } else if(grp==="consultant"){
       var key = gdPrimary(), info = PERSONA_INFO[key];
-      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is the department’s logbook. Trainees record what they do; you attest to the records that name you.</p><p>You are signed in as '+chips+'.</p><p>'+esc(gdFill(info.does))+'</p>' });
-      cards.push({ k:"Step 1", t:"Signing records off", h:'<p>Records trainees send you wait in <b>Case Sign-off</b>, oldest first. Open one and either sign it off, which locks it, or ask for changes with a note. You do not edit a record yourself; the trainee does.</p><p class="muted">Anything waiting more than '+days+' days is flagged to the people who oversee that unit.</p>', go:{ view:"approval-queue", label:"Open Case Sign-off" } });
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>This is the department’s logbook. Trainees record what they do, and you sign off the records that name you.</p><p>You are signed in as '+chips+'.</p><p>'+esc(info.who)+' '+esc(gdFill(info.does))+'</p>' });
+      cards.push({ k:"Sign-off", t:"Sign off records", h:'<p>Records that trainees send you wait in <b>Case Sign-off</b>, oldest first. Open one, then either sign it off, which locks it, or ask for changes with a note. You do not edit a record yourself. The trainee does.</p><p class="muted">Records waiting more than '+days+' days are flagged to the people who oversee that unit.</p>', go:{ view:"approval-queue", label:"Open Case Sign-off" } });
       if(hasPerm("view.roster")){
-        cards.push({ k:"Step 2", t:"Your trainees", h:'<p>The <b>Roster</b> shows trainees posted to the units you may see: how long each has been with you, and their counts. You see what was logged during postings in your unit, never their work elsewhere.</p>', go:{ view:"consultant-roster", label:"Open Roster" } });
+        cards.push({ k:"Roster", t:"See your trainees", h:'<p>The <b>Roster</b> shows the trainees posted to the units you can see, how long each has been with you, and their counts. You see what was logged during postings in your unit, but not their work elsewhere.</p>', go:{ view:"consultant-roster", label:"Open Roster" } });
       }
       if(hasPerm("signoff.delegate")){
-        cards.push({ k:"Delegate", t:"Signing for a colleague", h:'<p>Records sent to another consultant also appear under <b>You can also sign these off</b>, for the units you cover. Use this when someone is away. Your name is recorded as acting on their behalf.</p>' });
+        cards.push({ k:"Delegate", t:"Sign off for a colleague", h:'<p>Records sent to another consultant also appear under <b>You can also sign these off</b>, for the units you cover. Use this when a colleague is away. The record shows that you acted on their behalf.</p>' });
       }
       if(caps_canApproveAny()){
-        cards.push({ k:"Accounts", t:"New accounts", h:'<p>New sign-ups wait in <b>Approvals</b>. Approve people you recognise, and match them to the doctors list where it offers a match.</p>', go:{ view:"signup-approvals", label:"Open Approvals" } });
+        cards.push({ k:"Accounts", t:"Approve new accounts", h:'<p>New sign-ups wait in <b>Approvals</b>. Approve people you recognise. If the doctors list has a matching name, pick it so the account links to it.</p>', go:{ view:"signup-approvals", label:"Open Approvals" } });
       }
-      cards.push({ k:"Help", t:"Where to find more", h:'<p>The <b>Guide</b> in the menu has the full steps for your role, a table of who can do what, and a one-page quick guide to print. The <span class="tip-btn tip-demo">?</span> beside a screen’s title explains that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
+      cards.push({ k:"Help", t:"Where to get help", h:'<p>The <b>Guide</b> in the menu has the full steps for your role, a table of who can do what, and a one-page quick guide you can print. Press the <span class="tip-btn tip-demo">?</span> beside a screen’s title for help with that screen.</p>', go:{ view:"guide", label:"Open the Guide" } });
     } else {
-      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>You run this site: its structure, its permissions and its safety. Everyone else’s menu and buttons follow what you set here.</p><p>You hold every permission, and the last Developer account can never be deleted, deactivated or demoted.</p>' });
-      cards.push({ k:"Step 1", t:"Set it up in this order", h:'<ol class="gd-t-list"><li><b>Units & Roles</b> — units, then appoint the Head of Department, Coordinator(s) and each Head of Unit</li><li><b>Permissions</b> — what each kind of person may do</li><li><b>Courses</b> — confirm the starter courses</li><li><b>Manage Lists</b> — diagnoses and procedures</li><li><b>Doctors</b> — the Head of Department fills this in</li></ol>', go:{ view:"developer-roles", label:"Open Units & Roles" } });
-      cards.push({ k:"Step 2", t:"Permissions, in one minute", h:'<p>Every kind of person is a bundle of permissions you can edit, and any individual can be given something extra or have something removed. Ten permissions are Developer-only and cannot be delegated. Every change is written to an audit trail.</p>', go:{ view:"dev-permissions", label:"Open Permissions" } });
-      cards.push({ k:"Safety", t:"Back it up", h:'<p>The whole logbook is one file on one server. Download a backup from <b>Backups</b> now and keep it as carefully as the logbook: it holds every record and every password hash. A reminder appears when one is overdue.</p>', go:{ view:"dev-backups", label:"Open Backups" } });
-      cards.push({ k:"Help", t:"The Guide", h:'<p>The <b>Guide</b> explains every role’s steps and has a one-page quick guide per role you can print and hand out before launch.</p>', go:{ view:"guide", label:"Open the Guide" } });
+      cards.push({ k:"Welcome", t:"Welcome, "+name, h:'<p>You run this site: its structure, its permissions and its safety. Everyone else’s menu and buttons follow the settings you choose here.</p><p>You hold every permission. The last Developer account can never be deleted, deactivated or demoted.</p>' });
+      cards.push({ k:"Set up", t:"Set up in this order", h:'<ol class="gd-t-list"><li><b>Units & Roles:</b> add the units, then appoint the Head of Department, the Coordinator(s) and each Head of Unit</li><li><b>Permissions:</b> choose what each role can do</li><li><b>Courses:</b> confirm the starter courses</li><li><b>Manage Lists:</b> check the diagnoses and procedures</li><li><b>Doctors:</b> the Head of Department fills this in</li></ol>', go:{ view:"developer-roles", label:"Open Units & Roles" } });
+      cards.push({ k:"Permissions", t:"How permissions work", h:'<p>Each role has a set of permissions that you can edit. You can also give one person an extra permission or take one away. Ten permissions are for Developers only and cannot be given to anyone else. Every change is written to an audit trail.</p>', go:{ view:"dev-permissions", label:"Open Permissions" } });
+      cards.push({ k:"Safety", t:"Back up the logbook", h:'<p>The whole logbook is one file on one server. Download a backup from <b>Backups</b> now, and keep it as carefully as the logbook itself, because it holds every record and every password hash. A reminder appears when a backup is overdue.</p>', go:{ view:"dev-backups", label:"Open Backups" } });
+      cards.push({ k:"Help", t:"The Guide", h:'<p>The <b>Guide</b> explains the steps for every role. It also has a one-page quick guide for each role that you can print and hand out before launch.</p>', go:{ view:"guide", label:"Open the Guide" } });
     }
     return cards;
   }
