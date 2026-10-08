@@ -298,6 +298,28 @@ def migrate_v74(conn):
     conn.commit()
 
 
+def migrate_v75(conn):
+    """v7.5: who an entry names, as a row of the doctors list rather than only
+    as text. `approver_doctor_id` / `approver_name` carry a sign-off nominee who
+    has no account yet; `consultant_doctor_id` and `involved` carry who else
+    was in the case. The free-text `consultant` and `assistants` columns stay,
+    and stay populated, because exports and every older screen read them."""
+    tables = _existing_tables(conn)
+    if "entries" in tables:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        for name, decl in (("approver_doctor_id", "INTEGER"), ("approver_name", "TEXT"),
+                           ("consultant_doctor_id", "INTEGER"), ("involved", "TEXT")):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE entries ADD COLUMN {name} {decl}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_approver_doc ON entries(approver_doctor_id)")
+    if "entry_approvals" in tables:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entry_approvals)").fetchall()}
+        for name, decl in (("approver_label", "TEXT"), ("on_behalf_of_label", "TEXT")):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE entry_approvals ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -312,6 +334,7 @@ def init_db():
     migrate_account_lifecycle(conn)
     migrate_entry_locks(conn)
     migrate_v74(conn)
+    migrate_v75(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))
@@ -333,3 +356,7 @@ def init_db():
     # unit list to decide which units are peripheral.
     import courses as _courses
     _courses.seed_and_backfill(conn)
+    # v7.5: every consultant / fellow / senior resident account gets its row on
+    # the doctors list. Idempotent; an account that already has a row is skipped.
+    import doctors as _doctors
+    _doctors.seed_from_users(conn)

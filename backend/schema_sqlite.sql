@@ -425,3 +425,60 @@ CREATE TABLE IF NOT EXISTS backup_log (
   detail         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_backup_log_at ON backup_log(id DESC);
+
+-- v7.5: the department's doctors, whether or not they have an account.
+-- See doctors.py. A row links to AT MOST ONE account (the unique index), and
+-- an account to at most one row; that pair of constraints is what stops the
+-- list and the accounts drifting into two versions of the same doctor.
+CREATE TABLE IF NOT EXISTS doctors (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  display_name    TEXT NOT NULL,
+  name_key        TEXT NOT NULL,          -- normalised, for matching only
+  designation     TEXT NOT NULL,
+  rank            INTEGER NOT NULL DEFAULT 0,
+  home_unit       TEXT,
+  department      TEXT,                   -- NULL / 'ENT' = this department; else e.g. 'Anaesthesia'
+  reg_no          TEXT,                   -- optional council registration number
+  email           TEXT,
+  phone           TEXT,
+  status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','left')),
+  linked_username TEXT REFERENCES users(username) ON DELETE SET NULL,
+  notes           TEXT,
+  source          TEXT NOT NULL DEFAULT 'manual',
+  created_by      TEXT,
+  created_at      TEXT NOT NULL,
+  updated_by      TEXT,
+  updated_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_doctors_linked ON doctors(linked_username) WHERE linked_username IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_doctors_reg ON doctors(reg_no) WHERE reg_no IS NOT NULL AND reg_no <> '';
+CREATE INDEX IF NOT EXISTS idx_doctors_key ON doctors(name_key);
+
+CREATE TABLE IF NOT EXISTS doctor_units (
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+  unit      TEXT NOT NULL,
+  PRIMARY KEY (doctor_id, unit)
+);
+CREATE INDEX IF NOT EXISTS idx_doctor_units_unit ON doctor_units(unit);
+
+-- A doctor asking for, or being offered, an account. `username` is plain TEXT
+-- on purpose: an invite reserves a name before any account exists, and a
+-- rejected sign-up deletes its account row.
+CREATE TABLE IF NOT EXISTS doctor_claims (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  doctor_id    INTEGER NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL CHECK (kind IN ('self','invite')),
+  state        TEXT NOT NULL CHECK (state IN ('pending','invited','approved','used','rejected','cancelled','expired')),
+  username     TEXT NOT NULL,
+  code_hash    TEXT,
+  expires_at   TEXT,
+  requested_by TEXT,
+  requested_at TEXT NOT NULL,
+  decided_by   TEXT,
+  decided_at   TEXT,
+  note         TEXT
+);
+-- At most ONE open claim per doctor. A second sign-up for the same row, or a
+-- second invite, is refused by the database itself, not just by a check.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_open ON doctor_claims(doctor_id) WHERE state IN ('pending','invited');
+CREATE INDEX IF NOT EXISTS idx_claims_user ON doctor_claims(username);

@@ -73,6 +73,12 @@ USERNAME_COLUMNS = [
     ("alert_reads", "username", None),
     ("courses", "updated_by", None),
     ("backup_log", "actor_username", None),
+    ("doctors", "linked_username", None),
+    ("doctors", "created_by", None),
+    ("doctors", "updated_by", None),
+    ("doctor_claims", "username", None),
+    ("doctor_claims", "requested_by", None),
+    ("doctor_claims", "decided_by", None),
 ]
 
 # Columns that look like usernames and are not, or are deliberately left.
@@ -81,6 +87,10 @@ IGNORED_COLUMNS = {
     ("login_attempts", "key"),
     # A role name ("consultant"), frozen on the approval row, not a username.
     ("entry_approvals", "actor_role"),
+    # v7.5: ids / typed labels for an approver who has no account yet.
+    ("entries", "approver_doctor_id"),
+    ("entries", "approver_name"),
+    ("entry_approvals", "approver_label"),
 }
 
 _SUSPECT = re.compile(r"username|_by$|^on_behalf_of$|approver|actor|^target$")
@@ -145,6 +155,9 @@ def availability(db, name, ignore=None):
     which a rename may displace."""
     h = holder_of(db, name, ignore)
     if not h:
+        from doctors import invite_reserved
+        if invite_reserved(db, name):
+            return "taken", "it is reserved for a doctor who has been invited"
         return "free", None
     if h["lifecycle"] == "deleted":
         return "closed", "held by a closed account (%s); its records stay with it" % h["display_name"]

@@ -19,6 +19,7 @@ from auth import (
 )
 from db import get_db
 import courses as courses_mod
+import doctors as doctors_mod
 import perms
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -364,9 +365,26 @@ def entry_row_to_dict(row):
         "paperStatus": d.get("paper_status"),
         "approvalState": d.get("approval_state") or "not_submitted",
         "approverUsername": d.get("approver_username"),
+        # v7.5: a nominee who has no account yet (a row of the doctors list,
+        # or a typed name). The record sits with the unit's Head of Unit /
+        # the HOD until the account exists.
+        "approverDoctorId": d.get("approver_doctor_id"),
+        "approverName": d.get("approver_name"),
+        "consultantDoctorId": d.get("consultant_doctor_id"),
+        "involved": _involved_list(d.get("involved")),
         "status": d.get("status") or "final",
         "courseId": d.get("course_id"),
     }
+
+
+def _involved_list(raw):
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
 
 
 # Fields excluded from the edit-history diff: identity/authorship never
@@ -395,7 +413,7 @@ NON_CONTENT_FIELDS = {"rowVersion"}
 MATERIAL_FIELDS = {
     "procedureBlocks",          # site, procedures, laterality, entrustment level
     "date", "unit",
-    "consultant", "consultantUsername",
+    "consultant", "consultantUsername", "consultantDoctorId",
     "diagnoses", "diagnosesSecondary", "comorbidities",
     "hospitalNumber", "age", "sex",
     "setting", "otherSettingType",
@@ -422,14 +440,17 @@ def _max_edit_id(db, entry_id):
 
 
 def _log_approval(db, entry_id, action, actor, comment=None,
-                  approver_username=None, on_behalf_of=None):
+                  approver_username=None, on_behalf_of=None, approver_label=None,
+                  on_behalf_label=None):
     db.execute(
         "INSERT INTO entry_approvals (entry_id, action, actor_username, actor_role,"
-        " approver_username, on_behalf_of, comment, edits_at_action, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
+        " approver_username, on_behalf_of, comment, edits_at_action, created_at,"
+        " approver_label, on_behalf_of_label)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (entry_id, action, actor["username"], actor.get("role"),
          approver_username, on_behalf_of, _text(comment, 4000),
-         _max_edit_id(db, entry_id), datetime.datetime.utcnow().isoformat() + "Z"),
+         _max_edit_id(db, entry_id), datetime.datetime.utcnow().isoformat() + "Z",
+         approver_label, on_behalf_label),
     )
 
 
@@ -489,14 +510,37 @@ CLEAR_APPROVER = "__clear__"
 
 
 def _set_approval(db, entry_id, state, approver=None):
+    """`approver` is None (leave as is), CLEAR_APPROVER, a username, or a
+    target dict from doctors.resolve_approver ({"username"} | {"doctorId",
+    "name"} | {"name"}). Whichever way it points, the OTHER pointers are
+    cleared, so a record never names an account and a stranger at once."""
     if approver is CLEAR_APPROVER:
-        db.execute("UPDATE entries SET approval_state = ?, approver_username = NULL WHERE id = ?",
-                   (state, entry_id))
+        db.execute("UPDATE entries SET approval_state = ?, approver_username = NULL,"
+                   " approver_doctor_id = NULL, approver_name = NULL WHERE id = ?", (state, entry_id))
     elif approver is None:
         db.execute("UPDATE entries SET approval_state = ? WHERE id = ?", (state, entry_id))
     else:
-        db.execute("UPDATE entries SET approval_state = ?, approver_username = ? WHERE id = ?",
-                   (state, approver, entry_id))
+        t = approver if isinstance(approver, dict) else {"username": approver}
+        db.execute("UPDATE entries SET approval_state = ?, approver_username = ?, approver_doctor_id = ?,"
+                   " approver_name = ? WHERE id = ?",
+                   (state, t.get("username"), t.get("doctorId"),
+                    None if t.get("username") else t.get("name"), entry_id))
+
+
+def _nominee_label(row, on_behalf):
+    """When a delegate acts on a record whose nominee has no account, the
+    audit row names the nominee by the label the trainee chose."""
+    if on_behalf is None and row["approver_username"] is None and row["approver_name"]:
+        return row["approver_name"]
+    return None
+
+
+def _target_label(db, t):
+    """Human name for an approver target (for the audit trail)."""
+    if t.get("username"):
+        return _display_name(db, t["username"])
+    return t.get("name")
+
 
 PAPER_STATUSES = {"not_done", "in_progress", "done"}
 
@@ -631,6 +675,8 @@ def signup():
     # Case-insensitive and against every account, closed ones included.
     if usernames.holder_of(db, username):
         return jsonify({"error": "That username is already taken."}), 409
+    if doctors_mod.invite_reserved(db, username):
+        return jsonify({"error": "That username is reserved for a doctor who has been invited."}), 409
 
     is_first_user = db.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0
     final_role = "developer" if is_first_user else role
@@ -645,6 +691,13 @@ def signup():
     # this. Required, unlike a consultant's unit, because it's how a Fellow
     # shows up in that unit's consultant/assistant picker from day one.
     unit = _text(body.get("unit"), 60) if final_role in ("consultant", "fellow") else None
+    designation = _text(body.get("designation"), 80) if final_role == "consultant" else None
+
+    # v7.5.1: sign-up never consults the doctors list. Naming yourself from a
+    # list would need a public search of names; instead the person types their
+    # own name and whoever approves them links the account to a listed row
+    # (the Approvals screen shows possible matches to signed-in approvers).
+    claim_doc = None
     if final_role == "fellow" and not unit:
         return jsonify({"error": "Fellows must select a parent unit at sign-up."}), 400
     if unit and (not isinstance(unit, str) or unit not in known_unit_keys()):
@@ -652,7 +705,6 @@ def signup():
 
     now = datetime.datetime.utcnow().isoformat() + "Z"
     pg_year = _text(body.get("pgYear"), 80) if final_role in TRAINEE_ROLES else None
-    designation = _text(body.get("designation"), 80) if final_role == "consultant" else None
     course_id, joined_ym, cerr = _trainee_profile(db, final_role, unit, body)
     if cerr:
         return jsonify({"error": cerr}), 400
@@ -663,6 +715,18 @@ def signup():
         (username, hash_password(password), final_role, display_name, pg_year, designation, unit,
          approval_status, now, course_id, joined_ym),
     )
+    if claim_doc is not None:
+        rl = "claimsignup:" + client_ip()
+        if rate_limit(rl):
+            db.rollback()
+            return jsonify({"error": "Too many sign-ups from here. Wait 15 minutes."}), 429
+        ok, why = doctors_mod.start_self_claim(db, claim_doc["id"], username)
+        if not ok:
+            db.rollback()
+            return jsonify({"error": why}), 409
+        record_attempt(rl)
+        _account_event(db, username, "claim_requested", username,
+                       "Asked to be %s on the doctors list." % claim_doc["display_name"])
     db.commit()
 
     if approval_status == "pending":
@@ -1094,6 +1158,7 @@ def create_entry():
 
     db = get_db()
     linked_from_id = _linked_entry_id(db, body.get("linkedFromId"), g.user["username"])
+    consultant_doctor_id, involved_json = doctors_mod.resolve_people(db, body, perms)
     # A case entry linked to a surgical entry starts its PG paper-writeup
     # to-do at 'not_done'; every other entry (including an unlinked case,
     # or a case logged by a Senior Resident/Fellow) gets no tracker at all.
@@ -1131,8 +1196,8 @@ def create_entry():
             consultant_username, assistants, comments, case_report, linked_from_id,
             history, examination, academic_type, academic_type_other, seminar_type,
             seminar_type_other, topic, venue, details, paper_status, procedure_blocks, status,
-            course_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            course_id, consultant_doctor_id, involved
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             g.user["username"], entry_type, unit, entry_date, now,
             # site/procedures/laterality/role_level stay unset for a
@@ -1157,6 +1222,7 @@ def create_entry():
             # later change of course does not rewrite what this was logged under.
             db.execute("SELECT course_id FROM users WHERE username = ?",
                        (g.user["username"],)).fetchone()["course_id"],
+            consultant_doctor_id, involved_json,
         ),
     )
     db.commit()
@@ -1407,6 +1473,7 @@ def update_entry(entry_id):
         new_paper_status = existing["paper_status"]
 
     before = entry_row_to_dict(existing)
+    consultant_doctor_id, involved_json = doctors_mod.resolve_people(db, body, perms, existing)
 
     # status: draft only ever applies to Surgical/Other Procedure, and only
     # while explicitly requested (finalizing, or a plain re-save of a draft
@@ -1469,7 +1536,8 @@ def update_entry(entry_id):
             diagnoses_secondary=?, comorbidities=?, laterality=?, role_level=?, consultant=?,
             consultant_username=?, assistants=?, comments=?, case_report=?, linked_from_id=?,
             history=?, examination=?, academic_type=?, academic_type_other=?, seminar_type=?,
-            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?, procedure_blocks=?, status=?
+            seminar_type_other=?, topic=?, venue=?, details=?, paper_status=?, procedure_blocks=?, status=?,
+            consultant_doctor_id=?, involved=?
         WHERE id = ?""",
         (
             entry_type, unit, entry_date,
@@ -1496,6 +1564,7 @@ def update_entry(entry_id):
             body.get("seminarTypeOther", before["seminarTypeOther"]),
             body.get("topic", before["topic"]), body.get("venue", before["venue"]),
             body.get("details", before["details"]), new_paper_status, procedure_blocks_json, new_status,
+            consultant_doctor_id, involved_json,
             entry_id,
         ),
     )
@@ -2133,6 +2202,26 @@ def admin_create_user():
     display = (_text(body.get("displayName"), 120) or "").strip() or username
     # Admin-created accounts are pre-approved -- an admin creating the
     # account directly IS the approval.
+    if doctors_mod.invite_reserved(db, username):
+        return jsonify({"error": "That username is reserved for a doctor who has been invited."}), 409
+    # v7.5: do not make a second row for someone already on the list.
+    link_row = None
+    if role in doctors_mod.LIST_ROLES:
+        did = body.get("doctorId")
+        if isinstance(did, int) and not isinstance(did, bool):
+            link_row = doctors_mod.get(db, did)
+            ok, why = doctors_mod.linkable(db, link_row) if link_row else (False, "No such doctor.")
+            if not ok:
+                return jsonify({"error": why}), 409
+            if doctors_mod.kind_of(link_row["designation"]) != role:
+                return jsonify({"error": "That row is listed as %s." % link_row["designation"]}), 409
+            if doctors_mod.open_claim(db, link_row["id"]):
+                return jsonify({"error": "That row has an open invite or claim."}), 409
+        elif not body.get("confirmNotListed"):
+            near = doctors_mod.near_matches(db, display)
+            if near:
+                return jsonify({"error": "possible_list_match", "matches": near,
+                                "detail": "A doctor with a similar name is already on the list."}), 409
     db.execute(
         "INSERT INTO users (username, password_hash, role, display_name, pg_year, designation, unit, active,"
         " approval_status, created_at, course_id, joined_ym, email, phone)"
@@ -2141,6 +2230,11 @@ def admin_create_user():
          course_id, joined_ym, email or None, phone or None),
     )
     _account_event(db, username, "created", g.user["username"], "Created by a Developer as %s" % role)
+    if link_row is not None:
+        doctors_mod.link(db, link_row["id"], username, g.user["username"], "account created")
+        doctors_mod.sync_user(db, username)
+    else:
+        doctors_mod.ensure_for_user(db, username, g.user["username"])
     db.commit()
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     return jsonify({"user": row_to_user(row, contact=True)})
@@ -2322,6 +2416,7 @@ def update_user(username):
         changes.append("password reset")
     if changes:
         _account_event(db, username, "profile_edited", me, "; ".join(changes))
+    doctors_mod.sync_user(db, username)
     db.commit()
     perms.invalidate(username)
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -2382,17 +2477,43 @@ def _can_approve_role(username, role):
     return bool(r and r["role"] == "developer")
 
 
+def _signup_extras(db, row):
+    """What the person approving needs to see beside a sign-up: the list row
+    it is claiming, or listed names it resembles (so a second account for
+    someone who already has one is caught before it exists)."""
+    out = {"claim": None, "possibleMatches": []}
+    c = doctors_mod.claim_for_user(db, row["username"])
+    if c:
+        d = doctors_mod.get(db, c["doctor_id"])
+        out["claim"] = {"id": c["id"], "doctorId": d["id"], "displayName": d["display_name"],
+                        "designation": d["designation"], "units": doctors_mod._units(db, d["id"])}
+    elif row["role"] in doctors_mod.LIST_ROLES:
+        out["possibleMatches"] = [m for m in doctors_mod.near_matches(db, row["display_name"])]
+    return out
+
+
 @api.get("/signup-requests")
 @login_required()
 def list_signup_requests():
     me = g.user["username"]
-    rows = get_db().execute("SELECT * FROM users WHERE approval_status = 'pending' ORDER BY created_at").fetchall()
+    db = get_db()
+    rows = db.execute("SELECT * FROM users WHERE approval_status = 'pending' ORDER BY created_at").fetchall()
     # Only the sign-ups this person can actually act on -- listing ones they
     # cannot approve is a button that always says no.
     mine = [r for r in rows if _can_approve_role(me, r["role"])]
     if not mine and not any(perms.can(me, k) for k in _APPROVE_PERM.values()):
         return jsonify({"error": "forbidden"}), 403
-    return jsonify({"requests": [row_to_user(r) for r in mine]})
+    can_dir = perms.can(me, "directory.manage")
+    out = []
+    for r in mine:
+        u = row_to_user(r)
+        ex = _signup_extras(db, r)
+        u.update(ex)
+        # a claim is settled by someone who can manage the list
+        u["canDecide"] = (ex["claim"] is None) or can_dir
+        u["canLinkList"] = can_dir
+        out.append(u)
+    return jsonify({"requests": out})
 
 
 @api.post("/signup-requests/<username>/approve")
@@ -2402,13 +2523,59 @@ def approve_signup_request(username):
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or row["approval_status"] != "pending":
         return jsonify({"error": "not_found"}), 404
-    if not _can_approve_role(g.user["username"], row["role"]):
+    me = g.user["username"]
+    if not _can_approve_role(me, row["role"]):
         return jsonify({"error": "forbidden"}), 403
-    db.execute("UPDATE users SET approval_status = 'approved' WHERE username = ?", (username,))
-    _account_event(db, username, "signup_approved", g.user["username"], None)
-    db.commit()
+    body = request.get_json(force=True, silent=True) or {}
+    claim = doctors_mod.claim_for_user(db, username)
+    link_to = None
+    if claim:
+        # The row was locked for this person at sign-up.
+        if not perms.can(me, "directory.manage"):
+            return jsonify({"error": "forbidden",
+                            "detail": "This sign-up claims a name on the doctors list. The Head of Department or a Developer settles it."}), 403
+        link_to = claim["doctor_id"]
+    elif isinstance(body.get("doctorId"), int) and not isinstance(body.get("doctorId"), bool):
+        # Approver says "this is the listed doctor X": join instead of duplicating.
+        if not perms.can(me, "directory.manage"):
+            return jsonify({"error": "forbidden"}), 403
+        d = doctors_mod.get(db, body["doctorId"])
+        ok, why = doctors_mod.linkable(db, d) if d else (False, "No such doctor.")
+        if not ok:
+            return jsonify({"error": why}), 409
+        if doctors_mod.kind_of(d["designation"]) != row["role"]:
+            return jsonify({"error": "That row is listed as %s; this account is a %s."
+                                     % (d["designation"], row["role"].replace("_", " "))}), 409
+        if doctors_mod.open_claim(db, d["id"]):
+            return jsonify({"error": "That row has an open invite or claim."}), 409
+        link_to = d["id"]
+    try:
+        db.execute("UPDATE users SET approval_status = 'approved' WHERE username = ?", (username,))
+        _account_event(db, username, "signup_approved", me, None)
+        result = None
+        if link_to:
+            d = doctors_mod.get(db, link_to)
+            # Name, designation and unit come from the list, not from the form.
+            if row["role"] in ("consultant", "fellow"):
+                db.execute("UPDATE users SET display_name = ?, designation = ?, unit = COALESCE(?, unit) WHERE username = ?",
+                           (d["display_name"], d["designation"] if row["role"] == "consultant" else row["designation"],
+                            d["home_unit"], username))
+            result = doctors_mod.link(db, link_to, username, me, "sign-up approved")
+            if claim:
+                db.execute("UPDATE doctor_claims SET state = 'approved', decided_by = ?, decided_at = ? WHERE id = ?",
+                           (me, datetime.datetime.utcnow().isoformat() + "Z", claim["id"]))
+            _account_event(db, username, "doctor_linked", me,
+                           "Linked to the doctors list as %s; %d waiting record(s) moved to them."
+                           % (d["display_name"], result["entriesRouted"]))
+            doctors_mod.sync_user(db, username)
+        else:
+            doctors_mod.ensure_for_user(db, username, me)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    return jsonify({"user": row_to_user(row)})
+    return jsonify({"user": row_to_user(row), "linked": result})
 
 
 @api.post("/signup-requests/<username>/reject")
@@ -2418,8 +2585,16 @@ def reject_signup_request(username):
     row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or row["approval_status"] != "pending":
         return jsonify({"error": "not_found"}), 404
-    if not _can_approve_role(g.user["username"], row["role"]):
+    me = g.user["username"]
+    if not _can_approve_role(me, row["role"]):
         return jsonify({"error": "forbidden"}), 403
+    claim = doctors_mod.claim_for_user(db, username)
+    if claim and not perms.can(me, "directory.manage"):
+        return jsonify({"error": "forbidden",
+                        "detail": "This sign-up claims a name on the doctors list. The Head of Department or a Developer settles it."}), 403
+    if claim:
+        db.execute("UPDATE doctor_claims SET state = 'rejected', decided_by = ?, decided_at = ? WHERE id = ?",
+                   (me, datetime.datetime.utcnow().isoformat() + "Z", claim["id"]))
     # Safe to hard-delete outright: a never-approved account can't have
     # logged any entries yet.
     db.execute("DELETE FROM users WHERE username = ?", (username,))
@@ -2728,7 +2903,7 @@ def _waiting_since(history, fallback):
 def _approval_history(db, entry_id):
     rows = db.execute(
         "SELECT action, actor_username, actor_role, approver_username, on_behalf_of,"
-        " comment, created_at FROM entry_approvals WHERE entry_id = ? ORDER BY id ASC",
+        " approver_label, on_behalf_of_label, comment, created_at FROM entry_approvals WHERE entry_id = ? ORDER BY id ASC",
         (entry_id,),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -2744,8 +2919,9 @@ def _days_since(iso):
     return max(0, (datetime.datetime.utcnow() - then).days)
 
 
-def _submit_one(db, entry_id, approver, comment=None):
-    """Returns (ok, error_dict, http_status)."""
+def _submit_one(db, entry_id, target, comment=None):
+    """`target` is an approver target dict (see doctors.resolve_approver).
+    Returns (ok, error_dict, http_status)."""
     row = db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not row:
         return False, {"error": "not_found"}, 404
@@ -2753,12 +2929,13 @@ def _submit_one(db, entry_id, approver, comment=None):
         return False, {"error": "forbidden"}, 403
     if row["entry_type"] not in APPROVABLE_TYPES:
         return False, {"error": "Only operative records and case write-ups are approved."}, 400
-    if approver == g.user["username"]:
+    if target.get("username") == g.user["username"]:
         return False, {"error": "You cannot send a record to yourself for approval."}, 400
     if row["status"] != "final":
         return False, {"error": "Finish the entry before sending it for approval."}, 400
     if row["approval_state"] == "approved":
         return False, {"error": "Already approved."}, 409
+    label = _target_label(db, target)
     # Re-sending a record that is already waiting on someone. Silently
     # re-pointing it at a second consultant is how a trainee shops for a
     # signature: the first consultant's queue loses the record with no
@@ -2767,19 +2944,24 @@ def _submit_one(db, entry_id, approver, comment=None):
     # different one is allowed (the nominated consultant may have left) but
     # is recorded as a reassignment naming both.
     if row["approval_state"] == "pending":
-        if row["approver_username"] == approver:
+        same = ((target.get("username") and row["approver_username"] == target["username"])
+                or (target.get("doctorId") and row["approver_doctor_id"] == target["doctorId"])
+                or (not target.get("username") and not target.get("doctorId")
+                    and (row["approver_name"] or "").lower() == (target.get("name") or "").lower()
+                    and not row["approver_username"]))
+        if same:
             return False, {"error": "This record is already waiting with that consultant."}, 409
+        was = row["approver_username"] or row["approver_name"] or "nobody"
         _log_approval(db, entry_id, "reassigned", g.user,
                       comment="Moved from %s to %s%s" % (
-                          row["approver_username"], approver,
-                          (" — " + comment) if comment else ""),
-                      approver_username=approver,
-                      on_behalf_of=row["approver_username"])
-        _set_approval(db, entry_id, "pending", approver)
+                          was, label, (" \u2014 " + comment) if comment else ""),
+                      approver_username=target.get("username"), approver_label=label,
+                      on_behalf_of=row["approver_username"], on_behalf_label=row["approver_name"])
+        _set_approval(db, entry_id, "pending", target)
         return True, None, 200
     _log_approval(db, entry_id, "submitted", g.user, comment=comment,
-                  approver_username=approver)
-    _set_approval(db, entry_id, "pending", approver)
+                  approver_username=target.get("username"), approver_label=label)
+    _set_approval(db, entry_id, "pending", target)
     return True, None, 200
 
 
@@ -2793,10 +2975,10 @@ def submit_for_approval(entry_id):
     # and an Interesting Case has no consultant field at all. The free-text
     # consultant stays as the record of who supervised, which is not always
     # the same person who signs it off.
-    approver = _valid_approver(db, body.get("approverUsername"))
-    if not approver:
-        return jsonify({"error": "Pick an active consultant to send this to."}), 400
-    ok, err, code = _submit_one(db, entry_id, approver["username"], body.get("comment"))
+    target, terr, extra = doctors_mod.resolve_approver(db, body, perms, _valid_approver)
+    if not target:
+        return jsonify(dict({"error": terr}, **(extra or {}))), (409 if extra else 400)
+    ok, err, code = _submit_one(db, entry_id, target, body.get("comment"))
     if not ok:
         db.rollback()
         return jsonify(err), code
@@ -2837,12 +3019,12 @@ def bulk_submit_for_approval():
     if len(ids) > 200:
         return jsonify({"error": "Send at most 200 records at a time."}), 400
     db = get_db()
-    approver = _valid_approver(db, body.get("approverUsername"))
-    if not approver:
-        return jsonify({"error": "Pick an active consultant to send these to."}), 400
+    target, terr, extra = doctors_mod.resolve_approver(db, body, perms, _valid_approver)
+    if not target:
+        return jsonify(dict({"error": terr}, **(extra or {}))), (409 if extra else 400)
     done, skipped = [], []
     for eid in _entry_ids(ids):
-        ok, err, _ = _submit_one(db, eid, approver["username"], body.get("comment"))
+        ok, err, _ = _submit_one(db, eid, target, body.get("comment"))
         (done if ok else skipped).append(
             eid if ok else {"id": eid, "reason": (err or {}).get("error")})
     db.commit()
@@ -2885,10 +3067,10 @@ def _decide(entry_id, action, require_comment):
     if row["approval_state"] not in ("pending", "approved"):
         return jsonify({"error": "This record is not awaiting a decision."}), 409
     if action == "approved":
-        _log_approval(db, entry_id, "approved", g.user, comment=comment, on_behalf_of=on_behalf)
+        _log_approval(db, entry_id, "approved", g.user, comment=comment, on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
         _set_approval(db, entry_id, "approved")
     else:
-        _log_approval(db, entry_id, "changes_requested", g.user, comment=comment, on_behalf_of=on_behalf)
+        _log_approval(db, entry_id, "changes_requested", g.user, comment=comment, on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
         _set_approval(db, entry_id, "changes_requested")
     db.commit()
     return jsonify({"entry": entry_row_to_dict(
@@ -2932,7 +3114,7 @@ def bulk_approve():
             skipped.append({"id": eid, "reason": "forbidden"}); continue
         if row["approval_state"] != "pending":
             skipped.append({"id": eid, "reason": "not_pending"}); continue
-        _log_approval(db, eid, "approved", g.user, comment=body.get("comment"), on_behalf_of=on_behalf)
+        _log_approval(db, eid, "approved", g.user, comment=body.get("comment"), on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
         _set_approval(db, eid, "approved")
         done.append(eid)
     db.commit()
@@ -2956,7 +3138,7 @@ def release_entry(entry_id):
         return jsonify({"error": "forbidden"}), 403
     if row["approval_state"] != "approved":
         return jsonify({"error": "This record is not locked."}), 409
-    _log_approval(db, entry_id, "released", g.user, comment=body.get("comment"), on_behalf_of=on_behalf)
+    _log_approval(db, entry_id, "released", g.user, comment=body.get("comment"), on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
     _set_approval(db, entry_id, "changes_requested")
     db.commit()
     return jsonify({"ok": True})
@@ -3039,12 +3221,17 @@ def approval_queue():
                              if h["action"] == "submitted"), r["created_at"])
         item = entry_row_to_dict(r)
         item["authorDisplayName"] = _display_name(db, r["author_username"])
-        item["approverDisplayName"] = _display_name(db, r["approver_username"])
+        item["approverDisplayName"] = (_display_name(db, r["approver_username"])
+                                       if r["approver_username"] else r["approver_name"])
+        # Nominee with no account: only a Head of Unit / the HOD sees it, as
+        # a delegate, until the doctor has an account.
+        item["nomineeHasNoAccount"] = bool(not r["approver_username"] and r["approver_name"])
         item["submittedAt"] = submitted_at
         item["waitingDays"] = _days_since(submitted_at)
         item["overdue"] = item["waitingDays"] >= limit
         item["unlockRequested"] = any(h["action"] == "unlock_requested" for h in hist)
         item["onBehalfOf"] = None if own else r["approver_username"]
+        item["onBehalfLabel"] = None if own else (item["approverDisplayName"] if not r["approver_username"] else None)
         (mine if own else delegated).append(item)
     return jsonify({"queue": mine, "delegated": delegated, "escalationDays": limit})
 
@@ -3113,7 +3300,10 @@ def approval_summary():
                     overdue.append({
                         "id": r["id"], "author": _display_name(db, r["author_username"]),
                         "unit": r["unit"],
-                        "approver": _display_name(db, r["approver_username"]), "waitingDays": days,
+                        "approver": (_display_name(db, r["approver_username"]) if r["approver_username"]
+                                     else (r["approver_name"] or None)),
+                        "nomineeHasNoAccount": bool(not r["approver_username"] and r["approver_name"]),
+                        "waitingDays": days,
                         "entryType": r["entry_type"], "date": r["entry_date"],
                     })
             overdue.sort(key=lambda o: -o["waitingDays"])

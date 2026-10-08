@@ -91,6 +91,10 @@ _DELEGABLE = [
     ("config.edit_lists", "department", "Edit the dropdown lists",
      "Diagnoses, procedures, designations, sign-off escalation days and the rest of Manage Lists, except units.", False),
     ("config.edit_units", "department", "Edit the units", "Create, rename and remove units; the orphan report.", False),
+    ("directory.manage", "department", "Manage the doctors list",
+     "Add, edit and retire doctors on the department list, bulk-add by unit, invite a doctor to make an account and decide sign-up claims on a listed name.", False),
+    ("lists.review", "department", "Review typed-in names and starter lists",
+     "See what people typed into the diagnosis, procedure and doctor boxes and promote it to the lists; apply starter lists.", False),
     # ---- data ----------------------------------------------------------
     ("data.export_all", "data", "Export the whole logbook", "Every entry in the department.", False),
     ("data.export_users", "data", "Export the user list", "", False),
@@ -183,7 +187,8 @@ DEFAULT_TEMPLATES = {
            "accounts.deactivate": "all", "accounts.delete": "all",
            "accounts.requests_view": "all", "accounts.decide_trainee_closure": "all",
            "accounts.decide_other_closure": "all", "accounts.view_events": "all",
-           "postings.assign_others": "all", "feedback.manage": "all"}),
+           "postings.assign_others": "all", "feedback.manage": "all",
+           "directory.manage": "all", "lists.review": "all"}),
     "coordinator": dict(
         _ALL_VIEW,
         **{"signoff.delegate": "all",
