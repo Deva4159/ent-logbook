@@ -54,56 +54,56 @@ TRAINEE_ROLES = {"resident", "senior_resident", "fellow"}
 _DELEGABLE = [
     # ---- viewing -------------------------------------------------------
     ("view.roster", "view", "See the trainee roster",
-     "List trainees posted to the units in scope, with their counts and current unit.", True),
-    ("view.records", "view", "Open a trainee's records",
-     "Open a trainee's page: their case records and postings for the units in scope.", True),
+     "Lists the trainees posted to the permitted units, with their entry counts and current unit.", True),
+    ("view.records", "view", "Open a trainee’s records",
+     "Opens a trainee’s page: their case records and postings for the permitted units.", True),
     ("view.teaching", "view", "See Academic and Seminar entries",
-     "Without this, a trainee's teaching entries are withheld by the server, not just hidden on screen.", False),
-    ("view.history", "view", "Read an entry's edit history",
-     "Who changed what, and when, on entries in scope.", True),
+     "Without this, the server withholds a trainee’s teaching entries. They are not just hidden on screen.", False),
+    ("view.history", "view", "Read an entry’s edit history",
+     "Who changed what, and when, on entries the person can see.", True),
     ("view.escalations", "view", "See overdue sign-offs",
-     "Records waiting longer than the escalation threshold, in scope.", True),
-    ("export.scoped", "view", "Export records in scope to CSV",
-     "Download the records this person is allowed to see.", True),
-    ("entries.edit_others", "view", "Correct other people's entries",
-     "Edit or delete a trainee's entry. Every change is logged against the editor; a signed-off record stays locked.", True),
+     "Records that have waited longer than the overdue limit, in the permitted units.", True),
+    ("export.scoped", "view", "Export the records they can see to CSV",
+     "Downloads the records this person is allowed to see.", True),
+    ("entries.edit_others", "view", "Correct other people’s entries",
+     "Edit or delete a trainee’s entry. Every change is logged against the editor. A signed-off record stays locked.", True),
     # ---- sign-off ------------------------------------------------------
-    ("signoff.approve", "signoff", "Be a sign-off approver",
-     "Be named as approver on a record, and approve or request changes on it. Never on their own record.", False),
-    ("signoff.delegate", "signoff", "Sign off for an absent approver",
-     "Act on records that name someone else, in scope. Recorded as a delegate action, not the approver's own.", True),
+    ("signoff.approve", "signoff", "Sign off trainees’ records",
+     "Be named as the approver on a record, then approve it or ask for changes. Never on their own record.", False),
+    ("signoff.delegate", "signoff", "Sign off for a colleague who is away",
+     "Act on records that name someone else, in the permitted units. The record shows a delegate acted, not the named approver.", True),
     # ---- accounts ------------------------------------------------------
-    ("accounts.approve_trainees", "accounts", "Approve Resident / Senior Resident sign-ups", "", False),
+    ("accounts.approve_trainees", "accounts", "Approve PG Resident and Senior Resident sign-ups", "", False),
     ("accounts.approve_fellows", "accounts", "Approve Fellow sign-ups", "", False),
     ("accounts.approve_consultants", "accounts", "Approve Consultant sign-ups", "", False),
     ("accounts.view_directory", "accounts", "See the full user list", "The Manage Users list.", False),
-    ("accounts.edit_profile", "accounts", "Edit a trainee's course, batch and unit", "", False),
+    ("accounts.edit_profile", "accounts", "Edit a trainee’s course, batch and unit", "", False),
     ("accounts.deactivate", "accounts", "Deactivate or reactivate accounts", "", False),
-    ("accounts.delete", "accounts", "Delete accounts, or open a closure request for someone", "", False),
-    ("accounts.requests_view", "accounts", "See account requests", "Deactivations and closures waiting or in their buffer.", False),
-    ("accounts.decide_trainee_closure", "accounts", "Decide a trainee's closure",
-     "A trainee's logbook is certification evidence, so this is its own permission.", False),
-    ("accounts.decide_other_closure", "accounts", "Decide a closure for anyone else", "", False),
-    ("accounts.view_events", "accounts", "Read an account's event log", "", False),
+    ("accounts.delete", "accounts", "Delete accounts, or start a closure request for someone else", "", False),
+    ("accounts.requests_view", "accounts", "See account requests", "Deactivations, and closures that are waiting or counting down.", False),
+    ("accounts.decide_trainee_closure", "accounts", "Approve or refuse a trainee’s account closure",
+     "A trainee’s logbook is evidence for certification, so this has its own permission.", False),
+    ("accounts.decide_other_closure", "accounts", "Approve or refuse a closure for anyone else", "", False),
+    ("accounts.view_events", "accounts", "Read an account’s event log", "", False),
     # ---- department ----------------------------------------------------
-    ("postings.assign_others", "department", "Set other people's postings", "Single and bulk.", False),
+    ("postings.assign_others", "department", "Set other people’s postings", "For one person or a whole group.", False),
     ("feedback.manage", "department", "Read and manage feedback", "Inbox, status and internal notes.", False),
     ("config.edit_lists", "department", "Edit the dropdown lists",
-     "Diagnoses, procedures, designations, sign-off escalation days and the rest of Manage Lists, except units.", False),
-    ("config.edit_units", "department", "Edit the units", "Create, rename and remove units; the orphan report.", False),
+     "Diagnoses, procedures, designations, the overdue limit for sign-offs and the rest of Manage Lists, except units.", False),
+    ("config.edit_units", "department", "Edit the units", "Create, rename and remove units, and see the report of records with no unit.", False),
     ("directory.manage", "department", "Manage the doctors list",
-     "Add, edit and retire doctors on the department list, bulk-add by unit, invite a doctor to make an account and decide sign-up claims on a listed name.", False),
-    ("lists.review", "department", "Review typed-in names and starter lists",
-     "See what people typed into the diagnosis, procedure and doctor boxes and promote it to the lists; apply starter lists.", False),
+     "Add, edit and retire doctors on the department list, add many at once by unit, invite a doctor to make an account and decide sign-up claims on a listed name.", False),
+    ("lists.review", "department", "Review typed-in entries and starter lists",
+     "See what people typed into the diagnosis, procedure and doctor boxes and add it to the lists. Apply starter lists.", False),
     # ---- data ----------------------------------------------------------
     ("data.export_all", "data", "Export the whole logbook", "Every entry in the department.", False),
     ("data.export_users", "data", "Export the user list", "", False),
 ]
 
 # Permissions the Developer deliberately does NOT hold, so that one person
-# cannot both start and settle the same decision. A trainee's logbook is
-# certification evidence; closing the account is the Head of Department's
-# call, not an administrator's (decided when account closure was built).
+# cannot both start and settle the same decision. A trainee’s logbook is
+# certification evidence; closing the account is the Head of Department’s
+# call, not an administrator’s (decided when account closure was built).
 # The Developer can still give it to a consultant, which is how a department
 # without a sitting HOD would handle it.
 SEPARATED = {"accounts.decide_trainee_closure"}
@@ -111,16 +111,16 @@ SEPARATED = {"accounts.decide_trainee_closure"}
 # Developer-only, forever. Listed so the panel can show them honestly as
 # locked rather than leaving the impression the catalogue is complete.
 _RESERVED = [
-    ("perms.manage", "reserved", "Change anyone's permissions", "This panel."),
-    ("accounts.change_role", "reserved", "Change an account's kind (Resident, Consultant, Developer…)", ""),
-    ("accounts.edit_designation", "reserved", "Change a consultant's designation", "Designation can act as an access grant (Professor)."),
-    ("accounts.reset_password", "reserved", "Reset anyone's password", ""),
-    ("accounts.rename", "reserved", "Change a username or display name", "Renaming rewrites every record that mentions the person."),
-    ("accounts.restore", "reserved", "Restore a closed account, read the archive", ""),
-    ("appointments.manage", "reserved", "Appoint HOD / Coordinator / Head of Unit", "An appointment is a bundle of permissions."),
+    ("perms.manage", "reserved", "Change anyone’s permissions", "The Permissions screen."),
+    ("accounts.change_role", "reserved", "Change an account’s type (Resident, Consultant, Developer)", ""),
+    ("accounts.edit_designation", "reserved", "Change a consultant’s designation", "A designation can give access (for example Professor)."),
+    ("accounts.reset_password", "reserved", "Reset anyone’s password", ""),
+    ("accounts.rename", "reserved", "Change a username or display name", "A rename updates every record that mentions the person."),
+    ("accounts.restore", "reserved", "Restore a closed account and read its archive", ""),
+    ("appointments.manage", "reserved", "Appoint the Head of Department, Coordinators and Heads of Unit", "An appointment gives a set of permissions."),
     ("alerts.compose", "reserved", "Create alerts and set the alert rules", ""),
     ("courses.manage", "reserved", "Create and edit courses", ""),
-    ("backup.manage", "reserved", "Download and restore backups", "A backup contains every password hash and every record."),
+    ("backup.manage", "reserved", "Download and restore backups", "A backup holds every password hash and every record."),
 ]
 
 CATALOGUE = (
