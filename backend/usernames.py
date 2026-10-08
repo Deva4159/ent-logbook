@@ -79,6 +79,14 @@ USERNAME_COLUMNS = [
     ("doctor_claims", "username", None),
     ("doctor_claims", "requested_by", None),
     ("doctor_claims", "decided_by", None),
+    ("stage_history", "username", None),
+    ("stage_history", "completed_by", None),
+    ("stage_history", "reopened_by", None),
+    ("stage_history", "moved_by", None),
+    ("consultant_postings", "username", None),
+    ("consultant_postings", "created_by", None),
+    ("unit_requests", "requester", None),
+    ("unit_requests", "decided_by", None),
 ]
 
 # Columns that look like usernames and are not, or are deliberately left.

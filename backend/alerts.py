@@ -297,7 +297,7 @@ def _wanted(db, rules):
     trainees = db.execute(
         "SELECT username, display_name, role, course_id, joined_ym, unit FROM users"
         " WHERE role IN ('resident','senior_resident','fellow') AND approval_status = 'approved'"
-        " AND active = 1 AND lifecycle = 'active'").fetchall()
+        " AND active = 1 AND lifecycle = 'active' AND stage_status = 'active'").fetchall()
     tnames = {t["username"]: t["display_name"] for t in trainees}
 
     # -- postings ending ------------------------------------------------

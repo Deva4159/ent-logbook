@@ -502,6 +502,11 @@ def picker(db, perms_mod, unit=None, date=None):
         in_unit |= {r["id"] for r in db.execute(
             "SELECT d.id FROM doctors d JOIN users u ON u.username = d.linked_username WHERE u.unit = ?",
             (unit,))}
+        # consultants rotated into this unit (v7.7)
+        in_unit |= {r["id"] for r in db.execute(
+            "SELECT d.id FROM doctors d JOIN consultant_postings p ON p.username = d.linked_username"
+            " WHERE p.unit = ? AND p.start_date <= ? AND (p.end_date IS NULL OR p.end_date >= ?)",
+            (unit, date, date))}
     rows = db.execute("SELECT * FROM doctors WHERE status = 'active'").fetchall()
     out = []
     for r in rows:

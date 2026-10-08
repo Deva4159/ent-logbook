@@ -482,3 +482,60 @@ CREATE TABLE IF NOT EXISTS doctor_claims (
 -- second invite, is refused by the database itself, not just by a check.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_claims_open ON doctor_claims(doctor_id) WHERE state IN ('pending','invited');
 CREATE INDEX IF NOT EXISTS idx_claims_user ON doctor_claims(username);
+
+-- v7.7: stages. A stage is one period on one course (PG, Senior Residency,
+-- Fellowship). Finishing it saves a summary here and closes that stage's
+-- entries (entries.stage_id), so they stay as a read-only record under the
+-- same login. `username` columns are plain TEXT, like the other history tables.
+CREATE TABLE IF NOT EXISTS stage_history (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL,
+  role          TEXT NOT NULL,
+  course_id     TEXT,
+  course_name   TEXT,
+  joined_ym     TEXT,
+  completed_at  TEXT NOT NULL,
+  completed_by  TEXT NOT NULL,
+  note          TEXT,
+  summary       TEXT NOT NULL,
+  reopened_at   TEXT,
+  reopened_by   TEXT,
+  moved_to_role TEXT,
+  moved_at      TEXT,
+  moved_by      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stage_user ON stage_history(username);
+
+-- v7.7: where a consultant is posted, and requests to change it.
+CREATE TABLE IF NOT EXISTS consultant_postings (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  username    TEXT NOT NULL,
+  unit        TEXT NOT NULL,
+  start_date  TEXT NOT NULL,
+  end_date    TEXT,
+  created_by  TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  request_id  INTEGER,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cpost_user ON consultant_postings(username, start_date);
+CREATE INDEX IF NOT EXISTS idx_cpost_unit ON consultant_postings(unit, start_date);
+
+CREATE TABLE IF NOT EXISTS unit_requests (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  requester      TEXT NOT NULL,
+  from_unit      TEXT,
+  to_unit        TEXT NOT NULL,
+  start_date     TEXT NOT NULL,
+  end_date       TEXT,
+  reason         TEXT,
+  status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','approved','declined','withdrawn')),
+  decided_by     TEXT,
+  decided_at     TEXT,
+  decision_note  TEXT,
+  posting_id     INTEGER,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ureq_status ON unit_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_ureq_user ON unit_requests(requester);

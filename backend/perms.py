@@ -85,8 +85,12 @@ _DELEGABLE = [
      "A trainee’s logbook is evidence for certification, so this has its own permission.", False),
     ("accounts.decide_other_closure", "accounts", "Approve or refuse a closure for anyone else", "", False),
     ("accounts.view_events", "accounts", "Read an account’s event log", "", False),
+    ("accounts.change_stage", "accounts", "Complete a stage and move a person on",
+     "Finish a trainee’s course, keep their records read-only, and move them to Senior Resident, Fellow or Consultant. The Professor designation can never be set this way.", False),
     # ---- department ----------------------------------------------------
     ("postings.assign_others", "department", "Set other people’s postings", "For one person or a whole group.", False),
+    ("postings.decide_consultant", "department", "Decide consultants’ unit requests and set their postings",
+     "See requests from consultants to move to another unit, approve or decline them, and set a consultant’s unit posting directly. “Unit” means the unit they would be posted to.", True),
     ("feedback.manage", "department", "Read and manage feedback", "Inbox, status and internal notes.", False),
     ("config.edit_lists", "department", "Edit the dropdown lists",
      "Diagnoses, procedures, designations, the overdue limit for sign-offs and the rest of Manage Lists, except units.", False),
@@ -169,6 +173,7 @@ TEMPLATE_META = {
     "coordinator": ("Course Coordinator", "Held through a Coordinator appointment."),
     "head_of_unit": ("Head of Unit", "Held through a Head of Unit appointment; “unit” means the unit appointed to."),
     "professor": ("Professor (designation)", "Every consultant whose designation is exactly “Professor”; “unit” means their home unit."),
+    "posted_consultant": ("Consultant posted to a unit", "Applies to a consultant while they have a dated unit posting; “unit” means the unit they are posted to."),
     "consultant": ("Every consultant", "Baseline for every consultant account."),
     "fellow": ("Every fellow", "Baseline for every fellow account. Only view, export and sign-off permissions can be given."),
 }
@@ -188,7 +193,8 @@ DEFAULT_TEMPLATES = {
            "accounts.requests_view": "all", "accounts.decide_trainee_closure": "all",
            "accounts.decide_other_closure": "all", "accounts.view_events": "all",
            "postings.assign_others": "all", "feedback.manage": "all",
-           "directory.manage": "all", "lists.review": "all"}),
+           "directory.manage": "all", "lists.review": "all",
+           "accounts.change_stage": "all", "postings.decide_consultant": "all"}),
     "coordinator": dict(
         _ALL_VIEW,
         **{"signoff.delegate": "all",
@@ -200,8 +206,10 @@ DEFAULT_TEMPLATES = {
         "view.roster": "unit", "view.records": "unit", "view.history": "unit",
         "view.escalations": "unit", "export.scoped": "unit",
         "signoff.delegate": "unit", "accounts.approve_fellows": "all",
+        "postings.decide_consultant": "unit",
     },
     "professor": {"view.roster": "unit", "view.records": "unit", "export.scoped": "unit"},
+    "posted_consultant": {"view.roster": "unit", "view.records": "unit"},
     "consultant": {"signoff.approve": "all"},
     "fellow": {},
 }
@@ -410,6 +418,15 @@ def is_assignment_active(a):
     return True
 
 
+def active_consultant_postings(username, on=None):
+    """A consultant's unit postings that cover today (or `on`)."""
+    on = on or datetime.date.today().isoformat()
+    rows = get_db().execute(
+        "SELECT * FROM consultant_postings WHERE username = ? AND start_date <= ?"
+        " AND (end_date IS NULL OR end_date >= ?)", (username, on, on)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def active_role_assignments(username):
     db = get_db()
     rows = db.execute("SELECT * FROM role_assignments WHERE consultant_username = ?", (username,)).fetchall()
@@ -495,6 +512,8 @@ def compute(username):
             apply(key, units, label)
         if (row["designation"] or "").strip().lower() == "professor":
             apply("professor", home, "Professor designation")
+        for p in active_consultant_postings(username):
+            apply("posted_consultant", [p["unit"]], "Posted to " + p["unit"])
         apply("consultant", home, "Every consultant")
     elif role == "fellow":
         apply("fellow", home, "Every fellow")

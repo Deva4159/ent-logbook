@@ -20,6 +20,7 @@ from auth import (
 from db import get_db
 import courses as courses_mod
 import doctors as doctors_mod
+import stages as stages_mod
 import perms
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -208,6 +209,7 @@ def row_to_user(row, contact=False):
         "joinedYm": d.get("joined_ym"),
         "study": study,
         "tourSeen": d.get("tour_seen"),
+        "stageStatus": d.get("stage_status") or "active",
     }
     if contact:
         out["email"] = d.get("email")
@@ -329,6 +331,7 @@ def entry_row_to_dict(row):
     return {
         "id": d["id"],
         "authorUsername": d["author_username"],
+        "stageId": d.get("stage_id"),
         "entryType": d["entry_type"],
         "unit": d["unit"],
         "date": d["entry_date"],
@@ -616,7 +619,10 @@ def user_capabilities(username):
     row = db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
     mine = _active_role_assignments(username)
     pm = perms.public_map(username)
+    # A consultant who once trained here has records to look back on (Archive).
+    has_archive = bool(row and row["role"] == "consultant" and stages_mod.has_archive(db, username))
     return {
+        "hasArchive": has_archive,
         "isDeveloper": bool(row and row["role"] == "developer"),
         "isHod": any(a["assignment_role"] == "hod" for a in mine),
         "isCoordinator": any(a["assignment_role"] == "coordinator" for a in mine),
@@ -878,6 +884,25 @@ def forgot_password():
     return jsonify({"ok": True})
 
 
+# ------------------------------------------------------------------ stages
+STAGE_CLOSED = {
+    "error": "stage_closed",
+    "detail": "This record belongs to a finished stage of training and is read-only.",
+}
+
+
+def _author_completed(db, username):
+    """A trainee whose stage is complete cannot add anything new until the
+    Head of Department moves them on."""
+    r = db.execute("SELECT stage_status, role FROM users WHERE username = ?", (username,)).fetchone()
+    return bool(r and r["role"] in TRAINEE_ROLES and (r["stage_status"] or "active") == "completed")
+
+
+STAGE_DONE_MSG = {"error": "stage_completed",
+                  "detail": "Your stage of training is complete, so your records are read-only. "
+                            "The Head of Department can move you to your next stage."}
+
+
 # --------------------------------------------------------------- postings
 @api.get("/postings")
 @login_required()
@@ -946,6 +971,8 @@ def add_posting():
     if err:
         return jsonify({"error": err}), 400
     db = get_db()
+    if _author_completed(db, g.user["username"]):
+        return jsonify(STAGE_DONE_MSG), 403
     if not body.get("allowOverlap"):
         clash = _overlapping_postings(db, g.user["username"], start_date, end_date)
         if clash:
@@ -1135,6 +1162,8 @@ def remove_posting(posting_id):
     row = db.execute("SELECT username FROM postings WHERE id = ?", (posting_id,)).fetchone()
     if not row or row["username"] != g.user["username"]:
         return jsonify({"error": "not_found"}), 404
+    if _author_completed(db, g.user["username"]):
+        return jsonify(STAGE_DONE_MSG), 403
     db.execute("DELETE FROM postings WHERE id = ?", (posting_id,))
     db.commit()
     return jsonify({"postings": get_postings(g.user["username"])})
@@ -1158,6 +1187,8 @@ def create_entry():
     now = datetime.datetime.utcnow().isoformat() + "Z"
 
     db = get_db()
+    if _author_completed(db, g.user["username"]):
+        return jsonify(STAGE_DONE_MSG), 403
     linked_from_id = _linked_entry_id(db, body.get("linkedFromId"), g.user["username"])
     consultant_doctor_id, involved_json = doctors_mod.resolve_people(db, body, perms)
     # A case entry linked to a surgical entry starts its PG paper-writeup
@@ -1336,11 +1367,13 @@ def get_entry(entry_id):
 @login_required()
 def delete_entry(entry_id):
     db = get_db()
-    row = db.execute("SELECT author_username, approval_state, unit, status FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    row = db.execute("SELECT author_username, approval_state, unit, status, stage_id FROM entries WHERE id = ?", (entry_id,)).fetchone()
     if not row:
         return jsonify({"error": "not_found"}), 404
     if not _may_edit_entry(g.user, row):
         return jsonify({"error": "forbidden"}), 403
+    if row["stage_id"] is not None and g.user["role"] != "developer":
+        return jsonify(STAGE_CLOSED), 409
     # Nobody hard-deletes an attested record -- not the author, not a
     # developer. entry_approvals is ON DELETE CASCADE, so a delete here does
     # not just remove the case: it removes the consultant's signature and the
@@ -1375,6 +1408,8 @@ def update_entry(entry_id):
         return jsonify({"error": "not_found"}), 404
     if not _may_edit_entry(g.user, existing):
         return jsonify({"error": "forbidden"}), 403
+    if existing["stage_id"] is not None and g.user["role"] != "developer":
+        return jsonify(STAGE_CLOSED), 409
 
     body = _sanitise_entry_body(request.get_json(force=True, silent=True) or {})
     # A developer may fix a trainee's finalised entry, but a draft is the
@@ -2457,6 +2492,8 @@ def delete_user(username):
                      "Deleting the account would permanently delete that training record too. "
                      "Deactivate the account instead to block sign-in while keeping their history.",
         }), 409
+    for t, c in (("stage_history", "username"), ("consultant_postings", "username"), ("unit_requests", "requester")):
+        db.execute("DELETE FROM %s WHERE %s = ?" % (t, c), (username,))
     db.execute("DELETE FROM users WHERE username = ?", (username,))
     db.commit()
     return jsonify({"ok": True})
@@ -2928,6 +2965,8 @@ def _submit_one(db, entry_id, target, comment=None):
         return False, {"error": "not_found"}, 404
     if row["author_username"] != g.user["username"]:
         return False, {"error": "forbidden"}, 403
+    if row["stage_id"] is not None:
+        return False, dict(STAGE_CLOSED), 409
     if row["entry_type"] not in APPROVABLE_TYPES:
         return False, {"error": "Only operative records and case write-ups are approved."}, 400
     if target.get("username") == g.user["username"]:
@@ -3041,6 +3080,8 @@ def withdraw_from_approval(entry_id):
         return jsonify({"error": "not_found"}), 404
     if row["author_username"] != g.user["username"]:
         return jsonify({"error": "forbidden"}), 403
+    if row["stage_id"] is not None:
+        return jsonify(STAGE_CLOSED), 409
     if row["approval_state"] not in ("pending", "changes_requested"):
         return jsonify({"error": "Nothing to withdraw."}), 409
     _log_approval(db, entry_id, "withdrawn", g.user)
@@ -3067,6 +3108,12 @@ def _decide(entry_id, action, require_comment):
         return jsonify({"error": "This record is already signed off."}), 409
     if row["approval_state"] not in ("pending", "approved"):
         return jsonify({"error": "This record is not awaiting a decision."}), 409
+    if row["stage_id"] is not None and action != "approved":
+        # The author can no longer edit a record from a finished stage, so
+        # sending it back would leave it stuck. It can only be approved.
+        return jsonify({"error": "stage_closed",
+                        "detail": "This record belongs to a finished stage and can no longer be corrected. "
+                                  "You can approve it as it is."}), 409
     if action == "approved":
         _log_approval(db, entry_id, "approved", g.user, comment=comment, on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
         _set_approval(db, entry_id, "approved")
@@ -3139,6 +3186,8 @@ def release_entry(entry_id):
         return jsonify({"error": "forbidden"}), 403
     if row["approval_state"] != "approved":
         return jsonify({"error": "This record is not locked."}), 409
+    if row["stage_id"] is not None:
+        return jsonify(STAGE_CLOSED), 409
     _log_approval(db, entry_id, "released", g.user, comment=body.get("comment"), on_behalf_of=on_behalf, on_behalf_label=_nominee_label(row, on_behalf))
     _set_approval(db, entry_id, "changes_requested")
     db.commit()
@@ -3160,6 +3209,8 @@ def request_unlock(entry_id):
         return jsonify({"error": "forbidden"}), 403
     if row["approval_state"] != "approved":
         return jsonify({"error": "This record is not locked."}), 409
+    if row["stage_id"] is not None:
+        return jsonify(STAGE_CLOSED), 409
     # Same reasoning as request-changes: an unlock request with no reason
     # lands in a consultant's queue as a bare flag they have to chase.
     comment = str(body.get("comment") or "").strip()

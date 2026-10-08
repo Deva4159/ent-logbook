@@ -330,6 +330,22 @@ def migrate_v76(conn):
     conn.commit()
 
 
+def migrate_v77(conn):
+    """v7.7: stage status on the account, and which finished stage an entry
+    belongs to (NULL = the stage the person is on now)."""
+    tables = _existing_tables(conn)
+    if "users" in tables:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "stage_status" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stage_status TEXT NOT NULL DEFAULT 'active'")
+    if "entries" in tables:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+        if "stage_id" not in cols:
+            conn.execute("ALTER TABLE entries ADD COLUMN stage_id INTEGER")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_stage ON entries(author_username, stage_id)")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -346,6 +362,7 @@ def init_db():
     migrate_v74(conn)
     migrate_v75(conn)
     migrate_v76(conn)
+    migrate_v77(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))
