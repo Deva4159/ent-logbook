@@ -5231,6 +5231,15 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.7.1", date: "2026-10-09", title: "Visual refresh: calmer colour, native type",
+      note: "Styling only. No database change and no new permissions. Replace static/index.html, static/styles.css and backend/app.py (tightened Content-Security-Policy).",
+      changes: [
+        ["changed", "<b>New colour palette.</b> The brand accent moves from teal to a calmer blue; the amber, red, green and violet status colours were re-tuned and checked against WCAG AA contrast rather than picked by eye. The per-site category colours (ear, nose, throat, head &amp; neck, skull base, trauma) are unchanged."],
+        ["changed", "<b>Type is now the device’s own font</b> (San Francisco, Segoe UI or Roboto, depending on what you’re signed in on) instead of a web font fetched from Google Fonts on every page load. It renders at once on a slow or filtered hospital connection — there is nothing to wait on and nothing to fall back from."],
+        ["changed", "<b>The Content-Security-Policy is tighter.</b> Nothing on this page is fetched from an external host any more."]
+      ]
+    },
+    {
       version: "7.7", date: "2026-10-09", title: "Training stages, Archive and consultant unit postings",
       note: "Adds three tables and two columns; they are created automatically on start-up. Replace the whole backend and static folders. Take a backup first.",
       changes: [
