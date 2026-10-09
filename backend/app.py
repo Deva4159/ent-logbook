@@ -36,9 +36,13 @@ def set_security_headers(resp):
     resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     # Frontend is one self-contained HTML file, same-origin only -- a tight
     # CSP is cheap here and blocks most injected-script attack paths.
+    # 2026.2: type is the OS's own UI font now (see index.html), so there is
+    # no longer a Google Fonts request to allow -- style-src/font-src are
+    # 'self' only, which also means a future CSP regression can't quietly
+    # reopen a path to an external host here.
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; script-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'"
     )
     if request.is_secure:
