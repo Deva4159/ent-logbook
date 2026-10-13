@@ -45,6 +45,58 @@ DEFAULT_COURSES = [
 ]
 ROLE_DEFAULT_COURSE = {"resident": "pg", "senior_resident": "sr", "fellow": "fellowship"}
 
+# Named Post-Doctoral Fellowship programmes (v7.8), added alongside the
+# generic "Fellowship" placeholder above rather than replacing it -- existing
+# fellow accounts stay on "Fellowship" until whoever manages courses moves
+# each one to the specific programme they are actually on (Courses -> a
+# course's People -> change course), since the app has no way to infer which
+# named programme an already-enrolled fellow belongs to.
+#
+# NOTE: as given to the department, "ENT 4" was used for both Implant
+# Otology and Audio-Vestibular Medicine, and Audio-Vestibular Medicine's
+# duration was not stated. Seeded here as given (both numbered ENT 4; AVM
+# defaulted to 24 months to match the other five) -- flagged for the
+# department to confirm and correct the numbering/duration from
+# Developer -> Courses once live, which does not require a code change.
+FELLOWSHIP_PROGRAMS = [
+    {"id": "fellowship-skull-base", "name": "ENT 1 - Skull Base Surgery", "short_name": "Skull Base",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship."},
+    {"id": "fellowship-paediatric-ent", "name": "ENT 2 - Paediatric ENT", "short_name": "Paed ENT",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship."},
+    {"id": "fellowship-rhinology", "name": "ENT 3 - Rhinology", "short_name": "Rhinology",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship."},
+    {"id": "fellowship-implant-otology", "name": "ENT 4 - Implant Otology", "short_name": "Implant Otology",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship. Numbered ENT 4 as given -- "
+     "confirm against Audio-Vestibular Medicine, also given as ENT 4."},
+    {"id": "fellowship-avm", "name": "ENT 4 - Audio-Vestibular Medicine", "short_name": "Audio-Vestibular",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship. Duration not specified when added; "
+     "defaulted to 24 months to match the other named fellowships -- confirm. Numbered ENT 4 as given -- "
+     "confirm against Implant Otology, also given as ENT 4."},
+    {"id": "fellowship-laryngology", "name": "ENT 5 - Laryngology & Phono-Surgery", "short_name": "Laryngology",
+     "duration_months": 24, "notes": "Post-Doctoral Fellowship."},
+]
+
+
+def seed_fellowship_programs(conn):
+    """Idempotent, additive: adds the named fellowship programmes once, never
+    touching the generic 'fellowship' course or anyone already enrolled.
+    Runs every boot (cheap -- one query) so a programme added here in a
+    later update still appears for a department whose config predates it."""
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    existing = {r["id"] for r in conn.execute("SELECT id FROM courses").fetchall()}
+    nxt = (conn.execute("SELECT COALESCE(MAX(sort), 0) m FROM courses").fetchone()["m"] or 0) + 1
+    for c in FELLOWSHIP_PROGRAMS:
+        if c["id"] in existing:
+            continue
+        conn.execute(
+            "INSERT INTO courses (id, name, short_name, role, duration_months, scope, units,"
+            " allow_peripheral, peripheral_units, year_labels, start_month, notes, active, sort,"
+            " created_at) VALUES (?,?,?,'fellow',?,'units','[]',1,'[]',?,1,?,1,?,?)",
+            (c["id"], c["name"], c["short_name"], c["duration_months"],
+             json.dumps(["Fellow"]), c["notes"], nxt, now))
+        nxt += 1
+    conn.commit()
+
 
 def _j(v, default):
     try:
@@ -145,18 +197,27 @@ def normalise_join(value, start_month=1):
     return "%04d-%02d" % p, None
 
 
-def progress(course, joined_ym, today=None):
+def progress(course, joined_ym, today=None, extra_months=0):
     """Where a trainee is in their course. None when it cannot be known.
 
     Whole months from the START of the joining month: someone who joined in
     August is in Year 1 from August until the following July.
+
+    `extra_months` is a per-person extension on top of the course's own
+    duration (v7.8) -- e.g. a trainee whose study period was formally
+    extended. It is additive, not a replacement, so it survives the
+    underlying course's own duration later changing.
     """
     p = _ym(joined_ym)
     if not course or not p:
         return None
     today = today or datetime.date.today()
     months = (today.year - p[0]) * 12 + (today.month - p[1])
-    total = course["durationMonths"]
+    try:
+        extra_months = max(0, int(extra_months or 0))
+    except (TypeError, ValueError):
+        extra_months = 0
+    total = course["durationMonths"] + extra_months
     years = max(1, math.ceil(total / 12))
     end_total = p[0] * 12 + (p[1] - 1) + total
     end_ym = "%04d-%02d" % (end_total // 12, end_total % 12 + 1)
@@ -174,6 +235,7 @@ def progress(course, joined_ym, today=None):
         "year": year, "years": years, "label": label, "status": status,
         "joinedYm": joined_ym, "expectedEndYm": end_ym,
         "monthsIn": max(0, months), "monthsLeft": max(0, total - max(0, months)),
+        "extraMonths": extra_months,
     }
 
 

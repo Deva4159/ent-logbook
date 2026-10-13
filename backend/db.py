@@ -346,6 +346,26 @@ def migrate_v77(conn):
     conn.commit()
 
 
+def migrate_v78(conn):
+    """v7.8: a per-person extension to a course's duration, for a trainee
+    whose study period is formally extended (illness, research leave, a
+    repeated year). Additive to the course's own duration_months, not a
+    replacement -- if the course itself is later lengthened or shortened,
+    this person's extra time still means the same thing. Settable only by
+    whoever can manage courses (courses.manage)."""
+    if "users" in _existing_tables(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "course_extra_months" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN course_extra_months INTEGER")
+        if "course_extra_reason" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN course_extra_reason TEXT")
+        if "course_extra_set_by" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN course_extra_set_by TEXT")
+        if "course_extra_set_at" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN course_extra_set_at TEXT")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -363,6 +383,7 @@ def init_db():
     migrate_v75(conn)
     migrate_v76(conn)
     migrate_v77(conn)
+    migrate_v78(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))
@@ -384,6 +405,7 @@ def init_db():
     # unit list to decide which units are peripheral.
     import courses as _courses
     _courses.seed_and_backfill(conn)
+    _courses.seed_fellowship_programs(conn)
     # v7.5: every consultant / fellow / senior resident account gets its row on
     # the doctors list. Idempotent; an account that already has a row is skipped.
     import doctors as _doctors

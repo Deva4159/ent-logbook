@@ -188,7 +188,8 @@ def row_to_user(row, contact=False):
         return None
     d = dict(row)
     course = _course_map().get(d.get("course_id")) if d.get("course_id") else None
-    study = courses_mod.progress(course, d.get("joined_ym")) if course else None
+    extra_months = d.get("course_extra_months") or 0
+    study = courses_mod.progress(course, d.get("joined_ym"), extra_months=extra_months) if course else None
     out = {
         "username": d["username"],
         "role": d["role"],
@@ -210,6 +211,8 @@ def row_to_user(row, contact=False):
         "study": study,
         "tourSeen": d.get("tour_seen"),
         "stageStatus": d.get("stage_status") or "active",
+        "courseExtraMonths": extra_months,
+        "courseExtraReason": d.get("course_extra_reason"),
     }
     if contact:
         out["email"] = d.get("email")
@@ -3987,8 +3990,11 @@ def account_overview():
             "lifecycle": _lifecycle_of(me),
             "courseId": me["course_id"], "joinedYm": me["joined_ym"],
             "course": _course_map().get(me["course_id"]) if me["course_id"] else None,
-            "study": (courses_mod.progress(_course_map().get(me["course_id"]), me["joined_ym"])
+            "study": (courses_mod.progress(_course_map().get(me["course_id"]), me["joined_ym"],
+                                            extra_months=me["course_extra_months"] or 0)
                       if me["course_id"] and _course_map().get(me["course_id"]) else None),
+            "courseExtraMonths": me["course_extra_months"] or 0,
+            "courseExtraReason": me["course_extra_reason"],
             "email": me["email"], "phone": me["phone"],
         },
         "myPermissions": [] if me["role"] == "developer" else [
@@ -4326,3 +4332,165 @@ def config_bulk_add():
     db.commit()
     result["config"] = cfg
     return jsonify(result)
+
+
+# v7.8: two names on a Manage Lists pool that turn out to be the same thing
+# in real life -- "CSOM" typed one week, "C.S.O.M." typed another -- split a
+# trainee's history across two spellings forever, because an entry stores
+# the literal string, not a stable id pointing at the list. Scoped to the
+# three pools that are actually built up by free typing over time (the
+# admin picks the correct spelling to keep, same as the UI asks for);
+# roleLevels/laterality/pgYears/etc. are short, admin-ordered enumerations
+# edited through their own small forms, not this one, and units/categories
+# are keyed objects with their own editors already (see NESTED_CONFIG_KEYS,
+# config_bulk_add above) -- merging those would need a different, riskier
+# operation (rewriting every reference to a unit/category *key*, not a
+# plain string) that nobody has asked for.
+MERGEABLE_LISTS = {"diagnoses", "comorbidities", "procedures"}
+
+
+def _merge_rewrite_str_column(db, column, drop_set, keep, where_sql="", where_args=()):
+    """`column` is a JSON string-array column on `entries`. Replaces any
+    name in drop_set with `keep` and de-dupes (an entry may already carry
+    both spellings), leaving untouched rows untouched. Returns the number
+    of rows rewritten."""
+    rows = db.execute(
+        "SELECT id, %s AS val FROM entries%s" % (column, (" WHERE " + where_sql) if where_sql else ""),
+        where_args,
+    ).fetchall()
+    touched = 0
+    for r in rows:
+        try:
+            arr = json.loads(r["val"]) if r["val"] else []
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(arr, list) or not any(x in drop_set for x in arr if isinstance(x, str)):
+            continue
+        new_arr, seen = [], set()
+        for x in arr:
+            v = keep if (isinstance(x, str) and x in drop_set) else x
+            if v not in seen:
+                seen.add(v)
+                new_arr.append(v)
+        db.execute("UPDATE entries SET %s = ? WHERE id = ?" % column, (json.dumps(new_arr), r["id"]))
+        touched += 1
+    return touched
+
+
+def _merge_rewrite_procedure_blocks(db, site, drop_set, keep):
+    """procedure_blocks is a JSON array of {site, procedures, ...}; only the
+    blocks for THIS site are touched -- a procedure pool is per-site, so a
+    same-spelled string sitting in a different site's list is unrelated."""
+    rows = db.execute(
+        "SELECT id, procedure_blocks AS val FROM entries WHERE procedure_blocks IS NOT NULL AND procedure_blocks != '[]'"
+    ).fetchall()
+    touched = 0
+    for r in rows:
+        try:
+            blocks = json.loads(r["val"]) if r["val"] else []
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(blocks, list):
+            continue
+        changed = False
+        for b in blocks:
+            if not isinstance(b, dict) or b.get("site") != site:
+                continue
+            procs = b.get("procedures")
+            if not isinstance(procs, list) or not any(x in drop_set for x in procs if isinstance(x, str)):
+                continue
+            new_procs, seen = [], set()
+            for x in procs:
+                v = keep if (isinstance(x, str) and x in drop_set) else x
+                if v not in seen:
+                    seen.add(v)
+                    new_procs.append(v)
+            b["procedures"] = new_procs
+            changed = True
+        if changed:
+            db.execute("UPDATE entries SET procedure_blocks = ? WHERE id = ?", (json.dumps(blocks), r["id"]))
+            touched += 1
+    return touched
+
+
+@api.post("/config/merge-list-entries")
+@require_perm("config.edit_lists")
+def config_merge_list_entries():
+    """Fold one or more names on a list into the single spelling the admin
+    confirms is correct, and rewrite every entry that used one of the
+    others so nothing silently drops out of a trainee's record."""
+    body = request.get_json(force=True, silent=True) or {}
+    list_key = _text(body.get("list"), 40)
+    site = _text(body.get("site"), 60) or None
+    keep = _text(body.get("keep"), 300)
+    drop_raw = body.get("drop")
+    drop = [_text(d, 300) for d in drop_raw] if isinstance(drop_raw, list) else []
+    drop = [d for d in drop if d]
+
+    if list_key not in MERGEABLE_LISTS:
+        return jsonify({"error": "That list cannot be merged here."}), 400
+    if not keep:
+        return jsonify({"error": "Choose the name to keep."}), 400
+    # De-duplicate the drop list and drop can never include keep itself.
+    drop = [d for d in dict.fromkeys(drop) if d != keep]
+    if not drop:
+        return jsonify({"error": "Choose at least one other name to merge into it."}), 400
+
+    cfg = get_config()
+    if list_key == "procedures":
+        if not site:
+            return jsonify({"error": "Which site's procedure list?"}), 400
+        procs = cfg.get("procedures")
+        if not isinstance(procs, dict) or site not in procs or not isinstance(procs[site], list):
+            return jsonify({"error": "No such site."}), 400
+        pool = procs[site]
+    else:
+        site = None
+        pool = cfg.get(list_key)
+        if not isinstance(pool, list):
+            pool = []
+
+    if keep not in pool:
+        return jsonify({"error": "‘%s’ is not on this list." % keep}), 400
+    missing = [d for d in drop if d not in pool]
+    if missing:
+        return jsonify({"error": "Not on this list: %s." % ", ".join(missing)}), 400
+
+    db = get_db()
+    drop_set = set(drop)
+    touched = {}
+
+    if list_key == "diagnoses":
+        n = _merge_rewrite_str_column(db, "diagnoses", drop_set, keep)
+        if n:
+            touched["diagnoses"] = n
+        n = _merge_rewrite_str_column(db, "diagnoses_secondary", drop_set, keep)
+        if n:
+            touched["diagnosesSecondary"] = n
+    elif list_key == "comorbidities":
+        n = _merge_rewrite_str_column(db, "comorbidities", drop_set, keep)
+        if n:
+            touched["comorbidities"] = n
+    else:  # procedures
+        n = _merge_rewrite_procedure_blocks(db, site, drop_set, keep)
+        if n:
+            touched["procedureBlocks"] = n
+        # The flat `procedures` column (Interesting Case entries) draws from
+        # every site's pool at once with no site of its own to check -- see
+        # allProcs in app.js -- so it is rewritten regardless of `site`.
+        n = _merge_rewrite_str_column(db, "procedures", drop_set, keep)
+        if n:
+            touched["procedures"] = n
+
+    new_pool = [x for x in pool if x not in drop_set]
+    if list_key == "procedures":
+        cfg["procedures"][site] = new_pool
+    else:
+        cfg[list_key] = new_pool
+    db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
+    db.commit()
+
+    return jsonify({
+        "config": cfg, "list": list_key, "site": site,
+        "kept": keep, "dropped": drop, "entriesTouched": touched,
+    })

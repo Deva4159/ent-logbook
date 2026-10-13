@@ -295,7 +295,7 @@ def _wanted(db, rules):
                      "audience": audience, "link": link}
 
     trainees = db.execute(
-        "SELECT username, display_name, role, course_id, joined_ym, unit FROM users"
+        "SELECT username, display_name, role, course_id, joined_ym, unit, course_extra_months FROM users"
         " WHERE role IN ('resident','senior_resident','fellow') AND approval_status = 'approved'"
         " AND active = 1 AND lifecycle = 'active' AND stage_status = 'active'").fetchall()
     tnames = {t["username"]: t["display_name"] for t in trainees}
@@ -397,7 +397,7 @@ def _wanted(db, rules):
         ending = []
         for t in trainees:
             c = by_id.get(t["course_id"])
-            pr = courses_mod.progress(c, t["joined_ym"], today) if c else None
+            pr = courses_mod.progress(c, t["joined_ym"], today, extra_months=t["course_extra_months"] or 0) if c else None
             if not pr or pr["status"] != "in_progress":
                 continue
             y, m = int(pr["expectedEndYm"][:4]), int(pr["expectedEndYm"][5:])

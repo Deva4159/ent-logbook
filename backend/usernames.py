@@ -57,6 +57,7 @@ USERNAME_COLUMNS = [
     ("feedback", "author_username", None),
     ("feedback_notes", "actor_username", None),
     ("users", "lifecycle_by", None),
+    ("users", "course_extra_set_by", None),
     ("account_requests", "username", None),
     ("account_requests", "requested_by", None),
     ("account_requests", "decided_by", None),

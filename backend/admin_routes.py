@@ -574,15 +574,59 @@ def course_people(cid):
         postings = get_postings(r["username"])
         allowed = courses_mod.allowed_units(course, r["unit"], known)
         outside = sorted({p["unit"] for p in postings if allowed is not None and p["unit"] not in allowed})
-        pr = courses_mod.progress(course, r["joined_ym"])
+        extra = r["course_extra_months"] or 0
+        pr = courses_mod.progress(course, r["joined_ym"], extra_months=extra)
         out.append({
             "username": r["username"], "displayName": r["display_name"], "unit": r["unit"],
             "joinedYm": r["joined_ym"], "study": pr, "typedYear": r["pg_year"],
             "postingsOutside": outside,
             "peripheralDays": courses_mod.peripheral_days(postings, course),
             "active": bool(r["active"]),
+            "courseExtraMonths": extra, "courseExtraReason": r["course_extra_reason"],
         })
     return jsonify({"course": course, "people": out})
+
+
+@admin.patch("/users/<username>/course-extension")
+@require_perm("courses.manage")
+def course_extension_set(username):
+    """A per-person extension to a course's duration (v7.8), for a trainee
+    whose study period is formally extended. Additive on top of the
+    course's own duration -- see courses.progress(). Gated on the same
+    permission as the Courses page itself, per the product decision that
+    this is a course-editing right, not a general account-editing one."""
+    db = get_db()
+    row = db.execute("SELECT username, role, course_id, course_extra_months FROM users"
+                     " WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return jsonify({"error": "not_found"}), 404
+    if row["role"] not in ("resident", "senior_resident", "fellow"):
+        return jsonify({"error": "Only a trainee can have a course extension."}), 400
+    body = _json()
+    try:
+        months = int(body.get("extraMonths"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Extra months must be a whole number."}), 400
+    if not (0 <= months <= 60):
+        return jsonify({"error": "Extra months must be between 0 and 60."}), 400
+    reason = _text(body.get("reason"), 300)
+    if months and not reason:
+        return jsonify({"error": "Say why the course is being extended."}), 400
+    before = row["course_extra_months"] or 0
+    db.execute(
+        "UPDATE users SET course_extra_months = ?, course_extra_reason = ?,"
+        " course_extra_set_by = ?, course_extra_set_at = ? WHERE username = ?",
+        (months if months else None, reason if months else None,
+         g.user["username"] if months else None, _now_iso() if months else None, username))
+    _account_event(
+        db, username, "course_extension_set", g.user["username"],
+        ("Course extension changed from %d to %d month(s)%s" %
+         (before, months, (" — " + reason) if reason else "")))
+    db.commit()
+    course = courses_mod.get_course(db, row["course_id"]) if row["course_id"] else None
+    joined = db.execute("SELECT joined_ym FROM users WHERE username = ?", (username,)).fetchone()["joined_ym"]
+    study = courses_mod.progress(course, joined, extra_months=months) if course else None
+    return jsonify({"courseExtraMonths": months, "courseExtraReason": reason if months else None, "study": study})
 
 
 @admin.post("/courses/joined")
