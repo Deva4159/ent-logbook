@@ -600,6 +600,12 @@
   .chl-rel:first-child::before{background:var(--green);}
   .chl-head{display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:4px;}
   .chl-head b{font-size:14.5px;}
+  /* Collapsed by default except the newest release: chl-head is now the
+     whole-row toggle button, so it needs the usual button reset, plus
+     center alignment (the chevron isn't text, so baseline misplaces it). */
+  .chl-toggle{width:100%; align-items:center; background:none; border:0; padding:0; margin:0; font:inherit; color:inherit; text-align:left; cursor:pointer;}
+  .chl-toggle:focus-visible{outline:2px solid var(--teal); outline-offset:2px;}
+  .chl-rel:not(.open) .chl-head{margin-bottom:0;}
   .chl-ver{font-family:var(--font-mono); font-size:11px; letter-spacing:.04em; padding:2px 7px;
     border-radius:99px; background:var(--teal-bg); color:var(--teal-ink); flex:none;}
   .chl-date{font-size:11.5px; color:var(--ink-soft); margin-left:auto; flex:none;}
@@ -1313,6 +1319,10 @@ input[type=email]:disabled, input[type=tel]:disabled, input[type=month]:disabled
 .gd-persona{border:1px solid var(--line); border-radius:10px; padding:12px 14px; font-size:13.5px; line-height:1.5; background:var(--surface);}
 .gd-persona.mine{border-color:var(--teal); box-shadow:0 0 0 2px var(--teal-bg);}
 .gd-persona-head{display:flex; align-items:center; gap:8px; justify-content:space-between;}
+.gd-persona-toggle{width:100%; text-align:left; background:none; border:0; padding:0; margin:0; font:inherit; color:inherit; cursor:pointer;}
+.gd-persona-toggle:focus-visible{outline:2px solid var(--teal); outline-offset:2px;}
+.gd-persona-closed{cursor:default;}
+.gd-chev-open{transform:rotate(225deg); margin-bottom:-3px;}
 .gd-persona h3{margin:0; font-size:15px;}
 .gd-persona p{margin:6px 0 0;}
 .gd-who{font-weight:600;}

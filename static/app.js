@@ -47,6 +47,7 @@
     accountArchives: null,
     accountReqCount: 0,
     bulkList: null,             // { key, preview }
+    devListMerge: null,         // { list, site, picked:{value:true}, keep } -- v7.8 merge-duplicates panel
     // Setting postings for other people (HOD / Coordinator / Developer).
     // { candidates, picked:{username:true}, unit, startDate, endDate,
     //   allowOverlap, result } -- null while the panel is closed.
@@ -888,6 +889,16 @@
     }, 3200);
   }
 
+  // v7.8: the one confirm step for an explicit, user-initiated change to
+  // stored data or a setting (submit, delete, settings change, admin
+  // action). Deliberately NOT used for autosave/draft-save, which must stay
+  // silent -- interrupting that with a popup on every keystroke-triggered
+  // save would be a regression, not the fix this was built for. `message`
+  // should say plainly what is about to change, not just "Are you sure?".
+  function vConfirmChange(message){
+    return window.confirm(message);
+  }
+
   /* ============================================================
      API LAYER - every call goes to the real Flask/SQLite backend
      over fetch(). Session auth is an httpOnly cookie the browser
@@ -1023,6 +1034,9 @@
   }
   async function dUpdateConfig(patch){ return (await api("PATCH","/config", patch)).config; }
   async function dRestoreProcedureDefaults(){ return await api("POST","/config/restore-procedure-defaults",{}); }
+  async function dMergeListEntries(list, site, keep, drop){
+    return await api("POST","/config/merge-list-entries",{list:list, site:site||undefined, keep:keep, drop:drop});
+  }
   async function dListRoleAssignments(){ return (await api("GET","/role-assignments")).roleAssignments; }
   async function dAddRoleAssignment(data){ return (await api("POST","/role-assignments",{
     consultantUsername:data.consultantUsername, role:data.role, unit:data.unit, startAt:data.startAt, endAt:data.endAt
@@ -1171,6 +1185,7 @@
   async function changeOwnPassword(oldPw, newPw, confirmPw){
     if(!newPw || newPw.length < 8){ toast("New password must be at least 8 characters."); return; }
     if(newPw !== confirmPw){ toast("New passwords do not match."); return; }
+    if(!vConfirmChange("Change your password?")) return;
     try{
       await api("POST","/auth/change-password",{ oldPassword: oldPw, newPassword: newPw, confirm: confirmPw });
       toast("Password updated.");
@@ -2091,6 +2106,7 @@
      DEVELOPER ACTIONS
   ============================================================ */
   async function setUserRole(username, newRole){
+    if(!vConfirmChange("Change "+username+"'s role to “"+newRole+"”?")) return;
     try{
       await dUpdateUser(username, {role:newRole});
       state.devUsers = state.devUsers.map(function(u){ if(u.username===username) u.role=newRole; return u; });
@@ -2099,6 +2115,7 @@
     }catch(e){ toast("Could not update role."); }
   }
   async function setUserActive(username, active){
+    if(!vConfirmChange(active ? "Reactivate "+username+"'s account?" : "Deactivate "+username+"'s account? They will be signed out and cannot sign in until reactivated.")) return;
     try{
       await dUpdateUser(username, {active:active});
       function applyActive(list){ return list.map(function(u){ if(u.username===username) u.active=active; return u; }); }
@@ -2109,6 +2126,7 @@
     }catch(e){ toast("Could not update account status."); }
   }
   async function updateUserProfile(username, patch){
+    if(!vConfirmChange("Save this change to "+username+"'s profile?")) return;
     try{
       await dUpdateUser(username, patch);
       function applyProfile(list){ return list.map(function(u){ return u.username===username ? Object.assign({}, u, patch) : u; }); }
@@ -2129,6 +2147,7 @@
     }catch(e){ toast(e.message || "Could not delete this account."); }
   }
   async function approveSignupRequest(username){
+    if(!vConfirmChange("Approve "+username+"'s sign-up? They'll be able to sign in immediately.")) return;
     try{
       var sel = document.querySelector('[data-su-link="'+username+'"]');
       await dApproveSignup(username, sel && sel.value ? +sel.value : null);
@@ -2157,6 +2176,7 @@
       if(fields.joinedYm) body.joinedYm = fields.joinedYm;
       if(fields.email) body.email = fields.email;
       if(fields.phone) body.phone = fields.phone;
+      if(!vConfirmChange("Create an account for "+username+"?")) return;
       await api("POST","/users", body);
       state.devUsersLoaded = false;
       state.showCreateUserForm = false;
@@ -2167,6 +2187,7 @@
   }
   async function adminResetPassword(requestId, username, newPassword){
     if(!newPassword || newPassword.length < 8){ toast("New password must be at least 8 characters."); return; }
+    if(!vConfirmChange("Reset the password for "+username+"? They'll need to use the new one next time they sign in.")) return;
     try{
       await dUpdateUser(username, {password: newPassword});
       if(requestId){
@@ -2190,6 +2211,7 @@
       role: role, unit: role==="head_of_unit" ? unit : "",
       startAt: startAt, endAt: endAt, assignedBy: state.user.username, assignedAt: new Date().toISOString()
     };
+    if(!vConfirmChange("Add this appointment for "+data.consultantDisplayName+"?")) return;
     try{
       var id = await dAddRoleAssignment(data);
       state.roleAssignments = state.roleAssignments.concat([Object.assign({id:id}, data)]);
@@ -2240,6 +2262,7 @@
       }
     }
     list.splice(insertAt, 0, {key:key, fullName:fullName, shortForm:shortForm, group:group});
+    if(!vConfirmChange("Add “"+fullName+"” as a new unit?")) return;
     try{
       await dUpdateConfig({units:list});
       state.config.units = list;
@@ -2275,6 +2298,7 @@
     var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
     allProcs[key] = [];
     var patch = { categories: newCategories, procedures: allProcs };
+    if(!vConfirmChange("Add “"+name+"” as a new site?")) return;
     try{
       await dUpdateConfig(patch);
       state.config.categories = newCategories;
@@ -2305,6 +2329,7 @@
       if(c.key!==key) return c;
       return { key:c.key, name: (name||"").trim() || c.name, color: color || c.color };
     });
+    if(!vConfirmChange("Save changes to this site?")){ render(); return; }
     try{
       await dUpdateConfig({ categories: newCategories });
       state.config.categories = newCategories;
@@ -2320,6 +2345,7 @@
     var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
     allProcs[catKey] = list;                 // whole map -- see addCategory
     var patch = { procedures: allProcs };
+    if(!vConfirmChange("Add “"+text+"” to this site's procedure list?")) return;
     try{
       await dUpdateConfig(patch);
       state.config.procedures[catKey] = list;
@@ -2337,6 +2363,7 @@
     var allProcs = JSON.parse(JSON.stringify(state.config.procedures || {}));
     allProcs[catKey] = list;                 // whole map -- see addCategory
     var patch = { procedures: allProcs };
+    if(!vConfirmChange("Remove “"+value+"” from this site's procedure list?")) return;
     try{
       await dUpdateConfig(patch);
       state.config.procedures[catKey] = list;
@@ -2374,6 +2401,7 @@
     if(sortable) list.splice(sortedInsertIndex(list, text), 0, text);
     else list.push(text);
     var patch = {}; patch[listKey] = list;
+    if(!vConfirmChange("Add “"+text+"” to this list?")) return;
     try{
       await dUpdateConfig(patch);
       state.config[listKey] = list;
@@ -2390,6 +2418,7 @@
     if(sortable) list = list.filter(function(v){ return v!==idxOrValue; });
     else list.splice(idxOrValue,1);
     var patch = {}; patch[listKey] = list;
+    if(!vConfirmChange((sortable ? "Remove “"+idxOrValue+"”" : "Remove this option")+" from the list?")) return;
     try{
       await dUpdateConfig(patch);
       state.config[listKey] = list;
@@ -2885,7 +2914,7 @@
       if(state.user.role==="fellow" && hasPerm("view.roster")) tItems.push(["consultant-roster","Roster"]);
       if(state.user.role==="fellow" && hasPerm("signoff.approve")) tItems.push(["approval-queue","Case Sign-off"]);
       if(state.user.role==="fellow" && caps.canApprove) tItems.push(["signup-approvals","Approvals"]);
-      tItems.push(["feedback","Feedback"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]);
+      tItems.push(["feedback","Feedback"],["account","My Account"],["guide","Guide"],["about","About"]);
       return tItems;
     }
     if(state.user.role==="consultant"){
@@ -2902,10 +2931,10 @@
       if(hasPerm("lists.review")) items.push(["list-review","List Review"]);
       items.push(["feedback","Feedback"]);
       if(hasPerm("accounts.requests_view")) items.push(["account-requests","Account Requests"]);
-      items.push(["account","My Account"],["guide","Guide"],["about","About / Roadmap"]);
+      items.push(["account","My Account"],["guide","Guide"],["about","About"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["unit-requests","Unit Requests"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About / Roadmap"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["unit-requests","Unit Requests"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -3238,6 +3267,19 @@
   function sortedByDisplayName(list){
     return (list||[]).slice().sort(function(a,b){ return String(a.displayName||"").localeCompare(String(b.displayName||""), undefined, {sensitivity:"base"}); });
   }
+  // v7.8: shared by every checkbox-list picker in the app -- whatever is
+  // already ticked floats to the top, alphabetical among itself (isSelected
+  // decides membership, sortKey decides what "alphabetical" sorts on), and
+  // the unticked remainder keeps whatever order it already had. One place,
+  // so a new picker gets this for free instead of having to remember it.
+  function selectedFirst(list, isSelected, sortKey){
+    sortKey = sortKey || function(x){ return x; };
+    var sel = [], rest = [];
+    (list||[]).forEach(function(x){ (isSelected(x) ? sel : rest).push(x); });
+    if(!sel.length) return list;
+    sel.sort(function(a,b){ return String(sortKey(a)).localeCompare(String(sortKey(b)), undefined, {sensitivity:"base"}); });
+    return sel.concat(rest);
+  }
 
   // Searchable multi-select: same selection model and DOM contract as the
   // original checkbox-list multiPicker (.mp-box[data-mp-field], the
@@ -3257,6 +3299,12 @@
     // hand-picked entries) so nothing can add a 13th call site that forgets
     // to sort.
     if(!mpOpts.keepOrder) options = sortedStrings(options);
+    // v7.8: whatever is already ticked floats to the top, alphabetical among
+    // itself, so re-opening a long pool (procedures, comorbidities, the
+    // involved-people list) doesn't bury a selection below a scroll of
+    // everything else. The unticked remainder keeps whatever order it had --
+    // alphabetical above, or the caller's own order under keepOrder.
+    options = selectedFirst(options, function(o){ return selected.indexOf(o)!==-1; });
     var boxes = options.map(function(o){
       var checked = selected.indexOf(o)!==-1;
       var note = mpOpts.annot && mpOpts.annot[o];
@@ -4247,7 +4295,7 @@
           : kv(isTrainee ? "Batch" : "Designation", esc((isTrainee ? p.pgYear : p.designation) || ""))+
             kv(isTrainee ? "Current posting" : "Unit", p.unit ? unitShortHtml(p.unit)+' <span class="muted">'+esc(unitFull(p.unit))+'</span>' : ""))+
         (isTrainee && p.course ? kv("Course", esc(p.course.name)+' <span class="muted">· '+p.course.durationMonths+' months</span>') : "")+
-        (isTrainee && p.course ? kv("Year of study", studyLine(p.course, p.joinedYm)) : "")+
+        (isTrainee && p.course ? kv("Year of study", studyLine(p.course, p.joinedYm, p.courseExtraMonths)) : "")+
         kv("Account opened", fmtDate((p.createdAt||"").slice(0,10)))+
         kv("Last signed in", p.lastSeenAt ? fmtDateTime(p.lastSeenAt) : "")+
       '</div></div>';
@@ -5048,6 +5096,38 @@
     '</div>';
   }
 
+  // v7.8: two (or more) names on a pool that turn out to be the same real
+  // thing -- "CSOM" one week, "C.S.O.M." another -- otherwise split a
+  // trainee's history across two spellings forever, because an entry
+  // stores the literal string, not a stable id. Tick the duplicates, say
+  // which spelling is correct, and every entry using one of the others is
+  // rewritten to the one kept -- confirming the correct name is a
+  // deliberate extra step, not skippable, per how this was asked for.
+  function mergePanel(listKey, site, pool){
+    var m = state.devListMerge;
+    var picked = Object.keys(m.picked).filter(function(v){ return m.picked[v]; });
+    var items = sortedStrings(pool||[]);
+    return '<div class="acct-panel">'+
+      '<div class="exp-sub">Merge duplicates</div>'+
+      '<p class="muted" style="font-size:12.5px; margin:-2px 0 8px;">Tick two or more names that are really the same thing.</p>'+
+      '<div class="mp-box-wrap" style="max-height:220px; overflow-y:auto;">'+(items.map(function(v){
+        return '<label class="mp-row" style="display:flex; gap:8px; align-items:center; font-size:13.5px; padding:4px 0;">'+
+          '<input type="checkbox" data-merge-pick="'+esc(v)+'"'+(m.picked[v]?" checked":"")+'> '+esc(v)+'</label>';
+      }).join("")||'<span class="muted" style="font-size:13px;">Nothing on this list yet.</span>')+'</div>'+
+      (picked.length>=2 ? (
+        '<div class="exp-sub" style="margin-top:12px;">Which spelling is correct?</div>'+
+        '<p class="muted" style="font-size:12.5px; margin:-2px 0 6px;">The others move to this one everywhere they were used.</p>'+
+        picked.map(function(v){
+          return '<label class="v-check"><input type="radio" name="merge-keep" data-merge-keep="'+esc(v)+'"'+(m.keep===v?" checked":"")+'> <span>'+esc(v)+'</span></label>';
+        }).join("")
+      ) : '<p class="muted" style="font-size:12.5px; margin-top:10px;">Tick at least two to continue.</p>')+
+      '<div class="btn-row"><button type="button" class="btn btn-sm" id="merge-close">Cancel</button>'+
+        '<button type="button" class="btn btn-sm btn-primary" id="merge-apply"'+(picked.length>=2 && m.keep ? '' : ' disabled')+'>'+
+          (picked.length>=2 && m.keep ? "Merge "+(picked.length-1)+" into “"+esc(m.keep)+"”" : "Merge")+
+        '</button></div>'+
+    '</div>';
+  }
+
   function renderDeveloperLists(){
     var cats = state.config.categories;
     if(!state.devListDraft.selectedCat && cats.length) state.devListDraft.selectedCat = cats[0].key;
@@ -5088,8 +5168,13 @@
           '<input type="text" id="newitem-'+spec.key+'" placeholder="Add an option…" style="flex:1;">'+
           '<button class="btn btn-sm btn-primary" data-simple-add="'+spec.key+'">Add</button>'+
           '<button class="btn btn-sm" data-bulk-open="'+spec.key+'">Bulk add…</button>'+
+          // Only the two free-typed pools (see MERGEABLE_LISTS on the
+          // server) can actually accumulate duplicates worth merging; the
+          // short admin-ordered lists below don't get this button.
+          (spec.sortable ? '<button class="btn btn-sm" data-merge-open="'+spec.key+'">Merge duplicates…</button>' : '')+
         '</div>'+
         (state.bulkList && state.bulkList.key===spec.key ? bulkAddPanel(spec.title) : '')+
+        (spec.sortable && state.devListMerge && state.devListMerge.list===spec.key ? mergePanel(spec.key, null, items) : '')+
       '</div>';
     }).join("");
 
@@ -5116,7 +5201,9 @@
       '<div style="display:flex; gap:8px;">'+
         '<input type="text" id="newproc-input" placeholder="Add a procedure…" style="flex:1;">'+
         '<button class="btn btn-sm btn-primary" data-add-proc="'+esc(selCat.key)+'">Add</button>'+
+        '<button class="btn btn-sm" data-merge-open="procedures" data-merge-site="'+esc(selCat.key)+'">Merge duplicates…</button>'+
       '</div>'+
+      (state.devListMerge && state.devListMerge.list==="procedures" && state.devListMerge.site===selCat.key ? mergePanel("procedures", selCat.key, procList) : '')+
     '</div>') : '')+
     simpleSections;
   }
@@ -5230,6 +5317,19 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "7.8", date: "2026-10-13", title: "Confirm dialogs, fewer clicks, merging duplicates",
+      note: "Adds four columns on users (course extension) and seeds six named fellowship courses; both run automatically on start-up. Replace the whole backend and static folders.",
+      changes: [
+        ["added", "<b>A confirm pop-up before any explicit change to data or a setting</b> — editing an entry, a user, a permission, a course, an alert rule, a doctor record and more. Autosave of an in-progress draft stays silent on purpose; this is only for a change you deliberately choose to make."],
+        ["changed", "<b>Already-selected options float to the top</b> of every checklist in the app — procedures, diagnoses, comorbidities, the “also involved” people picker, unit pickers, alert audience roles — alphabetical among themselves, so reopening a long list doesn’t bury what’s already ticked."],
+        ["changed", "<b>“Who does what” is now “Roles”, and each role is collapsed to its name</b> until you open it (your own stays open). “About / Roadmap” in the menu is now “About”."],
+        ["changed", "<b>Updates now opens to the newest release only.</b> Twenty-odd releases used to render in full every time; older ones collapse behind their own heading."],
+        ["added", "<b>Extend one trainee’s course duration</b>, for an extended study period — set from Courses by whoever can edit or add courses, with a reason recorded. Progress, the course-ending alert and the Guide all use the extended length."],
+        ["added", "<b>Six named Post-Doctoral Fellowship courses</b> — Skull Base Surgery, Paediatric ENT, Rhinology, Implant Otology, Audio-Vestibular Medicine and Laryngology &amp; Phono-Surgery, two years each. Two of the six were both given as “ENT 4” and Audio-Vestibular Medicine’s duration wasn’t stated (defaulted to two years) — check and correct the numbering/duration under Courses. More fellowships can still be added the same way at any time."],
+        ["added", "<b>Merge duplicate entries on a list.</b> Under Manage Lists, tick two or more diagnoses, comorbidities or procedures that are really the same thing, confirm which spelling is correct, and every entry using one of the others is rewritten to it."]
+      ]
+    },
     {
       version: "7.7.1", date: "2026-10-09", title: "Visual refresh: calmer colour, native type",
       note: "Styling only. No database change and no new permissions. Replace static/index.html, static/styles.css and backend/app.py (tightened Content-Security-Policy).",
@@ -5492,22 +5592,31 @@
   };
 
   function renderChangelog(){
+    // Collapsed by default except the newest release -- with 20+ releases
+    // this used to mean scrolling past every past change log just to find
+    // today's. GS.open holds the explicit toggle once a user opens or closes
+    // one; until then it defaults to "only the newest is open".
     return '<div class="card"><div class="section-head"><h2>Updates</h2>'+
       '<span class="chip chip-grey">Running version '+esc(APP_VERSION)+'</span></div>'+
-      '<p class="muted" style="font-size:12.5px; margin:-6px 0 16px;">Every release, newest first, and what changed in it. '+
+      '<p class="muted" style="font-size:12.5px; margin:-6px 0 16px;">Every release, newest first. Open one to see what changed in it. '+
         'Dates are when the release was built — ask your Developer admin when it reached this server.</p>'+
-      '<ol class="chl">'+CHANGELOG.map(function(r){
-        return '<li class="chl-rel">'+
-          '<div class="chl-head">'+
+      '<ol class="chl">'+CHANGELOG.map(function(r, i){
+        var id = "chl-"+r.version;
+        var open = GS.open[id]!==undefined ? GS.open[id] : i===0;
+        return '<li class="chl-rel'+(open?" open":"")+'">'+
+          '<button type="button" class="chl-head chl-toggle" data-gd="toggle" data-id="'+esc(id)+'" aria-expanded="'+(open?"true":"false")+'">'+
             '<span class="chl-ver">v'+esc(r.version)+'</span>'+
             '<b>'+esc(r.title)+'</b>'+
             '<span class="chl-date tabular">'+fmtDate(r.date)+'</span>'+
-          '</div>'+
-          (r.note ? '<p class="chl-note muted">'+r.note+'</p>' : '')+
-          '<ul class="chl-items">'+r.changes.map(function(c){
-            var tag = CHANGE_TAG[c[0]] || CHANGE_TAG.changed;
-            return '<li><span class="chip '+tag[1]+' chl-tag">'+tag[0]+'</span><span>'+c[1]+'</span></li>';
-          }).join("")+'</ul>'+
+            '<span class="gd-chev'+(open?" gd-chev-open":"")+'" aria-hidden="true"></span>'+
+          '</button>'+
+          (open ? (
+            (r.note ? '<p class="chl-note muted">'+r.note+'</p>' : '')+
+            '<ul class="chl-items">'+r.changes.map(function(c){
+              var tag = CHANGE_TAG[c[0]] || CHANGE_TAG.changed;
+              return '<li><span class="chip '+tag[1]+' chl-tag">'+tag[0]+'</span><span>'+c[1]+'</span></li>';
+            }).join("")+'</ul>'
+          ) : '')+
         '</li>';
       }).join("")+'</ol></div>';
   }
@@ -5938,6 +6047,7 @@
     document.querySelectorAll("[data-withdraw]").forEach(function(b){
       b.onclick = async function(){
         state.openEntryMenu=null;
+        if(!vConfirmChange("Withdraw this entry from sign-off?")) return;
         try{ await aWithdraw(b.getAttribute("data-withdraw")); await loadMyEntries(); await refreshApprovalSummary();
              toast("Withdrawn from sign-off."); render(); }
         catch(e){ toast(e.message||"Could not withdraw."); }
@@ -6046,6 +6156,7 @@
         who = { name: typed };
       } else who = { doctorId: +pick.slice(2) };
       var ids = state.submitDialog.ids;
+      if(!vConfirmChange(ids.length===1 ? "Send this entry for sign-off?" : "Send "+ids.length+" entries for sign-off?")) return;
       subGo.disabled = true; subGo.innerHTML = '<span class="spin"></span>Sending…';
       async function go(w){
         if(ids.length===1) await aSubmit(ids[0], w, note); else await aBulkSubmit(ids, w);
@@ -6078,6 +6189,7 @@
     if(decGo) decGo.onclick = once("decide-approval", async function(){
       var d = state.decideDialog, note = (el("decide-note")||{}).value || "";
       if(d.action==="changes" && !note.trim()){ toast("Say what needs changing."); return; }
+      if(!vConfirmChange(d.action==="approve" ? "Sign off this record? It will be locked to further editing." : "Send this record back for changes?")) return;
       decGo.disabled = true; decGo.innerHTML = '<span class="spin"></span>Saving…';
       try{
         if(d.action==="approve") await aApprove(d.id, note); else await aRequestChanges(d.id, note);
@@ -6116,6 +6228,7 @@
     });
     var cancelDel = el("cancel-deletion");
     if(cancelDel) cancelDel.onclick = once("cancel-deletion", async function(){
+      if(!vConfirmChange("Stop the account closure and keep your account as it is?")) return;
       try{
         await acctCancelDeletion();
         toast("Closure stopped. Your account stays as it is.");
@@ -6145,6 +6258,7 @@
     });
     document.querySelectorAll("[data-acct-cancel]").forEach(function(b){
       b.onclick = once("acct-cancel", async function(){
+        if(!vConfirmChange("Stop this account closure?")) return;
         try{
           await acctCancelDeletion(b.getAttribute("data-acct-cancel"));
           state.accountRequests = await acctRequests();
@@ -6187,6 +6301,7 @@
     });
     var bulkApply = el("bulk-apply");
     if(bulkApply) bulkApply.onclick = once("bulk-apply", async function(){
+      if(!vConfirmChange("Add these new options to the list?")) return;
       try{
         var r = await bulkAddList(state.bulkList.key, state.bulkList.text || (el("bulk-text")||{}).value || "", false);
         if(r.config) state.config = r.config;
@@ -6194,6 +6309,48 @@
               (r.alreadyPresent.length? " — "+r.alreadyPresent.length+" were already there" : "")+".");
         state.bulkList = null; render();
       }catch(e){ toast(e.message || "Could not add those."); }
+    });
+
+    /* ---------------- merge duplicate list entries (v7.8, item 8) ---------------- */
+    document.querySelectorAll("[data-merge-open]").forEach(function(b){
+      b.onclick = function(){
+        state.devListMerge = { list: b.getAttribute("data-merge-open"), site: b.getAttribute("data-merge-site")||null, picked:{}, keep:null };
+        render();
+      };
+    });
+    var mergeClose = el("merge-close"); if(mergeClose) mergeClose.onclick = function(){ state.devListMerge = null; render(); };
+    document.querySelectorAll("[data-merge-pick]").forEach(function(cb){
+      cb.onchange = function(){
+        var m = state.devListMerge; if(!m) return;
+        var v = cb.getAttribute("data-merge-pick");
+        if(cb.checked) m.picked[v] = true; else delete m.picked[v];
+        // Fewer than two picks, or un-ticking the one chosen as correct,
+        // leaves no valid "keep" any more -- the admin has to re-confirm it.
+        var picked = Object.keys(m.picked).filter(function(x){ return m.picked[x]; });
+        if(picked.length<2 || (m.keep && !m.picked[m.keep])) m.keep = null;
+        render();
+      };
+    });
+    document.querySelectorAll("[data-merge-keep]").forEach(function(r){
+      r.onchange = function(){ if(state.devListMerge) state.devListMerge.keep = r.getAttribute("data-merge-keep"); render(); };
+    });
+    var mergeApply = el("merge-apply");
+    if(mergeApply) mergeApply.onclick = once("merge-apply", async function(){
+      var m = state.devListMerge; if(!m) return;
+      var picked = Object.keys(m.picked).filter(function(x){ return m.picked[x]; });
+      var drop = picked.filter(function(x){ return x!==m.keep; });
+      if(picked.length<2 || !m.keep || !drop.length) return;
+      if(!vConfirmChange("Merge "+drop.length+" name"+(drop.length===1?"":"s")+" into “"+m.keep+"”? "+
+        "Every entry using "+(drop.length===1?"it":"them")+" will be updated to use “"+m.keep+"” instead, and "+
+        (drop.length===1?"it":"they")+" will come off this list. This cannot be undone.")) return;
+      try{
+        var r = await dMergeListEntries(m.list, m.site, m.keep, drop);
+        state.config = r.config;
+        var touched = Object.keys(r.entriesTouched||{}).reduce(function(a,k){ return a + (r.entriesTouched[k]||0); }, 0);
+        toast("Merged "+drop.length+" name"+(drop.length===1?"":"s")+" into “"+m.keep+"”"+
+              (touched ? " — "+touched+" entry field"+(touched===1?"":"s")+" updated" : "")+".");
+        state.devListMerge = null; render();
+      }catch(e){ toast(e.message || "Could not merge those."); }
     });
 
     var themeBtn = el("btn-theme"); if(themeBtn) themeBtn.onclick = cycleTheme;
@@ -6414,7 +6571,9 @@
 
     // resident postings
     var addPostingBtn = el("add-posting"); if(addPostingBtn) addPostingBtn.onclick = function(){
-      addPosting((el("posting-unit")||{}).value, (el("posting-date")||{}).value, (el("posting-end")||{}).value, false);
+      var puUnit = (el("posting-unit")||{}).value, puStart = (el("posting-date")||{}).value, puEnd = (el("posting-end")||{}).value;
+      if(!vConfirmChange("Add this posting to your record?")) return;
+      addPosting(puUnit, puStart, puEnd, false);
     };
 
     /* ---------------- setting postings for other people ---------------- */
@@ -6651,6 +6810,7 @@
       var d = state.feedbackDraft;
       if(!(d.subject||"").trim()){ toast("Give it a one-line subject."); return; }
       if(!(d.body||"").trim()){ toast("Say what you would like to raise."); return; }
+      if(!vConfirmChange("Send this feedback?")) return;
       state.feedbackBusy = true; render();
       try{
         await fbCreate({ kind:d.kind, subject:d.subject, body:d.body, anonymous:d.anonymous });
@@ -6691,8 +6851,10 @@
       b.onclick = async function(){
         syncFeedbackDraft();
         var id = parseInt(b.getAttribute("data-fb-status"),10);
+        var fbNewStatus = b.getAttribute("data-fb-value");
+        if(!vConfirmChange("Mark this feedback as "+String(fbNewStatus).replace(/_/g," ")+"?")) return;
         try{
-          await fbSetStatus(id, b.getAttribute("data-fb-value"));
+          await fbSetStatus(id, fbNewStatus);
           state.feedbackInbox = await fbInbox(state.feedbackFilter);
           try{ state.feedbackNotes[id] = (await fbDetail(id)).notes || []; }catch(e){}
           await refreshFeedbackBadge();
@@ -6706,6 +6868,7 @@
         var id = parseInt(b.getAttribute("data-fb-note"),10);
         var inp = el("fb-note-"+id), note = inp ? inp.value : "";
         if(!note.trim()){ toast("Write the note first."); return; }
+        if(!vConfirmChange("Add this note to the feedback thread?")) return;
         try{
           state.feedbackNotes[id] = await fbAddNote(id, note);
           toast("Note added.");
@@ -6785,6 +6948,7 @@
       addCategory(el("newcat-name").value, el("newcat-color").value);
     };
     var restoreProcs = el("restore-procs"); if(restoreProcs) restoreProcs.onclick = once("restore-procs", async function(){
+      if(!vConfirmChange("Restore the shipped default procedure lists? Missing items will be added back.")) return;
       restoreProcs.disabled = true; restoreProcs.innerHTML = '<span class="spin"></span>Restoring…';
       try{
         var r = await dRestoreProcedureDefaults();
@@ -6847,7 +7011,7 @@
     p: { tab: "roles", cat: null, people: null, tpl: null, tplDraft: null, who: null, whoData: null, draft: {}, audit: null, q: "", err: "" },
     u: { q: "", role: "", status: "" },
     ue: null,               // per-user edit page
-    c: { list: null, edit: null, people: null, peopleFor: null, joined: {} },
+    c: { list: null, edit: null, people: null, peopleFor: null, joined: {}, extEdit: {} },
     b: { status: null, preview: null, file: null, busy: false, pw: "", word: "" },
     a: { manage: null, rules: null, draft: null, preview: null, editing: null }
   };
@@ -6904,7 +7068,10 @@
   function unitChecklist(pathPrefix, selected, opts){
     opts = opts || {};
     var sel = selected || [];
-    return '<div class="v-units">'+((state.config&&state.config.units)||[]).map(function(u){
+    // v7.8: ticked units float to the top, alphabetical by their short form.
+    var units = selectedFirst(((state.config&&state.config.units)||[]),
+      function(u){ return sel.indexOf(u.key)!==-1; }, function(u){ return u.shortForm||""; });
+    return '<div class="v-units">'+units.map(function(u){
       return '<label class="v-check"><input type="checkbox" data-v-unit="'+esc(pathPrefix)+'" value="'+esc(u.key)+'"'+(sel.indexOf(u.key)!==-1?" checked":"")+(opts.disabled?" disabled":"")+'> <span>'+esc(u.shortForm)+' <span class="muted">'+esc(u.fullName)+'</span></span></label>';
     }).join("")+'</div>';
   }
@@ -6919,14 +7086,15 @@
   }
 
   /* ------------ year of study (must equal courses.progress in the backend) ---- */
-  function studyProgress(course, joinedYm, today){
+  function studyProgress(course, joinedYm, today, extraMonths){
     var m = /^(\d{4})-(\d{2})$/.exec(joinedYm||"");
     if(!course || !m) return null;
     var jy = +m[1], jm = +m[2];
     if(jm<1 || jm>12) return null;
     var t = today instanceof Date ? today : new Date();
     var months = (t.getFullYear()-jy)*12 + ((t.getMonth()+1)-jm);
-    var total = course.durationMonths;
+    extraMonths = Math.max(0, parseInt(extraMonths,10) || 0);
+    var total = course.durationMonths + extraMonths;
     var years = Math.max(1, Math.ceil(total/12));
     var endTotal = jy*12 + (jm-1) + total;
     var endYm = String(Math.floor(endTotal/12)).padStart(4,"0")+"-"+String((endTotal%12)+1).padStart(2,"0");
@@ -6938,22 +7106,23 @@
     var label = null;
     if(year>=1) label = (year-1<labels.length && labels[year-1]) ? labels[year-1] : "Year "+year;
     return { year:year, years:years, label:label, status:status, joinedYm:joinedYm, expectedEndYm:endYm,
-             monthsIn:Math.max(0,months), monthsLeft:Math.max(0,total-Math.max(0,months)) };
+             monthsIn:Math.max(0,months), monthsLeft:Math.max(0,total-Math.max(0,months)), extraMonths:extraMonths };
   }
   window.__entlog_studyProgress = studyProgress;   // exercised by the parity test
   function ymLabel(ym){
     var m = /^(\d{4})-(\d{2})$/.exec(ym||""); if(!m) return ym||"—";
     return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m[2]-1]+" "+m[1];
   }
-  function studyLine(course, joinedYm){
+  function studyLine(course, joinedYm, extraMonths){
     if(!course) return '<span class="muted">Pick a course.</span>';
     if(!joinedYm) return '<span class="muted">Enter the month and year of joining and the year of study is worked out for you.</span>';
-    var p = studyProgress(course, joinedYm);
+    var p = studyProgress(course, joinedYm, null, extraMonths);
     if(!p) return '<span class="muted">Use a year (2025) or a month and year (2025-08).</span>';
     var line;
     if(p.status==="not_started") line = "Starts "+ymLabel(joinedYm)+" — not yet begun.";
     else if(p.status==="completed") line = "Course completed ("+ymLabel(p.expectedEndYm)+").";
     else line = "<b>"+esc(p.label)+"</b> — year "+p.year+" of "+p.years+", "+plural(p.monthsLeft,"month")+" to go (ends "+ymLabel(p.expectedEndYm)+").";
+    if(p.extraMonths) line += ' <span class="chip chip-teal" title="Course duration extended by '+p.extraMonths+' month(s)">+'+p.extraMonths+' mo extended</span>';
     return '<span class="v-study v-study-'+p.status+'">'+line+'</span>';
   }
   function courseById(id){
@@ -7215,6 +7384,7 @@
       '</tbody></table></div>' : '<div class="empty-state">No permission has been changed yet.</div>')+'</div>';
   }
   async function vSaveTemplate(){
+    if(!vConfirmChange("Save changes to this permission bundle? They apply to everyone who holds it.")) return;
     try{
       var r = await api("PUT","/permissions/templates/"+V.p.tpl, { perms: V.p.tplDraft });
       await vLoadPerms(); vPickTemplate(V.p.tpl); render();
@@ -7234,6 +7404,7 @@
       return c;
     });
     if(!changes.length) return;
+    if(!vConfirmChange("Save "+plural(changes.length,"permission change")+" for this person?")) return;
     try{
       V.p.whoData = await api("PUT","/permissions/people/"+encodeURIComponent(V.p.who), { changes: changes });
       V.p.draft = {};
@@ -7405,7 +7576,7 @@
             (course ? '<div class="hint">'+(course.scope==="department"?"Rotates through the whole department":"Belongs to "+((course.units&&course.units.length)?course.units.map(unitShort).join(", "):"the person’s own unit"))+
                (course.allowPeripheral?", with peripheral postings":"")+'.</div>' : '')+'</div>'+
           '<div class="field"><label for="ue-joined">Joined (month and year)</label><input id="ue-joined" type="month" data-vin="ue.draft.joinedYm" data-vcalc="ue" value="'+esc(/^\d{4}-\d{2}$/.test(dr.joinedYm)?dr.joinedYm:"")+'"'+(canCourse?"":" disabled")+'>'+
-            '<div class="hint" id="ue-study">'+studyLine(course, dr.joinedYm)+'</div></div></div>'+
+            '<div class="hint" id="ue-study">'+studyLine(course, dr.joinedYm, V.ue.detail.user.courseExtraMonths)+'</div></div></div>'+
           (changedCourse ? '<div class="v-note">'+vcheck("ue.draft.restamp","Also move this person’s <b>existing entries</b> to the new course. Leave unticked if they simply moved on to it — their earlier entries then stay with the course they were logged under.")+'</div>' : '')+
           (!dr.joinedYm ? '<div class="field"><label for="ue-pgyear">Batch label (used only until a joining month is set)</label><select id="ue-pgyear" data-vin="ue.draft.pgYear"'+(canCourse?"":" disabled")+'>'+opts_(state.config.pgYears, dr.pgYear)+'</select></div>' : '')+
           (d.course && d.allowedUnits ? '<p class="hint">Allowed postings for this course: '+(d.allowedUnits.length?d.allowedUnits.map(unitShort).join(", "):"none")+'. '+
@@ -7509,6 +7680,7 @@
     if(ch.joinedYm) patch.joinedYm = normJoin(d.joinedYm);
     if(ch.pgYear && !d.joinedYm) patch.pgYear = d.pgYear;
     if(d.restamp && ch.courseId) patch.restampEntries = true;
+    if(!vConfirmChange("Save these changes to "+ue.username+"'s profile?")) return;
     ue.busy = true; render();
     try{
       await api("PATCH","/users/"+encodeURIComponent(ue.username), patch);
@@ -7529,6 +7701,7 @@
   async function vUserActive(next){
     var ue = V.ue, who = ue.username;
     if(!next && !confirm("Deactivate "+who+"? They will be signed out and cannot sign in until reactivated.")) return;
+    if(next && !vConfirmChange("Reactivate "+who+"'s account? They'll be able to sign in again immediately.")) return;
     try{
       await api("PATCH","/users/"+encodeURIComponent(who), { active: next });
       var det = await api("GET","/users/"+encodeURIComponent(who)+"/detail"); ue.detail = det; vResetUserDraft(); render();
@@ -7616,6 +7789,7 @@
   }
   async function vSaveCourse(){
     var ed = V.c.edit; V.c.err = "";
+    if(!vConfirmChange(ed.id ? "Save changes to this course?" : "Create this course?")) return;
     try{
       var r = ed.id ? await api("PATCH","/courses/"+encodeURIComponent(ed.id), courseBody(ed)) : await api("POST","/courses", courseBody(ed));
       await vLoadCourseList();
@@ -7632,7 +7806,7 @@
     catch(e){ V.c.err = e.message; render(); }
   }
   async function vLoadCoursePeople(id){
-    V.c.peopleFor = id; V.c.people = null; V.c.joined = {}; render();
+    V.c.peopleFor = id; V.c.people = null; V.c.joined = {}; V.c.extEdit = {}; render();
     try{ V.c.people = await api("GET","/courses/"+encodeURIComponent(id)+"/people"); }catch(e){ V.c.err = e.message; }
     render();
   }
@@ -7640,25 +7814,61 @@
     var d = V.c.people;
     if(!d) return '<div class="card">'+skeletonTable(4)+'</div>';
     var c = d.course, dirty = Object.keys(V.c.joined).length;
+    V.c.extEdit = V.c.extEdit || {};
     return '<div class="card"><div class="section-head"><h2>People on “'+esc(c.name)+'” <span class="muted" style="font-weight:500;">('+d.people.length+')</span></h2><button class="btn btn-sm" data-v="course-people-close">Close</button></div>'+
-      '<p class="muted" style="font-size:13px; margin-bottom:12px;">Set when each person joined; the year is worked out. A highlighted unit is a posting outside this course’s scope — it is shown, not removed.</p>'+
-      (d.people.length ? '<div class="table-wrap"><table class="v-ptable"><thead><tr><th>Name</th><th>Joined</th><th>Now</th><th>Postings outside scope</th><th>Peripheral</th></tr></thead><tbody>'+
+      '<p class="muted" style="font-size:13px; margin-bottom:12px;">Set when each person joined; the year is worked out. A highlighted unit is a posting outside this course’s scope — it is shown, not removed. Extend a course for someone whose study period was formally extended.</p>'+
+      (d.people.length ? '<div class="table-wrap"><table class="v-ptable"><thead><tr><th>Name</th><th>Joined</th><th>Now</th><th>Postings outside scope</th><th>Peripheral</th><th>Extension</th></tr></thead><tbody>'+
         d.people.map(function(p){
           var jv = V.c.joined.hasOwnProperty(p.username) ? V.c.joined[p.username] : (p.joinedYm||"");
-          var live = studyProgress(c, jv);
+          var live = studyProgress(c, jv, null, p.courseExtraMonths);
+          var ee = V.c.extEdit[p.username];
+          var extCell;
+          if(ee){
+            extCell = '<div class="v-ext-edit">'+
+              '<input type="number" min="0" max="60" class="v-ext-months" data-v-ext-months="'+esc(p.username)+'" value="'+esc(ee.months)+'" style="width:56px;"> mo'+
+              '<input type="text" class="v-ext-reason" data-v-ext-reason="'+esc(p.username)+'" placeholder="Reason (required if > 0)" value="'+esc(ee.reason)+'" style="width:160px;">'+
+              '<button class="btn btn-sm btn-primary" data-v="course-ext-save" data-u="'+esc(p.username)+'">Save</button>'+
+              '<button class="btn btn-sm" data-v="course-ext-cancel" data-u="'+esc(p.username)+'">Cancel</button></div>';
+          } else {
+            extCell = (p.courseExtraMonths ? '<span title="'+esc(p.courseExtraReason||"")+'">+'+p.courseExtraMonths+' mo</span>' : '<span class="muted">—</span>')+
+              ' <button class="btn btn-sm" data-v="course-ext-edit" data-u="'+esc(p.username)+'">'+(p.courseExtraMonths?"Change":"Extend")+'</button>';
+          }
           return '<tr><td><div>'+esc(p.displayName)+(p.active?"":" "+chipHtml("off","chip-red"))+'</div><div class="mono muted v-uuser">'+esc(p.username)+'</div></td>'+
             '<td><input type="month" class="v-month" data-v-joined="'+esc(p.username)+'" value="'+esc(/^\d{4}-\d{2}$/.test(jv)?jv:"")+'"></td>'+
             '<td class="v-now" data-v-now="'+esc(p.username)+'">'+(live ? (live.status==="completed"?'<span class="muted">completed</span>':live.status==="not_started"?'<span class="muted">not started</span>':'<b>'+esc(live.label)+'</b>') : '<span class="muted">—</span>')+
               (p.typedYear && !p.joinedYm ? ' <span class="muted">(typed: '+esc(p.typedYear)+')</span>' : '')+'</td>'+
             '<td>'+(p.postingsOutside.length ? p.postingsOutside.map(function(u){ return chipHtml(unitShort(u),"chip-amber"); }).join(" ") : '<span class="muted">—</span>')+'</td>'+
-            '<td class="tabular">'+(p.peripheralDays ? (p.peripheralDays/30.4).toFixed(1)+" mo" : '<span class="muted">—</span>')+'</td></tr>';
+            '<td class="tabular">'+(p.peripheralDays ? (p.peripheralDays/30.4).toFixed(1)+" mo" : '<span class="muted">—</span>')+'</td>'+
+            '<td>'+extCell+'</td></tr>';
         }).join("")+'</tbody></table></div>'+
         '<div class="btn-row"><button class="btn btn-primary" data-v="course-joined-save"'+(dirty?"":" disabled")+'>Save '+(dirty?plural(dirty,"joining date"):"joining dates")+'</button></div>'
         : '<div class="empty-state">Nobody is enrolled on this course.</div>')+'</div>';
   }
+  function vExtEdit(username){
+    var p = (V.c.people.people||[]).filter(function(x){ return x.username===username; })[0];
+    V.c.extEdit[username] = { months: p && p.courseExtraMonths ? p.courseExtraMonths : 0, reason: (p && p.courseExtraReason) || "" };
+    render();
+  }
+  function vExtCancel(username){ delete V.c.extEdit[username]; render(); }
+  async function vSaveExtension(username){
+    var ee = V.c.extEdit[username]; if(!ee) return;
+    var months = parseInt(ee.months, 10) || 0, reason = (ee.reason||"").trim();
+    if(months && !reason){ toast("Say why this course is being extended."); return; }
+    var p = (V.c.people.people||[]).filter(function(x){ return x.username===username; })[0];
+    var was = (p && p.courseExtraMonths) || 0;
+    var msg = months===0 ? "Clear this person’s course extension (back to "+was+" → 0 months)?"
+      : "Set this person’s course extension to "+months+" month"+(months===1?"":"s")+"? "+reason;
+    if(!vConfirmChange(msg)) return;
+    try{
+      await api("PATCH","/users/"+encodeURIComponent(username)+"/course-extension",{ extraMonths: months, reason: reason });
+      delete V.c.extEdit[username];
+      await vLoadCoursePeople(V.c.peopleFor); render(); toast("Saved.");
+    }catch(e){ toast(e.message || "Could not save."); }
+  }
   async function vSaveJoined(){
     var ups = Object.keys(V.c.joined).map(function(u){ return { username:u, joinedYm: V.c.joined[u] }; }).filter(function(x){ return x.joinedYm; });
     if(!ups.length){ toast("Enter a month for at least one person."); return; }
+    if(!vConfirmChange("Save "+plural(ups.length,"joining date")+"?")) return;
     try{
       var r = await api("POST","/courses/joined",{ updates: ups });
       var msg = plural(r.updated.length,"joining date")+" saved"+(r.errors.length?"; "+r.errors.length+" refused ("+r.errors.map(function(e){ return e.username+": "+e.error; }).join("; ")+")":"")+".";
@@ -7827,7 +8037,8 @@
     var audience = '<div class="field"><label>Who should see it?</label><div class="v-aud-kinds">'+
       [["all","Everyone"],["group","A group"],["users","Particular people"],["perm","People who can…"]].map(function(k){
         return '<label class="v-pill'+(d.kind===k[0]?" on":"")+'"><input type="radio" name="a-kind" data-vin="a.draft.kind" data-vaud="1" value="'+k[0]+'"'+(d.kind===k[0]?" checked":"")+'>'+k[1]+'</label>'; }).join("")+'</div></div>'+
-      (d.kind==="group" ? '<div class="field"><label>Roles <span class="muted">(leave all unticked for any role)</span></label><div class="v-units">'+AUD_ROLES.map(function(r){
+      (d.kind==="group" ? '<div class="field"><label>Roles <span class="muted">(leave all unticked for any role)</span></label><div class="v-units">'+
+          selectedFirst(AUD_ROLES, function(r){ return d.roles.indexOf(r[0])!==-1; }, function(r){ return r[1]; }).map(function(r){
           return '<label class="v-check"><input type="checkbox" data-v-aud-role="'+r[0]+'"'+(d.roles.indexOf(r[0])!==-1?" checked":"")+'> <span>'+r[1]+'</span></label>'; }).join("")+'</div></div>'+
         '<div class="field"><label>Units <span class="muted">(narrows the roles to people in those units — their home unit, or where a trainee is posted today)</span></label>'+unitChecklist("aud:units", d.units)+'</div>' : '')+
       (d.kind==="users" ? '<div class="field"><label for="a-uq">Add people</label><input id="a-uq" type="search" data-vin="a.draft.userQ" data-vrefresh="a-ulist" placeholder="Type a name…" value="'+esc(d.userQ)+'" autocomplete="off">'+
@@ -7878,6 +8089,7 @@
   async function vSendAlert(){
     var d = V.a.draft; V.a.formErr = "";
     var body = { title:d.title, body:d.body, severity:d.severity, audience:audOf(d), startsAt:d.startsAt||null, expiresAt:d.expiresAt||null };
+    if(!vConfirmChange(d.id ? "Save changes to this alert?" : "Send this alert now?")) return;
     try{
       if(d.id) await api("PATCH","/alerts/"+d.id, body); else await api("POST","/alerts", body);
       V.a.draft = blankAlert(); await vLoadAlertsManage(); await vLoadAlerts(true); render(); toast(d.id ? "Alert updated." : "Alert sent.");
@@ -7948,7 +8160,7 @@
   }
   function vPaintUe(){
     var ue = V.ue; if(!ue || !ue.draft) return;
-    var s = el("ue-study"); if(s) s.innerHTML = studyLine(courseById(ue.draft.courseId), ue.draft.joinedYm);
+    var s = el("ue-study"); if(s) s.innerHTML = studyLine(courseById(ue.draft.courseId), ue.draft.joinedYm, V.ue.detail.user.courseExtraMonths);
     var n = Object.keys(ueChanged()).length, bar = document.querySelector(".v-savebar");
     if(bar){ bar.classList.toggle("show", n>0); var sp = bar.querySelector("span"); if(sp) sp.textContent = plural(n,"unsaved change"); }
   }
@@ -8077,11 +8289,14 @@
     else if(t.matches("[data-v-rule]")){ vSaveRule(t); }
     else if(t.matches("[data-v-file]")){ V.b.file = t.files && t.files[0] || null; V.b.preview = null; V.b.restoreErr = ""; render(); }
     else if(t.matches("[data-v-joined]")){ V.c.joined[t.getAttribute("data-v-joined")] = t.value; vPaintJoined(t, true); }
+    else if(t.matches("[data-v-ext-months]")){ var eu = t.getAttribute("data-v-ext-months"); if(V.c.extEdit[eu]) V.c.extEdit[eu].months = t.value; }
+    else if(t.matches("[data-v-ext-reason]")){ var eu2 = t.getAttribute("data-v-ext-reason"); if(V.c.extEdit[eu2]) V.c.extEdit[eu2].reason = t.value; }
   }
   function vPaintJoined(t, full){
     var u = t.getAttribute("data-v-joined"), c = V.c.people && V.c.people.course;
+    var pp = (V.c.people && V.c.people.people || []).filter(function(x){ return x.username===u; })[0];
     var cell = document.querySelector('[data-v-now="'+u+'"]');
-    var live = studyProgress(c, t.value);
+    var live = studyProgress(c, t.value, null, pp && pp.courseExtraMonths);
     if(cell) cell.innerHTML = live ? (live.status==="completed"?'<span class="muted">completed</span>':live.status==="not_started"?'<span class="muted">not started</span>':'<b>'+esc(live.label)+'</b>') : '<span class="muted">—</span>';
     var n = Object.keys(V.c.joined).length, b = document.querySelector('[data-v="course-joined-save"]');
     if(b){ b.disabled = !n; b.textContent = "Save "+(n?plural(n,"joining date"):"joining dates"); }
@@ -8089,6 +8304,11 @@
   async function vSaveRule(t){
     var k = t.getAttribute("data-v-rule"), f = t.getAttribute("data-f"), body = {}; body[k] = {};
     body[k][f] = f==="enabled" ? !!t.checked : parseInt(t.value,10);
+    // The browser already applied the click/typed value to the control
+    // before this handler ran, so a declined confirm has to repaint it back
+    // to the last-saved value -- otherwise the checkbox or number would be
+    // left showing the unconfirmed, unsaved change.
+    if(!vConfirmChange("Save this change to the automatic alert settings?")){ render(); return; }
     try{
       var r = await api("PUT","/alerts/rules",{ rules: body }); V.a.rules = r.rules; await vLoadAlertsManage(); await vLoadAlerts(true); render(); toast("Saved.");
     }catch(e){ toast(e.message || "Could not save."); await vLoadAlertsManage(); render(); }
@@ -8137,6 +8357,9 @@
     "course-people": function(t){ vLoadCoursePeople(t.getAttribute("data-id")); },
     "course-people-close": function(){ V.c.peopleFor = null; V.c.people = null; render(); },
     "course-joined-save": vSaveJoined,
+    "course-ext-edit": function(t){ vExtEdit(t.getAttribute("data-u")); },
+    "course-ext-cancel": function(t){ vExtCancel(t.getAttribute("data-u")); },
+    "course-ext-save": function(t){ vSaveExtension(t.getAttribute("data-u")); },
     // backups
     "backup-download": vBackupDownload, "backup-check": vBackupCheck,
     "backup-cancel": function(){ V.b.preview = null; V.b.pw = ""; V.b.word = ""; render(); },
@@ -8151,7 +8374,11 @@
       d.startsAt = (a.startsAt||"").slice(0,10); d.expiresAt = (a.expiresAt||"").slice(0,10); audToDraft(a.audience, d);
       V.a.draft = d; V.a.formErr = ""; vAudPreviewSoon(); render(); window.scrollTo(0,0);
     },
-    "alert-mute": async function(t){ try{ await api("PATCH","/alerts/"+t.getAttribute("data-id"), { active: t.getAttribute("data-next")==="true" }); await vLoadAlertsManage(); await vLoadAlerts(true); render(); }catch(e){ toast(e.message); } },
+    "alert-mute": async function(t){
+      var nextActive = t.getAttribute("data-next")==="true";
+      if(!vConfirmChange(nextActive ? "Unmute this alert?" : "Mute this alert? People stop seeing it until it is unmuted.")) return;
+      try{ await api("PATCH","/alerts/"+t.getAttribute("data-id"), { active: nextActive }); await vLoadAlertsManage(); await vLoadAlerts(true); render(); }catch(e){ toast(e.message); }
+    },
     "alert-del": async function(t){ if(!confirm("Delete this alert for everyone?")) return; try{ await api("DELETE","/alerts/"+t.getAttribute("data-id")); await vLoadAlertsManage(); await vLoadAlerts(true); render(); }catch(e){ toast(e.message); } },
     "aud-user-add": function(t){ var u = t.getAttribute("data-u"); if(V.a.draft.users.indexOf(u)===-1) V.a.draft.users.push(u); V.a.draft.userQ = ""; vAudPreviewSoon(); render(); },
     "aud-user-del": function(t){ var u = t.getAttribute("data-u"), a = V.a.draft.users, i = a.indexOf(u); if(i!==-1) a.splice(i,1); vAudPreviewSoon(); render(); },
@@ -8289,6 +8516,7 @@
                  regNo:e.regNo, email:e.email, phone:e.phone, notes:e.notes };
     if(e.linked){ delete body.displayName; delete body.designation; }
     if(dup) body.confirmDuplicate = true;
+    if(!dup && !vConfirmChange(e.id ? "Save changes to this doctor's details?" : "Add this doctor to the list?")) return;
     try{
       if(e.id) await api("PATCH","/doctors/"+e.id, body); else await api("POST","/doctors", body);
       V.d.edit = null; await loadDoctors(); toast("Saved.");
@@ -8402,6 +8630,7 @@
       else if(c.indexOf("merge:")===0) out.push({ name:r.name, action:"merge", mergeId:+c.slice(6) });
     });
     if(!out.length){ b.err = "Nothing to add."; render(); return; }
+    if(!vConfirmChange("Add "+plural(out.length,"doctor")+" to "+unitShort(b.unit)+"?")) return;
     try{
       var r = await api("POST","/doctors/bulk/apply",{ unit:b.unit, rows:out });
       b.result = r; b.rows = null; b.text = ""; await loadDoctors(); render();
@@ -8505,6 +8734,7 @@
     Object.keys(d.procedures).forEach(function(site){ var p = rPicked("sp:"+site); if(p.length) body.procedures[site] = p; });
     var n = body.diagnoses.length + body.comorbidities.length + Object.keys(body.procedures).reduce(function(a,k){ return a+body.procedures[k].length; }, 0);
     if(!n){ V.r.err = "Tick at least one item."; render(); return; }
+    if(!vConfirmChange("Add "+plural(n,"item")+" to the lists?")) return;
     V.r.busy = true; V.r.err = ""; render();
     try{
       var r = await api("POST","/lists/starter/apply", body);
@@ -8527,6 +8757,7 @@
   async function rPromote(){
     var sel = rSelected(); if(!sel.length){ V.r.err = "Tick at least one."; render(); return; }
     for(var i=0;i<sel.length;i++){ if(sel[i].list==="procedures" && !sel[i].site){ V.r.err = "Choose a site for “"+sel[i].as+"”."; render(); return; } }
+    if(!vConfirmChange("Add "+plural(sel.length,"item")+" to the lists?")) return;
     V.r.busy = true; V.r.err = ""; render();
     try{
       var r = await api("POST","/lists/review/promote",{ items: sel.map(function(x){ return { list:x.list, value:x.value, as:x.as, site:x.site }; }) });
@@ -8634,6 +8865,7 @@
     },
     "doc-status": async function(t){
       var next = t.getAttribute("data-next");
+      if(!vConfirmChange(next==="left" ? "Mark this doctor as left? They'll no longer appear in pickers." : "Put this doctor back on the active list?")) return;
       try{ await api("PATCH","/doctors/"+t.getAttribute("data-id"), { status: next }); await dAfterChange(next==="left" ? "Marked as left. They no longer appear in pickers." : "Back on the list."); }
       catch(e){ toast(e.message || "Could not change that."); }
     },
@@ -8641,6 +8873,7 @@
     "doc-invite-cancel-form": function(){ V.d.inv = null; render(); },
     "doc-invite-go": async function(){
       var v = V.d.inv; v.err = "";
+      if(!vConfirmChange("Create a sign-in invite for "+v.name+"?")) return;
       try{
         var r = await api("POST","/doctors/"+v.doctorId+"/invite",{ username: v.username.trim() });
         v.code = r.code; v.expiresAt = r.expiresAt; v.username = r.username; render();
@@ -8665,6 +8898,7 @@
     "bulk-cancel": function(){ V.d.bulk.rows = null; render(); },
     "bulk-apply": dBulkApply,
     "claim-approve": async function(t){
+      if(!vConfirmChange("Approve this sign-up and link the account?")) return;
       try{ await api("POST","/signup-requests/"+encodeURIComponent(t.getAttribute("data-u"))+"/approve",{}); await loadSignupRequests(); await dAfterChange("Approved and linked."); }
       catch(e){ toast(e.message || "Could not approve."); }
     },
@@ -8688,6 +8922,7 @@
     }
   });
   async function dTypedAssign(key, docId){
+    if(!vConfirmChange("Point all records spelled this way to the selected doctor? Their name on those records will be updated to match.")) return;
     try{
       var r = await api("POST","/doctors/typed-names/assign",{ key:key, doctorId:docId });
       V.d.typed = (await api("GET","/doctors/typed-names")).names; render(); toast("Updated "+plural(r.updated,"record")+".");
@@ -9228,14 +9463,26 @@ var GUIDE_GLOSSARY = [
   }
   function gdPersonaCard(key){
     var info = PERSONA_INFO[key], mine = gdMyPersonas().indexOf(key)!==-1;
-    var can = gdPersonaCan(key), dev = key==="developer", open = !!GS.open["p-"+key] || mine;
+    var can = gdPersonaCan(key), dev = key==="developer";
+    // Collapsed to just the role name by default -- open for the viewer's
+    // own persona (immediately relevant), or once the reader has opened it.
+    // Nine-odd roles' full "who / does / can / cannot" text used to render
+    // at once; this is the data that doesn't need to be on screen until
+    // asked for (v7.8).
+    var cardOpen = !!GS.open["pc-"+key] || mine;
+    var canOpen = !!GS.open["p-"+key] || mine;
     var nRes = GS.data.catalogue.filter(function(c){ return c.reserved; }).length;
-    return '<div class="gd-persona'+(mine?" mine":"")+'"><div class="gd-persona-head"><h3>'+esc(info.label)+'</h3>'+(mine?'<span class="chip chip-teal">You</span>':'')+'</div>'+
+    if(!cardOpen){
+      return '<div class="gd-persona gd-persona-closed"><button type="button" class="gd-persona-head gd-persona-toggle" data-gd="toggle" data-id="pc-'+key+'" aria-expanded="false">'+
+        '<h3>'+esc(info.label)+'</h3><span class="gd-chev" aria-hidden="true"></span></button></div>';
+    }
+    return '<div class="gd-persona'+(mine?" mine":"")+'"><button type="button" class="gd-persona-head gd-persona-toggle" data-gd="toggle" data-id="pc-'+key+'" aria-expanded="true">'+
+        '<h3>'+esc(info.label)+'</h3>'+(mine?'<span class="chip chip-teal">You</span>':'')+'<span class="gd-chev gd-chev-open" aria-hidden="true"></span></button>'+
       '<p class="gd-who">'+esc(info.who)+'</p><p>'+esc(gdFill(info.does))+'</p>'+
       '<div class="gd-can-h">Can do</div>'+
       (dev ? '<p class="muted">Everything in this guide, plus '+nRes+' Developer-only permissions.</p>' :
         (!can.length ? '<p class="muted">No extra permissions. They use their own logbook only.</p>' :
-          (open ? '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'
+          (canOpen ? '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'
                 : '<p class="muted">'+can.length+' thing'+(can.length===1?"":"s")+' they can do. <button type="button" class="link-btn" data-gd="toggle" data-id="p-'+key+'">Show</button></p>')))+
       '<div class="gd-can-h">Cannot do</div><ul class="gd-never">'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
   }
@@ -9330,7 +9577,7 @@ var GUIDE_GLOSSARY = [
         '<p class="muted gd-sub">Everything this role does, in the order it usually comes up. Open a step to see who, what, why, when and how.</p>'+
         gdRoadmap()+'</div>'+
       '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Operations, procedures and case write-ups follow this path. Teaching entries are not signed, so they stop at step 1.</p>'+gdFlow()+'</div>'+
-      (gdPrivileged() ? '<div class="card"><h2>Who does what</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
+      (gdPrivileged() ? '<div class="card"><h2>Roles</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
         '<div class="gd-personas">'+GS.data.personas.map(function(p){ return gdPersonaCard(p.key); }).join("")+'</div>'+
         '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>' : '')+
       '<div class="card"><h2>Questions people ask</h2><div class="gd-faq">'+GUIDE_FAQ.map(function(f, i){
@@ -9620,6 +9867,7 @@ var GUIDE_GLOSSARY = [
         if(sf.role==="fellow") body.unit = sf.unit;
       }
     }
+    if(!vConfirmChange(sf.kind==="complete" ? "Complete this stage? Their records are saved and become read-only." : "Move them to "+roleLabel(sf.role)+"?")) return;
     sf.busy = true; sf.err = ""; render();
     try{
       var r = await api("POST", path, body);
@@ -9708,6 +9956,7 @@ var GUIDE_GLOSSARY = [
   CLICK["ureq-send"] = async function(){
     var f = V.q.form;
     if(!f.toUnit || !f.startDate){ V.q.err = "Choose the unit and the date you would start."; render(); return; }
+    if(!vConfirmChange("Send this unit-change request?")) return;
     V.q.busy = true; V.q.err = ""; render();
     try{
       await api("POST","/unit-requests",{ toUnit:f.toUnit, startDate:f.startDate, endDate:f.endDate||null, reason:f.reason||"" });
@@ -9786,6 +10035,7 @@ var GUIDE_GLOSSARY = [
   CLICK["ureq-decide"] = async function(t){
     var id = t.getAttribute("data-id"), d = V.q.dec[id] || {}, what = t.getAttribute("data-d");
     if(what==="decline" && !(d.note||"").trim()){ toast("Add a note saying why, then decline."); return; }
+    if(what==="approve" && !vConfirmChange("Approve this unit-change request? They'll get a dated posting to that unit.")) return;
     try{
       await api("POST","/unit-requests/"+id+"/decide",{ decision: what, note: d.note||"", startDate: d.startDate, endDate: d.endDate||null });
       delete V.q.dec[id]; await vLoadUnitInbox(); render(); toast(what==="approve" ? "Approved. The posting is on file." : "Declined.");
@@ -9794,6 +10044,7 @@ var GUIDE_GLOSSARY = [
   CLICK["upost-add"] = async function(){
     var pf = V.q.pf; V.q.perr = "";
     if(!pf.unit || !pf.startDate){ V.q.perr = "Choose the unit and the start date."; render(); return; }
+    if(!vConfirmChange("Add this posting? They'll be able to see that unit's roster and records for these dates.")) return;
     try{
       await api("POST","/consultant-postings",{ username: V.q.who, unit: pf.unit, startDate: pf.startDate, endDate: pf.endDate||null, note: pf.note||"" });
       V.q.pf = { unit:"", startDate:"", endDate:"", note:"" }; await vLoadPostingsFor(); render(); toast("Posting added.");
