@@ -12,7 +12,7 @@ import datetime
 from flask import Blueprint, g, jsonify, request
 
 import perms
-from api import _account_event, approval_escalation_days
+from api import _account_event, approval_escalation_days, user_capabilities
 from auth import login_required
 from db import get_db
 
@@ -47,17 +47,27 @@ def _union(templates):
 @login_required()
 def guide():
     db = get_db()
-    tpls = perms.all_templates(db)
+    me = g.user["username"]
+    # The per-persona breakdown (below) is the same table the Permissions
+    # screen guards with perms.manage -- it names exactly what the Developer
+    # account can do. The Guide shows it to a wider audience (whoever also
+    # runs a unit, the course, or the department), but that audience check
+    # has to happen here, not just in the browser: a signed-in account that
+    # fails it must never receive the real `perms` data for any persona,
+    # Developer included, over the API either.
+    caps = user_capabilities(me)
+    privileged = bool(caps["isDeveloper"] or caps["isHod"] or caps["isCoordinator"] or caps["isHeadOfUnit"])
     personas = []
-    for key, label, parts in PERSONAS:
-        if parts is None:
-            held = {p["key"]: perms.SCOPE_ALL for p in perms.CATALOGUE if p["key"] not in perms.SEPARATED}
-        else:
-            held = _union([tpls[k] for k in parts])
-        personas.append({"key": key, "label": label, "perms": held})
+    if privileged:
+        tpls = perms.all_templates(db)
+        for key, label, parts in PERSONAS:
+            if parts is None:
+                held = {p["key"]: perms.SCOPE_ALL for p in perms.CATALOGUE if p["key"] not in perms.SEPARATED}
+            else:
+                held = _union([tpls[k] for k in parts])
+            personas.append({"key": key, "label": label, "perms": held})
     cat = [{"key": p["key"], "group": p["group"], "label": p["label"], "help": p["help"],
             "scoped": p["scoped"], "reserved": p["reserved"]} for p in perms.CATALOGUE]
-    me = g.user["username"]
     return jsonify({
         "catalogue": cat,
         "groups": [{"key": k, "label": l} for k, l in perms.GROUPS],
