@@ -1314,15 +1314,11 @@ input[type=email]:disabled, input[type=tel]:disabled, input[type=month]:disabled
 .gd-s-t{border-left-color:var(--teal);} .gd-s-t .gd-step-who{color:var(--teal-ink);}
 .gd-s-c{border-left-color:var(--violet);} .gd-s-c .gd-step-who{color:var(--violet);}
 .gd-s-o{border-left-color:var(--amber);} .gd-s-o .gd-step-who{color:var(--amber);}
-/* personas */
-.gd-personas{display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:12px;}
-.gd-persona{border:1px solid var(--line); border-radius:10px; padding:12px 14px; font-size:13.5px; line-height:1.5; background:var(--surface);}
-.gd-persona.mine{border-color:var(--teal); box-shadow:0 0 0 2px var(--teal-bg);}
+/* personas -- the viewer's own role is shown separately, above (the "You
+   are" line); this is just the on-demand detail for one other role picked
+   from the dropdown, so there is no grid and no per-card collapse here. */
+.gd-persona{border:1px solid var(--line); border-radius:10px; padding:12px 14px; font-size:13.5px; line-height:1.5; background:var(--surface); margin-top:12px;}
 .gd-persona-head{display:flex; align-items:center; gap:8px; justify-content:space-between;}
-.gd-persona-toggle{width:100%; text-align:left; background:none; border:0; padding:0; margin:0; font:inherit; color:inherit; cursor:pointer;}
-.gd-persona-toggle:focus-visible{outline:2px solid var(--teal); outline-offset:2px;}
-.gd-persona-closed{cursor:default;}
-.gd-chev-open{transform:rotate(225deg); margin-bottom:-3px;}
 .gd-persona h3{margin:0; font-size:15px;}
 .gd-persona p{margin:6px 0 0;}
 .gd-who{font-weight:600;}

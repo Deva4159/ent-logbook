@@ -5318,6 +5318,14 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "7.9", date: "2026-10-13", title: "Guide roles: server-side, and looked up one at a time",
+      note: "Closes a server-side gap; no database change. Replace backend/guide_routes.py, static/app.js and static/styles.css.",
+      changes: [
+        ["fixed", "<b>The permission breakdown behind the Guide's Roles section is now checked on the server, not just hidden in the browser.</b> Any signed-in account could previously ask the server directly for the full list of what every role — Developer included — is allowed to do; the app simply never displayed it to them. The Head of Department, Course Coordinator, Heads of Unit and Developer can still see it, exactly as before; everyone else's request for it now comes back empty, with no loophole."],
+        ["changed", "<b>Roles now shows your own role separately from everyone else's, and looks the others up one at a time.</b> Your role already appears at the top of the page (\"You are…\"); the Roles section below it is for looking up what one OTHER role can do, picked from a dropdown, rather than a grid of nine collapsible cards — which also had a bug where your own card couldn't be collapsed. Anyone who can't see a role's details here can still ask about it through Feedback."]
+      ]
+    },
+    {
       version: "7.8", date: "2026-10-13", title: "Confirm dialogs, fewer clicks, merging duplicates",
       note: "Adds four columns on users (course extension) and seeds six named fellowship courses; both run automatically on start-up. Replace the whole backend and static folders.",
       changes: [
@@ -9362,7 +9370,7 @@ var GUIDE_GLOSSARY = [
 ];
 
   /* ---- state ---------------------------------------------------------------- */
-  var GS = { data:null, who:"me", open:{}, matrix:false, err:"", tour:null, tip:null, checkedFor:null, loading:false };
+  var GS = { data:null, who:"me", open:{}, matrix:false, err:"", tour:null, tip:null, checkedFor:null, loading:false, roleView:"" };
   function gdFill(t){ return String(t==null?"":t).replace(/\{days\}/g, String(GS.data ? GS.data.escalationDays : 7)); }
   async function gdLoad(force){
     if(GS.data && !force) return GS.data;
@@ -9461,30 +9469,35 @@ var GUIDE_GLOSSARY = [
     var info = PERSONA_INFO[key]; if(!info || !(info.can||[]).length) return "";
     return '<div class="card"><h2>What you can do</h2><ul class="gd-rules">'+info.can.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
   }
-  function gdPersonaCard(key){
-    var info = PERSONA_INFO[key], mine = gdMyPersonas().indexOf(key)!==-1;
+  // The viewer's own role is already shown at the top of the page (the
+  // "You are" line) -- it doesn't need a second, detailed copy of itself
+  // here. This section is for looking up what ONE OTHER role can do, on
+  // demand, via a dropdown, instead of showing all nine roles' full
+  // "who / does / can / cannot" text at once (v7.9).
+  function gdOtherPersonas(){
+    var mine = gdMyPersonas();
+    return ((GS.data && GS.data.personas) || []).filter(function(p){ return mine.indexOf(p.key)===-1; });
+  }
+  function gdRoleDetail(key){
+    var info = PERSONA_INFO[key]; if(!info) return "";
     var can = gdPersonaCan(key), dev = key==="developer";
-    // Collapsed to just the role name by default -- open for the viewer's
-    // own persona (immediately relevant), or once the reader has opened it.
-    // Nine-odd roles' full "who / does / can / cannot" text used to render
-    // at once; this is the data that doesn't need to be on screen until
-    // asked for (v7.8).
-    var cardOpen = !!GS.open["pc-"+key] || mine;
-    var canOpen = !!GS.open["p-"+key] || mine;
     var nRes = GS.data.catalogue.filter(function(c){ return c.reserved; }).length;
-    if(!cardOpen){
-      return '<div class="gd-persona gd-persona-closed"><button type="button" class="gd-persona-head gd-persona-toggle" data-gd="toggle" data-id="pc-'+key+'" aria-expanded="false">'+
-        '<h3>'+esc(info.label)+'</h3><span class="gd-chev" aria-hidden="true"></span></button></div>';
-    }
-    return '<div class="gd-persona'+(mine?" mine":"")+'"><button type="button" class="gd-persona-head gd-persona-toggle" data-gd="toggle" data-id="pc-'+key+'" aria-expanded="true">'+
-        '<h3>'+esc(info.label)+'</h3>'+(mine?'<span class="chip chip-teal">You</span>':'')+'<span class="gd-chev gd-chev-open" aria-hidden="true"></span></button>'+
+    return '<div class="gd-persona"><div class="gd-persona-head"><h3>'+esc(info.label)+'</h3></div>'+
       '<p class="gd-who">'+esc(info.who)+'</p><p>'+esc(gdFill(info.does))+'</p>'+
       '<div class="gd-can-h">Can do</div>'+
       (dev ? '<p class="muted">Everything in this guide, plus '+nRes+' Developer-only permissions.</p>' :
         (!can.length ? '<p class="muted">No extra permissions. They use their own logbook only.</p>' :
-          (canOpen ? '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'
-                : '<p class="muted">'+can.length+' thing'+(can.length===1?"":"s")+' they can do. <button type="button" class="link-btn" data-gd="toggle" data-id="p-'+key+'">Show</button></p>')))+
+          '<ul class="gd-can">'+can.map(function(c){ return '<li>'+esc(c.label)+(c.tag?' <span class="chip chip-grey">'+esc(c.tag)+'</span>':'')+'</li>'; }).join("")+'</ul>'))+
       '<div class="gd-can-h">Cannot do</div><ul class="gd-never">'+info.never.map(function(t){ return '<li>'+esc(t)+'</li>'; }).join("")+'</ul></div>';
+  }
+  function gdRolePicker(){
+    var others = gdOtherPersonas();
+    var sel = others.some(function(p){ return p.key===GS.roleView; }) ? GS.roleView : "";
+    var opts = '<option value="">Choose a role…</option>'+others.map(function(p){
+      return '<option value="'+esc(p.key)+'"'+(sel===p.key?" selected":"")+'>'+esc((PERSONA_INFO[p.key]||{label:p.label}).label)+'</option>';
+    }).join("");
+    return '<div class="field gd-pick"><label for="gd-role-pick">Look up another role</label><select id="gd-role-pick" data-gd-role>'+opts+'</select></div>'+
+      (sel ? gdRoleDetail(sel) : '<p class="muted">Choose a role above to see what it can and cannot do.</p>');
   }
   function gdMatrix(){
     var d = GS.data, ps = d.personas;
@@ -9577,8 +9590,8 @@ var GUIDE_GLOSSARY = [
         '<p class="muted gd-sub">Everything this role does, in the order it usually comes up. Open a step to see who, what, why, when and how.</p>'+
         gdRoadmap()+'</div>'+
       '<div class="card"><h2>How a record travels</h2><p class="muted gd-sub">Operations, procedures and case write-ups follow this path. Teaching entries are not signed, so they stop at step 1.</p>'+gdFlow()+'</div>'+
-      (gdPrivileged() ? '<div class="card"><h2>Roles</h2><p class="muted gd-sub">What each role can do. This list updates when permissions change.</p>'+
-        '<div class="gd-personas">'+GS.data.personas.map(function(p){ return gdPersonaCard(p.key); }).join("")+'</div>'+
+      (gdPrivileged() ? '<div class="card"><h2>Roles</h2><p class="muted gd-sub">Your own role is shown above. Look up what any other role can do here, one at a time -- this updates when permissions change.</p>'+
+        gdRolePicker()+
         '<div class="gd-mx"><button type="button" class="btn btn-sm" data-gd="matrix" aria-expanded="'+(GS.matrix?"true":"false")+'">'+(GS.matrix?"Hide":"Show")+' the full comparison table</button>'+(GS.matrix?gdMatrix():"")+'</div></div>' : '')+
       '<div class="card"><h2>Questions people ask</h2><div class="gd-faq">'+GUIDE_FAQ.map(function(f, i){
           var open = !!GS.open["faq"+i];
@@ -9725,6 +9738,7 @@ var GUIDE_GLOSSARY = [
   document.addEventListener("change", function(ev){
     var t = ev.target;
     if(t && t.getAttribute && t.hasAttribute("data-gd-who")){ GS.who = t.value; render(); }
+    if(t && t.getAttribute && t.hasAttribute("data-gd-role")){ GS.roleView = t.value; render(); }
   });
 
 
