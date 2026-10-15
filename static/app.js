@@ -835,6 +835,27 @@
     if(t==="seminar"){ return ((e.seminarType==="Other"?e.seminarTypeOther:e.seminarType)||"Seminar") + (e.topic ? " — "+e.topic : ""); }
     return "—";
   }
+  // v8.0.1: "date + Hospital Number" wasn't enough to tell two records
+  // apart (live-site feedback) -- every place that identifies an entry
+  // OUTSIDE its own detail view (pickers, the complications queue, the
+  // "Log a Complication" dialog's own header) now also carries the
+  // Primary Diagnosis and the procedure performed, built from the exact
+  // same entryDiagnoses()/summarizeEntry() the detail view uses, so the
+  // three can never drift apart.
+  function entryIdentifier(e){
+    var bits = [];
+    var hn = entryHospitalNumber(e);
+    if(hn) bits.push(hn);
+    var dx = entryDiagnoses(e);
+    if(dx.length) bits.push(dx.join(", "));
+    var t = normType(e);
+    if(t==="surgical" || t==="other"){
+      var s = summarizeEntry(e);
+      if(s && s!=="—") bits.push(s);
+    }
+    if(!bits.length) bits.push(summarizeEntry(e) || ("entry #"+e.id));
+    return bits.join(" · ");
+  }
   var ENTRY_TYPE_CHIP = { surgical:["chip-teal","Surgical procedure"], other:["chip-amber","Other procedure"], case:["chip-grey","Interesting case"], academic:["chip-green","Academic"], seminar:["chip-violet","Seminar/Presentation"] };
   function entryTypeChip(e){
     var m = ENTRY_TYPE_CHIP[normType(e)] || ["chip-grey", e.entryType];
@@ -1192,6 +1213,23 @@
       });
     }
     return undefined;
+  }
+  // v8.0.1: shown next to the Date field while FILLING a Surgical/Other
+  // Procedure form -- live-site feedback was that the POD convention only
+  // ever appeared after the fact (My Entries, the complications screens),
+  // never at the point a case is actually started. Pure info, re-rendered
+  // on every date change via wizDateChanged; the same unitPodZero() used
+  // everywhere else, so it can never say something entryPodSuffix wouldn't
+  // also say once this record is saved.
+  function wizPodConventionHint(f){
+    var unitKey = unitForDate((state.user||{}).postings, (f&&f.date) || todayISO());
+    if(!unitKey){
+      return '<p class="muted" style="font-size:12.5px; margin:-8px 0 14px;">Your posting on this date isn’t on file yet, so the POD convention can’t be shown here — add it under My Postings.</p>';
+    }
+    var zero = unitPodZero(unitKey);
+    return '<p class="muted" style="font-size:12.5px; margin:-8px 0 14px;">'+unitShortHtml(unitKey)+' uses <b>'+(zero?"POD 0":"POD 1")+'</b> — '+
+      (zero ? "the day of surgery/procedure itself is POD 0; the day after is POD 1."
+            : "the day of surgery/procedure itself is POD 1; counting starts the day after.")+'</p>';
   }
   // The universal label (spec #1): a Surgical/Other entry's own date, as
   // "POD n" against itself -- plus, on a linked follow-up entry (#3), a
@@ -2533,7 +2571,7 @@
     return (start===null || start<=now) && (end===null || now<=end);
   }
 
-  async function addUnit(fullName, shortForm, group){
+  async function addUnit(fullName, shortForm, group, podZero){
     fullName=(fullName||"").trim(); shortForm=(shortForm||"").trim();
     if(!fullName || !shortForm){ toast("Enter both a full name and a short form."); return; }
     var key = uniqueUnitKey(slugify(shortForm));
@@ -2555,8 +2593,8 @@
         }
       }
     }
-    list.splice(insertAt, 0, {key:key, fullName:fullName, shortForm:shortForm, group:group});
-    if(!vConfirmChange("Add “"+fullName+"” as a new unit?")) return;
+    list.splice(insertAt, 0, {key:key, fullName:fullName, shortForm:shortForm, group:group, podDayZero: !!podZero});
+    if(!vConfirmChange("Add “"+fullName+"” as a new unit, using the "+(podZero?"POD 0":"POD 1")+" convention?")) return;
     try{
       await dUpdateConfig({units:list});
       state.config.units = list;
@@ -3366,8 +3404,11 @@
     '</div></div>'+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
       (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
-      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Summary</th><th>Unit</th></tr></thead><tbody>'+
-        recent.map(function(e){ return '<tr><td class="tabular">'+fmtDate(e.date)+entryPodSuffix(e)+'</td><td>'+entryTypeChip(e)+'</td><td>'+esc(summarizeEntry(e))+'</td><td>'+unitShortHtml(e.unit)+'</td></tr>'; }).join("")+
+      '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Hospital Number</th><th>Primary Diagnosis</th><th>Summary</th><th>Unit</th></tr></thead><tbody>'+
+        // v8.0.1: Date + Type + Summary alone didn't identify a record
+        // (live-site feedback) -- Hospital Number and Primary Diagnosis
+        // added as their own columns, same source as everywhere else.
+        recent.map(function(e){ return '<tr><td class="tabular">'+fmtDate(e.date)+entryPodSuffix(e)+'</td><td>'+entryTypeChip(e)+'</td><td>'+esc(entryHospitalNumber(e)||"—")+'</td><td>'+esc(entryDiagnoses(e).join(", ")||"—")+'</td><td>'+esc(summarizeEntry(e))+'</td><td>'+unitShortHtml(e.unit)+'</td></tr>'; }).join("")+
       '</tbody></table></div>')+
     '</div>';
   }
@@ -3847,6 +3888,7 @@
           '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+esc(f.date)+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
         '</div>'+
+        wizPodConventionHint(f)+
         '<div class="row2">'+
           fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
           '<div class="field"><label for="f-age">Age</label><input id="f-age" type="number" min="0" max="130" value="'+esc(f.age||"")+'" placeholder="e.g. 27"></div>'+
@@ -3879,6 +3921,7 @@
           '<div class="field"><label for="f-otherSettingType">Setting</label><select id="f-otherSettingType">'+opts_(state.config.otherProcedureSettings,f.otherSettingType)+'</select></div>'+
           '<div class="field"><label for="f-date">Date of procedure</label><input id="f-date" type="date" value="'+esc(f.date)+'" onchange="window.__entlog_wizDateChanged(this.value)"></div>'+
         '</div>'+
+        wizPodConventionHint(f)+
         '<div class="row2">'+
           '<div class="field"><label for="f-setting">Emergency / Elective</label><select id="f-setting">'+opts_(state.config.settings,f.setting)+'</select></div>'+
           fieldGroup("hospitalNumber", '<label for="f-hospitalNumber">Hospital Number</label><input id="f-hospitalNumber" type="text" value="'+esc(f.hospitalNumber||"")+'" placeholder="e.g. HN-238419">')+
@@ -4155,6 +4198,16 @@
       var menuKey = uiKey+":"+idStr;
       var menuItems = opts.actions ? opts.actions(e) : "";
       var isDraft = e.status==="draft";
+      // v8.0.1: date + Hospital Number alone didn't identify a record at a
+      // glance (live-site feedback) -- the sub-line now also carries the
+      // procedure performed, alongside the Primary Diagnosis it already had.
+      var subBits = entryDiagnoses(e).slice();
+      var tNorm = normType(e);
+      if(tNorm==="surgical" || tNorm==="other"){
+        var procSummary = summarizeEntry(e);
+        if(procSummary && procSummary!=="—") subBits.push(procSummary);
+      }
+      var subText = subBits.join(" · ") || summarizeEntry(e) || "";
       return ''+
       '<div class="entry-card'+(isOpen?' entry-card-open':'')+'" data-entries-search-text="'+esc(entrySearchText(e))+'">'+
         '<div class="entry-card-summary" role="button" tabindex="0" aria-expanded="'+(isOpen?"true":"false")+'" data-entry-toggle="'+esc(uiKey)+'" data-entry-id="'+esc(idStr)+'">'+
@@ -4162,7 +4215,7 @@
           '<span class="entry-card-date tabular">'+fmtDate(e.date)+entryPodSuffix(e)+'</span>'+
           entryTypeChip(e)+
           '<span class="entry-card-main">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</span>'+
-          '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
+          '<span class="entry-card-sub muted">'+esc(subText)+'</span>'+
           (opts.showStatusBadge && isDraft ? ' <span class="chip chip-amber">Draft</span>' : '')+
           (opts.showApproval && !isDraft ? '<span class="entry-card-approval">'+approvalChip(e)+'</span>' : '')+
           (opts.selectable && !entryClosed(e) && isApprovable(e) && (e.approvalState==="not_submitted"||e.approvalState==="changes_requested")
@@ -4362,7 +4415,7 @@
       '<span class="eyebrow">'+(isEdit?"Edit complication":"Complication")+'</span>'+
       '<h2>'+(isEdit?"Edit complication":"Log a Complication")+'</h2>'+
       '<p class="muted" style="font-size:13px; margin:6px 0 14px;">Against '+
-        esc(entryHospitalNumber(entry)||summarizeEntry(entry)||("entry #"+entry.id))+' · '+fmtDate(entry.date)+'</p>'+
+        esc(entryIdentifier(entry))+' · '+fmtDate(entry.date)+'</p>'+
       '<div class="field"><label for="cx-name">Complication</label>'+
         '<input id="cx-name" type="text" list="cx-name-list" value="'+esc(f.complicationName||"")+'" placeholder="e.g. Post-op haemorrhage">'+
         '<datalist id="cx-name-list">'+(state.config.complicationNames||[]).map(function(n){ return '<option value="'+esc(n)+'">'; }).join("")+'</datalist></div>'+
@@ -4405,7 +4458,7 @@
         (linking?"Pick the finalized Surgical or Other Procedure record that already covers managing this complication.":"Pick the finalized Surgical or Other Procedure record it happened after.")+'</p>'+
       (rows.length ? '<div style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">'+rows.map(function(e){
         return '<button type="button" class="btn" style="display:block; width:100%; text-align:left;" data-cxpick-choose="'+e.id+'">'+
-          fmtDate(e.date)+entryPodSuffix(e)+' · '+esc(entryHospitalNumber(e)||summarizeEntry(e)||"")+'</button>';
+          fmtDate(e.date)+entryPodSuffix(e)+' · '+esc(entryIdentifier(e))+'</button>';
       }).join("")+'</div>' : '<p class="muted" style="font-size:13px;">'+(linking?"No finalized Surgical or Other Procedure records of yours to link.":"No finalized Surgical or Other Procedure records yet.")+'</p>')+
       '<div class="btn-row" style="margin-top:14px;"><button class="btn" data-cxpick-cancel>Close</button></div>'+
     '</div></div>';
@@ -4472,7 +4525,7 @@
     return '<div class="q-row">'+
       '<div class="q-main">'+
         '<div class="q-top"><b>'+esc(item.complicationName)+'</b>'+complicationApprovalChip(item.approvalState)+
-          '<span class="muted">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"")+'</span></div>'+
+          '<span class="muted">'+esc(entryIdentifier(e))+'</span></div>'+
         '<div class="q-meta muted">'+esc(item.authorDisplayName||userDisplay(item.authorUsername))+' &middot; '+fmtDate(item.dateOfComplication)+
           ' &middot; '+podLabel(item.podDay)+' &middot; '+unitShortHtml(e.unit)+
           (delegated ? ' &middot; <span class="chip chip-violet">for '+esc(item.approverDisplayName||userDisplay(item.onBehalfOf))+'</span>' : '')+
@@ -4576,7 +4629,7 @@
       '<div class="q-main">'+
         '<div class="q-top">'+entryTypeChip(e)+
           '<b>'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</b>'+
-          '<span class="muted">'+esc(summarizeEntry(e)||"")+'</span></div>'+
+          '<span class="muted">'+esc(entryDiagnoses(e).concat(summarizeEntry(e)&&summarizeEntry(e)!=="—"?[summarizeEntry(e)]:[]).join(" · "))+'</span></div>'+
         '<div class="q-meta muted">'+esc(e.authorDisplayName||userDisplay(e.authorUsername))+' &middot; '+fmtDate(e.date)+
           ' &middot; '+unitShortHtml(e.unit)+
           ' &middot; <span class="'+(over?"q-age-over":"")+'">waiting '+e.waitingDays+'d</span>'+
@@ -4658,7 +4711,11 @@
     stageFilterBar()+
     approvalCounters()+
     bulkBar+
-    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')'+tipBtn("send-signoff")+'</h2><button class="btn btn-sm" id="open-export">Export\u2026</button></div>'+
+    '<div class="card"><div class="section-head"><h2>My Entries ('+rows.length+')'+tipBtn("send-signoff")+'</h2>'+
+      '<div style="display:flex; gap:8px;">'+
+        (rows.some(function(e){ return mayLogComplication(e); }) ? '<button class="btn btn-sm" data-nav="__cx-pick">Log a Complication</button>' : '')+
+        '<button class="btn btn-sm" id="open-export">Export\u2026</button>'+
+      '</div></div>'+
     renderEntriesList({
       uiKey: "my-entries",
       entries: rows,
@@ -4698,8 +4755,8 @@
     if(entryHospitalNumber(e)) rows.push(["Hospital Number", esc(entryHospitalNumber(e))]);
     if(e.age || e.sex) rows.push(["Age/Sex", esc(entryAgeSex(e))]);
     if(t==="surgical" || t==="other" || t==="case"){
-      if(entryDiagnoses(e).length) rows.push(["Primary diagnosis", esc(entryDiagnoses(e).join(", "))]);
-      if(entrySecondaryDiagnoses(e).length) rows.push(["Secondary diagnosis", esc(entrySecondaryDiagnoses(e).join(", "))]);
+      if(entryDiagnoses(e).length) rows.push(["Primary Diagnosis", esc(entryDiagnoses(e).join(", "))]);
+      if(entrySecondaryDiagnoses(e).length) rows.push(["Secondary Diagnosis", esc(entrySecondaryDiagnoses(e).join(", "))]);
       if(entryComorbidities(e).length) rows.push(["Co-morbidities", esc(entryComorbidities(e).join(", "))]);
     }
     if(t==="surgical" || t==="other"){
@@ -4763,7 +4820,7 @@
   var HISTORY_FIELD_LABELS = {
     entryType:"Type", unit:"Unit", date:"Date of procedure", site:"Site", procedures:"Procedure(s)",
     setting:"Setting", otherSettingType:"Setting detail", hospitalNumber:"Hospital Number",
-    age:"Age", sex:"Sex", diagnoses:"Primary diagnosis", diagnosesSecondary:"Secondary diagnosis",
+    age:"Age", sex:"Sex", diagnoses:"Primary Diagnosis", diagnosesSecondary:"Secondary Diagnosis",
     comorbidities:"Co-morbidities", laterality:"Laterality", role:"Role", consultant:"Consultant",
     consultantUsername:"Consultant (linked account)", assistants:"Assistants", comments:"Comments/Complications",
     caseReport:"Case report?", linkedFromId:"Linked entry ID", history:"Brief History", examination:"Examination Findings",
@@ -5933,6 +5990,14 @@
         '<div class="field"><label for="newunit-shortform">Short form</label><input type="text" id="newunit-shortform" placeholder="e.g. ENT 6"></div>'+
         '<div class="field"><label for="newunit-group">Group</label><select id="newunit-group"><option>Oto-laryngology Units</option><option selected>Peripheral Postings</option></select></div>'+
       '</div>'+
+      // v8.0.1: not every unit is surgical, so this is chosen up front rather
+      // than inherited from a department-wide default -- the two-person
+      // request/HOD-decide flow (below) only ever protects a convention
+      // that's already been SET; a brand-new unit has none yet to protect.
+      '<div class="field"><label for="newunit-podzero">POD convention</label><select id="newunit-podzero">'+
+        '<option value="0">Day of surgery/procedure is POD 1 (most peripheral/non-operative postings)</option>'+
+        '<option value="1">Day of surgery/procedure is POD 0</option>'+
+      '</select></div>'+
       '<button class="btn btn-sm btn-primary" id="add-unit">Add unit</button>'+
     '</div>'+
     podRequestsSection()+
@@ -5975,6 +6040,31 @@
      Types: "added" | "changed" | "fixed".
   ============================================================ */
   var CHANGELOG = [
+    {
+      version: "8.0.1", date: "2026-10-15", title: "Complications launch fixes: identifiers, POD defaults, a release checklist",
+      note: "Corrects a v8.0 config default (one-time, self-correcting migration) and adds a POD-convention choice to the “Add unit” form; no schema change. Replace backend/db.py, backend/api.py and static/app.js.",
+      changes: [
+        ["fixed", "<b>Updates kept reporting “Running version 7.9” after 8.0 shipped.</b> The changelog this page reads from is hand-written per release — by design, so it can never drift from what the running code actually does — and the 8.0 entry was simply never added before that build went out. Fixed here, and a release checklist (see below) now makes sure a version bump and its changelog entry ship together, every time."],
+        ["added", "<b>POD (Post-Op/Post-Procedure Day) now shows a hint while you're filling in a new Surgical or Other Procedure record,</b> not only after it's saved — which convention your current unit uses, and what that means for the date you've entered. It was already shown everywhere the record appears afterwards; it was missing at the one moment it's most useful."],
+        ["added", "<b>My Entries can now start a complication straight from its own header,</b> next to Export, instead of only from inside an already-expanded record's Complications section."],
+        ["added", "<b>Record identifiers now carry the Primary Diagnosis and the procedure performed,</b> not just the date and Hospital Number — everywhere a record needs picking out of a list: the complication picker, the complications queue, the “Log a Complication” dialog's own header, the case sign-off queue, and the Dashboard's Recent entries table (which gained Hospital Number and Primary Diagnosis columns outright)."],
+        ["added", "<b>Adding a unit now asks for its POD convention up front,</b> rather than silently inheriting one. Not every unit is a surgical/operative posting, so this is a deliberate choice from the start; once set, moving it still needs the HOD's approval like any other unit, exactly as before."],
+        ["fixed", "<b>POD 0 was defaulting to every unit, not just the department's seven operative ones (ENT 1–5, HNS 1–2).</b> Any other unit now defaults to POD 1, in line with the point above. A one-time, automatic correction fixes any unit that was already wrongly defaulted this way — it never touches a unit's seven baseline units, and never touches a convention an HOD has actually decided, whichever way."]
+      ]
+    },
+    {
+      version: "8.0", date: "2026-10-14", title: "Post-Operative/Post-Procedure Complications",
+      note: "Adds five tables and two columns on entries; backfills a POD-convention flag on every unit. Replace backend/complication_routes.py (new), backend/usernames.py, backend/app.py, backend/api.py, backend/db.py, backend/schema_sqlite.sql and static/app.js.",
+      changes: [
+        ["added", "<b>Log a complication against any finalized Surgical or Other Procedure record</b> — from the record itself, from My Entries, or from a dashboard quick link that picks the record for you. It's a child record of the case it followed, with its own notes, and never touches the operative record it's logged against."],
+        ["added", "<b>A complication gets its own sign-off,</b> the same not-submitted → pending → approved / changes-requested cycle as an entry, decided by the entry's own consultant, an Involved Fellow, the Head of Unit, or a delegate — nobody ever approves their own record."],
+        ["added", "<b>Every Surgical/Other record's date now carries a POD (Post-Op/Post-Procedure Day) label</b> wherever it's shown, computed live off its unit's current convention — so a later correction to either the date or the convention applies retroactively, everywhere, automatically."],
+        ["added", "<b>Changing a unit's POD convention is a two-person decision:</b> a Developer requests it, only the Head of Department can approve it — not delegable — because it retroactively relabels every complication ever logged under that unit."],
+        ["added", "<b>Logging the definitive management of a complication as its own case record,</b> with a second POD counter measured against the original case, alongside its own."],
+        ["added", "<b>Deleting a complication is a request, not a click</b> — decided the same way as its own sign-off, except one a complication never submitted for approval, which its author can simply remove."],
+        ["changed", "<b>Export gained an optional “Include complications” column,</b> off by default — one extra row per complication, directly under its case."]
+      ]
+    },
     {
       version: "7.9", date: "2026-10-13", title: "Guide roles: server-side, and looked up one at a time",
       note: "Closes a server-side gap; no database change. Replace backend/guide_routes.py, static/app.js and static/styles.css.",
@@ -7839,7 +7929,8 @@
 
     // developer - units & roles
     var addUnitBtn = el("add-unit"); if(addUnitBtn) addUnitBtn.onclick = function(){
-      addUnit((el("newunit-fullname")||{}).value, (el("newunit-shortform")||{}).value, (el("newunit-group")||{}).value);
+      addUnit((el("newunit-fullname")||{}).value, (el("newunit-shortform")||{}).value, (el("newunit-group")||{}).value,
+        (el("newunit-podzero")||{}).value === "1");
     };
     document.querySelectorAll("[data-remove-unit]").forEach(function(b){
       b.onclick = function(){ removeUnit(b.getAttribute("data-remove-unit")); };
