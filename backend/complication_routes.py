@@ -507,8 +507,16 @@ def complication_history(cid):
 @cx.get("/complications/approvals/queue")
 @login_required()
 def complications_queue():
+    # v8.0.1: the Developer deliberately DOES decide complications --
+    # _can_decide_complication above names this explicitly as the one
+    # asymmetry with base-entry sign-off, where the Developer is excluded
+    # outright. This listing had copied the base-entry queue's blanket
+    # "role == developer -> forbidden" verbatim, which left the Developer's
+    # own "Complications" nav tab 403ing on every visit -- nothing wrong
+    # with their account, the list just refused to compute for them at all.
     me = g.user["username"]
-    if g.user["role"] == "developer" or not (
+    is_dev = g.user["role"] == "developer"
+    if not is_dev and not (
             g.user["role"] == "consultant" or perms.can(me, "signoff.approve")
             or perms.can(me, "signoff.delegate")):
         return jsonify({"error": "forbidden"}), 403
@@ -517,12 +525,17 @@ def complications_queue():
     can_approve = perms.can(me, "signoff.approve")
     mine, delegated = [], []
     for c in rows:
+        if c["author_username"] == me:
+            continue  # nobody decides their own, Developer included
         entry = _entry_for_complication(db, c["entry_id"])
         if not entry:
             continue
-        own = c["approver_username"] == me and can_approve and c["author_username"] != me
-        can_delegate = (not own) and c["author_username"] != me \
-            and perms.in_scope(me, "signoff.delegate", entry["unit"])
+        own = c["approver_username"] == me and can_approve and not is_dev
+        # A Developer isn't the nominated approver on anything, but can
+        # still decide every one of these -- same bucket a delegate's items
+        # land in, so the UI's existing "for <nominee>" chip applies here
+        # without any frontend change.
+        can_delegate = (not own) and (is_dev or perms.in_scope(me, "signoff.delegate", entry["unit"]))
         if not own and not can_delegate:
             continue
         item = complication_row_to_dict(db, c, entry)

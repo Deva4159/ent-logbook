@@ -52,10 +52,18 @@ DEFAULT_PROCEDURES = {
 }
 
 # podDayZero: this unit's Post-Op/Post-Procedure Day convention -- true means
-# the day of the surgery/procedure itself is POD 0 (the department-wide norm),
-# false means it's POD 1 (some peripheral postings count this way). Changing
-# it after the fact is NOT a plain Developer edit like every other field here
-# -- see pod_convention_requests in schema_sqlite.sql and complications.py.
+# the day of the surgery/procedure itself is POD 0, false means it's POD 1
+# (counting starts the day after). Changing it after the fact is NOT a plain
+# Developer edit like every other field here -- see pod_convention_requests
+# in schema_sqlite.sql and complications.py.
+#
+# v8.0.1: NOT every unit is a surgical/operative one, so POD 0 is only ever
+# the right *default* for the seven units the department actually operates
+# out of -- every other unit (existing or added later) defaults to POD 1
+# unless a Developer deliberately picks POD 0 for it (see unit_routes.py /
+# the "Add unit" form) or the HOD approves a convention change for it.
+POD_ZERO_BASELINE_UNITS = {"ent1", "ent2", "ent3", "ent4", "ent5", "hns1", "hns2"}
+
 DEFAULT_UNITS = [
     {"key": "ent1", "fullName": "Oto-laryngology Unit 1 – General ENT with specialization in Skull Base Surgery & Head and Neck Surgery", "shortForm": "ENT 1", "group": "Oto-laryngology Units", "podDayZero": True},
     {"key": "ent2", "fullName": "Oto-laryngology Unit 2 – General ENT with specialization in Pediatric ENT and Cochlear Implant Unit", "shortForm": "ENT 2", "group": "Oto-laryngology Units", "podDayZero": True},
@@ -437,15 +445,60 @@ def init_db():
                 current[k] = v
                 changed = True
         # v8.0: "units" already existed, so the loop above never touches it --
-        # every unit inside it needs its own explicit POD convention, defaulting
-        # to the department-wide norm (day of surgery = POD 0) rather than
-        # silently having none.
+        # every unit inside it needs its own explicit POD convention rather
+        # than silently having none. v8.0.1: that default is NOT a blanket
+        # POD 0 -- only the seven units the department actually operates out
+        # of default that way; every other unit (an existing one with no
+        # value yet, same as a brand-new one) defaults to POD 1.
         for u in (current.get("units") or []):
             if isinstance(u, dict) and "podDayZero" not in u:
-                u["podDayZero"] = True
+                u["podDayZero"] = u.get("key") in POD_ZERO_BASELINE_UNITS
                 changed = True
         if changed:
             conn.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(current),))
+        # v8.0.1 one-time correction, tracked in its own internal 'config'
+        # row (never 'lists' -- that one is the public /config body, and
+        # this marker is nobody's business but this migration's). The v8.0
+        # launch build backfilled EVERY unit to podDayZero=true, baseline or
+        # not -- this department's own 7 units were right either way, but
+        # any further (non-baseline) unit added between then and now got
+        # POD 0 by that same accident, nobody having chosen it. Undo only
+        # that, and only ONCE -- a non-baseline unit's podDayZero is a
+        # perfectly legitimate "true" from here on, deliberately chosen
+        # either on the "Add unit" form or an HOD-approved convention
+        # request, and this must never reach back and flip either of those.
+        meta_row = conn.execute("SELECT data FROM config WHERE id = '_meta'").fetchone()
+        meta = json.loads(meta_row["data"]) if meta_row else {}
+        if not meta.get("podZeroBaselineCorrected"):
+            current = json.loads(
+                conn.execute("SELECT data FROM config WHERE id = 'lists'").fetchone()["data"]
+            )
+            try:
+                decided_units = {
+                    r["unit"] for r in conn.execute(
+                        "SELECT DISTINCT unit FROM pod_convention_requests "
+                        "WHERE status IN ('approved', 'rejected')"
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                decided_units = set()  # pod_convention_requests doesn't exist yet (fresh DB, schema runs after this)
+            units_changed = False
+            for u in (current.get("units") or []):
+                if not isinstance(u, dict):
+                    continue
+                key = u.get("key")
+                if key in POD_ZERO_BASELINE_UNITS or key in decided_units:
+                    continue
+                if u.get("podDayZero") is True:
+                    u["podDayZero"] = False
+                    units_changed = True
+            if units_changed:
+                conn.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(current),))
+            meta["podZeroBaselineCorrected"] = True
+            if meta_row:
+                conn.execute("UPDATE config SET data = ? WHERE id = '_meta'", (json.dumps(meta),))
+            else:
+                conn.execute("INSERT INTO config (id, data) VALUES ('_meta', ?)", (json.dumps(meta),))
     conn.commit()
     # After the config row exists: the default courses read the department's
     # unit list to decide which units are peripheral.
