@@ -91,7 +91,26 @@
     entriesUI: {},
     // Which row's "⋮" action menu is currently open, as "<uiKey>:<entryId>"
     // -- at most one open at a time, across every entries list on screen.
-    openEntryMenu: null
+    openEntryMenu: null,
+
+    /* -------------------- v8.0: complications -------------------- */
+    complicationDialog: null,   // { entryId, entry, editingId, fields }
+    complicationsByEntry: {},   // entryId -> [complications] once loaded (undefined = not yet requested)
+    complicationsLoading: {},   // entryId -> true while a fetch is in flight
+    complicationsQueue: null,   // { queue, delegated } for the consultant "Complications" tab
+    complicationsQueueLoaded: false,
+    complicationsBadge: 0,      // nav-item pending count
+    cxPickDialog: null,         // dashboard "Record a Complication" entry picker: { entries }
+    cxDeleteDialog: null,       // { complication }
+    cxUnlockDialog: null,       // { entryId, list, picked }
+    // Lazily-fetched original case (for a complication's own linked
+    // follow-up entry's counter-2 POD label) -- id -> entry dict, or null
+    // once confirmed gone. Undefined means "not fetched yet".
+    originCache: {},
+    originLoading: {},
+    // v8.0: POD (Post-Op/Post-Procedure Day) convention change requests.
+    podRequestDialog: null,     // { unit }
+    podRequests: null           // pending requests, for the Developer/HOD
   };
 
   /* ============================================================
@@ -420,7 +439,12 @@
       otherProcedureSettings: DEFAULT_OTHER_SETTINGS.slice(),
       sexOptions: DEFAULT_SEX_OPT.slice(),
       seminarTypes: DEFAULT_SEMINAR_TYPES.slice(),
-      consultantDesignations: DEFAULT_CONSULTANT_DESIGNATIONS.slice()
+      consultantDesignations: DEFAULT_CONSULTANT_DESIGNATIONS.slice(),
+      // v8.0. Only ever used as a fallback if GET /config itself fails --
+      // the server already seeds real lists for these.
+      complicationNames: [],
+      complicationPresentedAt: [],
+      complicationManagement: []
     };
   }
 
@@ -833,8 +857,17 @@
     // did nothing at all. That is the one screen where a consultant most
     // needs to read the record before signing it off.
     var q = state.approvalQueue || {};
+    var cq = state.complicationsQueue || {};
+    var rosterEntries = [];
+    (state.roster||[]).forEach(function(r){ rosterEntries = rosterEntries.concat(r.entries||[]); });
     var pools = [state.myEntries||[], state.detailEntries||[], state.devAllEntries||[],
-                 q.queue||[], q.delegated||[]];
+                 q.queue||[], q.delegated||[], rosterEntries,
+                 // v8.0: a complications-queue row carries the whole base
+                 // entry alongside it (see complications_queue in the
+                 // backend) specifically so "Open case" from that tab works
+                 // the same way it does from the entry sign-off queue.
+                 (cq.queue||[]).map(function(it){ return it.entry; }).filter(Boolean),
+                 (cq.delegated||[]).map(function(it){ return it.entry; }).filter(Boolean)];
     for(var i=0;i<pools.length;i++){
       var hit = pools[i].filter(function(x){ return x.id==id; })[0];
       if(hit) return hit;
@@ -1044,6 +1077,236 @@
   async function dRemoveRoleAssignment(id){ await api("DELETE","/role-assignments/"+id); }
   async function dListPasswordRequests(){ return (await api("GET","/password-requests")).requests; }
   async function dResolvePasswordRequest(id){ await api("POST","/password-requests/"+id+"/resolve"); }
+
+  /* ============================================================
+     COMPLICATIONS (v8.0) -- post-op/post-procedure complications,
+     Surgical and Other Procedure entries only. Same api() helper and
+     error shape as every other call in this file.
+  ============================================================ */
+  async function cxList(entryId){ return (await api("GET","/entries/"+entryId+"/complications")).complications; }
+  async function cxCreate(entryId, data){ return (await api("POST","/entries/"+entryId+"/complications", data)).complication; }
+  async function cxUpdate(id, data){ return (await api("PATCH","/complications/"+id, data)).complication; }
+  async function cxSubmit(id, approverUsername, comment){
+    return (await api("POST","/complications/"+id+"/submit",
+      { approverUsername: approverUsername||undefined, comment: comment||undefined })).complication;
+  }
+  async function cxWithdraw(id){ return await api("POST","/complications/"+id+"/withdraw",{}); }
+  async function cxApprove(id, comment){ return (await api("POST","/complications/"+id+"/approve",{comment:comment||undefined})).complication; }
+  async function cxRequestChanges(id, comment){ return (await api("POST","/complications/"+id+"/request-changes",{comment:comment})).complication; }
+  async function cxRelease(id, comment){ return await api("POST","/complications/"+id+"/release",{comment:comment||undefined}); }
+  async function cxReleaseBulk(entryId, ids){ return await api("POST","/entries/"+entryId+"/complications/release-bulk",{ids:ids}); }
+  async function cxHistory(id){ return (await api("GET","/complications/"+id+"/history")).history; }
+  async function cxQueue(){ return await api("GET","/complications/approvals/queue"); }
+  async function cxRequestDeletion(complicationId, reason, alsoDeleteLinkedEntry){
+    return await api("POST","/complications/delete-requests",
+      { complicationId:complicationId, reason:reason||undefined, alsoDeleteLinkedEntry: !!alsoDeleteLinkedEntry });
+  }
+  async function cxWithdrawDeletionRequest(id){ return await api("POST","/complications/delete-requests/"+id+"/withdraw",{}); }
+  async function cxDecideDeletionRequest(id, decision, note){
+    return await api("POST","/complications/delete-requests/"+id+"/decide",{decision:decision, note:note||undefined});
+  }
+  async function cxLogAsEntry(complicationId, entryId){
+    return await api("POST","/complications/"+complicationId+"/log-as-entry",{entryId:entryId});
+  }
+  // Called once the ordinary entry wizard (submitSurgical/submitOther) has
+  // just created a brand-new entry, when that wizard was opened from a
+  // complication's own "Log this as a new case/procedure" action (see
+  // startWizard's logComplicationId). The entry creation itself is
+  // untouched -- this only ever runs AFTER it already succeeded, exactly
+  // the two-step shape complication_routes.log_as_entry expects. Returns a
+  // short suffix for the caller's own toast, success or failure either way.
+  async function finishWizLogAsEntry(newEntryId){
+    if(!state.wiz || !state.wiz.logComplicationId) return "";
+    try{
+      await cxLogAsEntry(state.wiz.logComplicationId, newEntryId);
+      invalidateComplicationCaches(state.wiz.logComplicationEntryId);
+      await refreshComplicationsBadge();
+      return " and linked to the complication";
+    }catch(e){
+      return " (could not link it to the complication: "+(e.message||"link it from the complication's own row instead")+")";
+    }
+  }
+  async function dPodRequests(status){ return (await api("GET","/config/pod-convention/requests"+(status?"?status="+status:""))).requests; }
+  async function dPodRequestChange(unit, requestedValue, reason){
+    return (await api("POST","/config/pod-convention/request",{unit:unit, requestedValue:requestedValue, reason:reason||undefined})).request;
+  }
+  async function dPodWithdrawRequest(id){ return await api("POST","/config/pod-convention/requests/"+id+"/withdraw",{}); }
+  async function dPodDecideRequest(id, decision, note){
+    return await api("POST","/config/pod-convention/requests/"+id+"/decide",{decision:decision, note:note||undefined});
+  }
+
+  /* ---- POD (Post-Op/Post-Procedure Day) -- UI-only, never sent to the
+     server for display purposes (the complication list endpoint already
+     returns a live podDay; this mirrors the same formula client-side for
+     the universal date label and the new-complication live preview). ---- */
+  function unitPodZero(unitKey){
+    var list = (state.config && state.config.units) || [];
+    for(var i=0;i<list.length;i++){ if(list[i].key===unitKey) return list[i].podDayZero !== false; }
+    return true; // unknown/legacy unit: same department-wide default the backend uses
+  }
+  function podDayNum(entryDate, unitKey, targetDate){
+    if(!entryDate || !targetDate) return null;
+    var d0 = new Date(String(entryDate).slice(0,10)+"T00:00:00");
+    var d1 = new Date(String(targetDate).slice(0,10)+"T00:00:00");
+    if(isNaN(d0.getTime()) || isNaN(d1.getTime())) return null;
+    var days = Math.round((d1.getTime()-d0.getTime())/86400000);
+    return days + (unitPodZero(unitKey) ? 0 : 1);
+  }
+  function podLabel(n){ return n==null ? "" : "POD "+n; }
+
+  // Every pool of entries this browser already has in memory, for the
+  // "original case" lookup a linked follow-up entry's counter-2 POD label
+  // needs -- same reasoning as findEntryById just above, kept separate
+  // because this one also has to fall back to a server fetch when the
+  // original isn't in any pool (e.g. a consultant viewing a trainee's
+  // linked entry from a unit they don't otherwise have the original loaded
+  // for).
+  function findEntryAnywhere(id){
+    if(id==null) return null;
+    var rosterEntries = [];
+    (state.roster||[]).forEach(function(r){ rosterEntries = rosterEntries.concat(r.entries||[]); });
+    var pools = [state.myEntries||[], state.detailEntries||[], state.devAllEntries||[], rosterEntries];
+    for(var i=0;i<pools.length;i++){
+      var hit = (pools[i]||[]).filter(function(x){ return x && x.id==id; })[0];
+      if(hit) return hit;
+    }
+    return null;
+  }
+  // undefined = still loading (caller re-renders once the fetch resolves);
+  // null = confirmed gone ("Original case deleted"); otherwise the entry.
+  function originCaseInfo(originId){
+    if(originId==null) return null;
+    var found = findEntryAnywhere(originId);
+    if(found) return found;
+    if(state.originCache.hasOwnProperty(originId)) return state.originCache[originId];
+    if(!state.originLoading[originId]){
+      state.originLoading[originId] = true;
+      api("GET","/entries/"+originId).then(function(r){
+        state.originCache[originId] = r.entry || null;
+        state.originLoading[originId] = false;
+        render();
+      }).catch(function(){
+        state.originCache[originId] = null;
+        state.originLoading[originId] = false;
+        render();
+      });
+    }
+    return undefined;
+  }
+  // The universal label (spec #1): a Surgical/Other entry's own date, as
+  // "POD n" against itself -- plus, on a linked follow-up entry (#3), a
+  // second counter against the ORIGINAL case's date/unit. Shared by every
+  // place an entry's date is shown, so the two never drift apart.
+  function entryPodSuffix(e){
+    var t = normType(e);
+    if(t!=="surgical" && t!=="other") return "";
+    var n = podDayNum(e.date, e.unit, e.date);
+    var out = n==null ? "" : ' <span class="muted" style="font-size:11px;">('+podLabel(n)+')</span>';
+    if(e.cameFromComplication){
+      if(e.complicationOriginEntryId==null){
+        out += ' <span class="muted" style="font-size:11px;">· Original case deleted</span>';
+      } else {
+        var origin = originCaseInfo(e.complicationOriginEntryId);
+        if(origin){
+          var n2 = podDayNum(origin.date, origin.unit, e.date);
+          if(n2!=null) out += ' <span class="muted" style="font-size:11px;">· '+podLabel(n2)+' from original case</span>';
+        }
+      }
+    }
+    return out;
+  }
+
+  // Client-side mirror of complication_routes._may_log_complication --
+  // hide/disable so people aren't surprised by a 403, never the sole gate
+  // (the server enforces this for real). Head of Unit can't be checked
+  // precisely here (capabilities.isHeadOfUnit doesn't carry which unit),
+  // so a Head of Unit always sees the button and a mismatched unit falls
+  // back to the server's own 403, same as everywhere else in this app.
+  function mayLogComplication(e){
+    if(!e) return false;
+    var t = normType(e);
+    if(t!=="surgical" && t!=="other") return false;
+    if(e.status!=="final") return false;
+    var caps = state.capabilities || {};
+    if(caps.isDeveloper) return true;
+    var me = state.user.username;
+    if(e.authorUsername===me) return true;
+    if(caps.isHeadOfUnit) return true;
+    if(state.user.role==="fellow" || state.user.role==="consultant"){
+      if(e.consultantUsername===me) return true;
+      if((e.involved||[]).some(function(p){ return p && p.username===me; })) return true;
+    }
+    return false;
+  }
+  function complicationsQueueAllowed(){
+    var caps = state.capabilities || {};
+    return !!(caps.isDeveloper || state.user.role==="consultant" || hasPerm("signoff.approve") || hasPerm("signoff.delegate"));
+  }
+  async function refreshComplicationsBadge(){
+    if(!state.user || !complicationsQueueAllowed()){ state.complicationsBadge = 0; return; }
+    try{ var q = await cxQueue(); state.complicationsBadge = (q.queue||[]).length + (q.delegated||[]).length; }
+    catch(e){ state.complicationsBadge = 0; }
+  }
+
+  // Lazy per-entry cache (spec #3/#5): loaded the first time a row's
+  // Complications section actually renders (i.e. only for rows currently
+  // expanded on screen), never eagerly for a whole list -- see the "skip
+  // the badge" note in the spec for why this app deliberately has no
+  // standing per-row complications count/dot on a collapsed My Entries row.
+  function complicationsFor(entryId){
+    if(state.complicationsByEntry.hasOwnProperty(entryId)) return state.complicationsByEntry[entryId];
+    if(!state.complicationsLoading[entryId]){
+      state.complicationsLoading[entryId] = true;
+      cxList(entryId).then(function(list){
+        state.complicationsByEntry[entryId] = list;
+        state.complicationsLoading[entryId] = false;
+        render();
+      }).catch(function(){
+        state.complicationsByEntry[entryId] = [];
+        state.complicationsLoading[entryId] = false;
+        render();
+      });
+    }
+    return undefined;
+  }
+  function invalidateComplicationCaches(entryId){
+    if(entryId==null) return;
+    delete state.complicationsByEntry[entryId];
+    delete state.complicationsLoading[entryId];
+  }
+  function findComplicationById(id){
+    id = String(id);
+    for(var k in state.complicationsByEntry){
+      var list = state.complicationsByEntry[k] || [];
+      for(var i=0;i<list.length;i++){ if(String(list[i].id)===id) return list[i]; }
+    }
+    var q = state.complicationsQueue;
+    if(q){
+      var all = (q.queue||[]).concat(q.delegated||[]);
+      for(var j=0;j<all.length;j++){ if(String(all[j].id)===id) return all[j]; }
+    }
+    return null;
+  }
+  // Refresh whatever this action might have changed: the entry's own
+  // Complications section (invalidated so it re-fetches), the queue tab if
+  // it's open, and the nav badge -- then re-render. Every decide-style
+  // action below goes through this.
+  async function afterComplicationAction(id){
+    var c = findComplicationById(id);
+    invalidateComplicationCaches(c ? c.entryId : null);
+    if(state.view==="complications-queue"){
+      try{ state.complicationsQueue = await cxQueue(); }catch(e){}
+    }
+    await refreshComplicationsBadge();
+    render();
+  }
+  function complicationOtherLabel(value, other){
+    return (value==="Other" && other) ? (value+" ("+other+")") : (value||"");
+  }
+  function complicationApprovalChip(st){
+    var d = APPROVAL_LABEL[st || "not_submitted"] || APPROVAL_LABEL.not_submitted;
+    return '<span class="chip '+d[1]+'">'+esc(d[0])+'</span>';
+  }
 
   /* ============================================================
      BOOT
@@ -1269,10 +1532,14 @@
     if(V_VIEWS.indexOf(v)!==-1){ await vLoadView(v); return; }
     if(v==="dashboard"){
       state.loading = true; render();
-      if(isTraineeRole(role)){ await loadMyEntries(); await loadReminders(); await refreshApprovalSummary(); }
+      if(isTraineeRole(role)){
+        await loadMyEntries(); await loadReminders(); await refreshApprovalSummary();
+        if(role==="fellow") await refreshComplicationsBadge();
+      }
       else if(role==="consultant"){
         await loadRoster();
         await refreshApprovalSummary();
+        await refreshComplicationsBadge();
         await refreshFeedbackBadge();
         await refreshAccountBadge();
         await refreshUnitReqBadge();
@@ -1294,6 +1561,7 @@
         await refreshFeedbackBadge();
         await refreshAccountBadge();
         await refreshUnitReqBadge();
+        await refreshComplicationsBadge();
       }
       state.loading=false; render(); return;
     }
@@ -1301,7 +1569,17 @@
     if(v==="resident-entries" || v==="resident-progress"){ await loadMyEntries(); render(); return; }
     if(v==="consultant-roster"){ await loadRoster(); render(); return; }
     if(v==="developer-users"){ await loadDevUsers(); await vLoadCourses(); render(); return; }
-    if(v==="developer-roles"){ state.loading=!state.roleAssignmentsLoaded; render(); await loadDevUsers(); await loadRoleAssignments(); state.loading=false; render(); return; }
+    if(v==="developer-roles"){
+      state.loading=!state.roleAssignmentsLoaded; render();
+      await loadDevUsers(); await loadRoleAssignments();
+      // v8.0: the pending POD convention queue, shown on this same page to
+      // whoever can act on it (the HOD decides, the Developer can withdraw
+      // their own open requests).
+      if((state.capabilities||{}).isDeveloper || (state.capabilities||{}).isHod){
+        try{ state.podRequests = await dPodRequests("pending"); }catch(e){ state.podRequests = null; }
+      }
+      state.loading=false; render(); return;
+    }
     if(v==="account"){
       state.loading=true; state.accountAction=null; render();
       try{ state.account = await acctOverview(); }catch(e){ state.account = null; }
@@ -1330,6 +1608,13 @@
       await loadConsultants();
       try{ state.approvalQueue = await aQueue(); }catch(e){ state.approvalQueue = null; }
       try{ state.approvalSummary = await aSummary(); }catch(e){}
+      state.loading=false; render(); return;
+    }
+    if(v==="complications-queue"){
+      state.loading=true; render();
+      try{ state.complicationsQueue = await cxQueue(); }catch(e){ state.complicationsQueue = null; }
+      state.complicationsQueueLoaded = true;
+      await refreshComplicationsBadge();
       state.loading=false; render(); return;
     }
     if(v==="developer-data"){
@@ -1445,6 +1730,12 @@
     }
     if(prefill) Object.assign(fields, prefill);
     state.wiz = { entryType:type, fields:fields, linkedFromId:(prefill&&prefill.linkedFromId)||null,
+                  // v8.0: set only when this wizard was opened from a
+                  // complication's "Log this as a new case/procedure" action
+                  // -- see finishWizLogAsEntry, called once the new entry is
+                  // actually created.
+                  logComplicationId:(prefill&&prefill.logComplicationId)||null,
+                  logComplicationEntryId:(prefill&&prefill.logComplicationEntryId)||null,
                   editingId:(opts&&opts.editingId)||null, status:(opts&&opts.status)||"final",
                   linkedCaseId:null, origSnapshot:null, peopleList:[], peopleUnit:null, fieldErrors:{},
                   doctors:[], recents:null, dxSug:{}, dxAsked:{} };
@@ -1910,13 +2201,14 @@
       }
       var newId = await dAddEntry(data);
       state.myEntriesLoaded = false;
+      var linkMsg = await finishWizLogAsEntry(newId);
       if(caseReport==="Yes"){
-        toast("Surgical entry logged. Add the interesting-case details below to finish the case report.");
+        toast("Surgical entry logged"+linkMsg+". Add the interesting-case details below to finish the case report.");
         startWizard("case", { hospitalNumber:data.hospitalNumber, age:data.age, sex:data.sex, diagnoses:data.diagnoses.slice(), diagnosesSecondary:data.diagnosesSecondary.slice(), comorbidities:data.comorbidities.slice(), procedures:data.procedures.slice(), linkedFromId:newId });
         return;
       }
       wizFinished();
-      toast("Entry logged.");
+      toast("Entry logged"+linkMsg+".");
       state.view = "resident-entries";
       render();
       loadForView();
@@ -1954,9 +2246,11 @@
     };
     var otherEditingId = state.wiz.editingId;
     try{
-      if(otherEditingId){ await dUpdateEntry(otherEditingId, data); } else { await dAddEntry(data); }
+      var linkMsg = "";
+      if(otherEditingId){ await dUpdateEntry(otherEditingId, data); }
+      else{ var newOtherId = await dAddEntry(data); linkMsg = await finishWizLogAsEntry(newOtherId); }
       wizFinished(); state.myEntriesLoaded = false;
-      toast(otherEditingId ? "Entry updated." : "Entry logged.");
+      toast((otherEditingId ? "Entry updated." : "Entry logged")+(otherEditingId?"":linkMsg+"."));
       state.view = "resident-entries";
       render();
       loadForView();
@@ -2390,7 +2684,15 @@
     { key:"academicTypes", title:"Academic activity types", hint:"Shown on Academic Participation entries (plus a free-text “Other”)." },
     { key:"otherProcedureSettings", title:"“Other procedure” setting types", hint:"OPD / bedside / emergency department / treatment room, or your own equivalents." },
     { key:"sexOptions", title:"Sex options", hint:"Shown on Surgical, Other procedure and Interesting Case entries." },
-    { key:"seminarTypes", title:"Seminar / presentation types", hint:"Shown on Seminar / Presentation entries (plus a free-text “Other”)." }
+    { key:"seminarTypes", title:"Seminar / presentation types", hint:"Shown on Seminar / Presentation entries (plus a free-text “Other”)." },
+    // v8.0. complicationPresentedAt/complicationManagement deliberately stay
+    // off `sortable` and never get an "Other" of their own added here --
+    // same reasoning as academicTypes/seminarTypes just above: "Other" is a
+    // literal the complication form always appends itself, and the backend
+    // relies on that exact convention.
+    { key:"complicationNames", title:"Complication names", hint:"Suggested when logging a complication; a resident can still type one not on the list.", sortable:true },
+    { key:"complicationPresentedAt", title:"Complication — presented at", hint:"Shown when logging a complication (plus a free-text “Other”)." },
+    { key:"complicationManagement", title:"Complication — management", hint:"Shown when logging a complication (plus a free-text “Other”)." }
   ];
   function simpleListSpec(listKey){ return SIMPLE_LISTS.filter(function(s){ return s.key===listKey; })[0]; }
   async function addListItem(listKey, text){
@@ -2500,7 +2802,8 @@
 
   function defaultExportSel(){
     return { types: [], columns: EXPORT_PRESETS.operative.columns.slice(),
-             units: [], approval: [], authors: [], from: "", to: "" };
+             units: [], approval: [], authors: [], from: "", to: "",
+             includeComplications: false };
   }
   function loadExportSel(){
     try{
@@ -2600,6 +2903,10 @@
           '</div>' : '')+
           '<div class="exp-sub">Sign-off state <span class="muted">(operative records and cases only)</span></div>'+
           '<div class="pick-row">'+EXPORT_APPROVAL_LABELS.map(function(a){ return exportChip("approval",a[0],a[1],sel); }).join("")+'</div>'+
+          (opt.supportsIncludeComplications ? '<div class="exp-sub">Complications</div>'+
+            '<label class="pick-chip'+(sel.includeComplications?" on":"")+'">'+
+              '<input type="checkbox" id="exp-include-cx"'+(sel.includeComplications?" checked":"")+'> '+
+              'Include complications <span class="muted">(one extra row under each case that has one)</span></label>' : '')+
         '</section>'+
 
         '<section><h3>Which columns <span class="muted" style="font-weight:400; font-size:12.5px;">('+picked.length+' of '+allCols.length+')</span></h3>'+
@@ -2637,6 +2944,7 @@
     add("approval", sel.approval); add("authors", sel.authors);
     if(sel.from) q.push("from="+encodeURIComponent(sel.from));
     if(sel.to) q.push("to="+encodeURIComponent(sel.to));
+    if(sel.includeComplications) q.push("includeComplications=true");
     return "/api/entries/export/custom.csv"+(q.length?"?"+q.join("&"):"");
   }
 
@@ -2913,6 +3221,7 @@
         : [["dashboard","Dashboard"],["resident-log","Log Entry"],["resident-entries","My Entries"],["resident-progress","My Progress"],["resident-postings","My Postings"]];
       if(state.user.role==="fellow" && hasPerm("view.roster")) tItems.push(["consultant-roster","Roster"]);
       if(state.user.role==="fellow" && hasPerm("signoff.approve")) tItems.push(["approval-queue","Case Sign-off"]);
+      if(state.user.role==="fellow" && complicationsQueueAllowed()) tItems.push(["complications-queue","Complications"]);
       if(state.user.role==="fellow" && caps.canApprove) tItems.push(["signup-approvals","Approvals"]);
       tItems.push(["feedback","Feedback"],["account","My Account"],["guide","Guide"],["about","About"]);
       return tItems;
@@ -2924,6 +3233,7 @@
       // "Approvals" already means account sign-ups in this app, so the case
       // sign-off queue gets its own name rather than a second Approvals.
       items.push(["approval-queue","Case Sign-off"]);
+      if(complicationsQueueAllowed()) items.push(["complications-queue","Complications"]);
       if(caps.canApprove) items.push(["signup-approvals","Approvals"]);
       if(caps.canManageProfiles) items.push(["manage-users","Manage Users"]);
       else if(hasPerm("postings.assign_others")) items.push(["set-postings","Set Postings"]);
@@ -2934,7 +3244,7 @@
       items.push(["account","My Account"],["guide","Guide"],["about","About"]);
       return items;
     }
-    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["unit-requests","Unit Requests"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About"]];
+    return [["dashboard","Dashboard"],["developer-users","Users"],["signup-approvals","Approvals"],["complications-queue","Complications"],["developer-password-requests","Password Requests"],["developer-lists","Manage Lists"],["list-review","List Review"],["doctors","Doctors"],["unit-requests","Unit Requests"],["developer-roles","Units & Roles"],["dev-permissions","Permissions"],["dev-courses","Courses"],["dev-alerts","Alerts"],["dev-backups","Backups"],["developer-data","Data & Export"],["feedback","Feedback"],["account-requests","Account Requests"],["account","My Account"],["guide","Guide"],["about","About"]];
   }
   function renderShell(inner){
     var role = state.user.role;
@@ -2957,6 +3267,7 @@
         if(item[0]==="signup-approvals" && state.signupRequests.length>0) badge = '<span class="alert-count">'+state.signupRequests.length+'</span>';
         if(item[0]==="unit-requests" && state.unitReqCount>0) badge = '<span class="alert-count">'+state.unitReqCount+'</span>';
         if(item[0]==="approval-queue" && approvalBadgeCount()>0) badge = '<span class="alert-count">'+approvalBadgeCount()+'</span>';
+        if(item[0]==="complications-queue" && state.complicationsBadge>0) badge = '<span class="alert-count">'+state.complicationsBadge+'</span>';
         return '<button data-nav="'+item[0]+'" class="'+(vNavActive(item[0])?"active":"")+'">'+esc(item[1])+badge+'</button>';
       }).join("")+'</nav>'+
       '<main'+((state.view==="resident-entries"||state.view==="consultant-detail")?' class="wide"':'')+'>'+
@@ -3046,10 +3357,17 @@
         return dashCard("__new-"+t[0], t[1], t[3], null, t[0], ENTRY_TYPE_COLOR[t[0]], t[0]);
       }).join("")+
     '</div></div>')+
+    // v8.0: quick link into the complication form (spec section 9.1) --
+    // picks one of this trainee's own finalized Surgical/Other records,
+    // then opens the same dialog the entry detail view's own "Log a
+    // Complication" button does.
+    '<div class="card"><h2>Post-Op/Post-Procedure</h2><div class="dash-grid">'+
+      dashCard("__cx-pick","Record a Complication","Log a complication against one of your finalized Surgical or Other Procedure records.",null,"other","var(--red)")+
+    '</div></div>'+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
       (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
       '<div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Summary</th><th>Unit</th></tr></thead><tbody>'+
-        recent.map(function(e){ return '<tr><td class="tabular">'+fmtDate(e.date)+'</td><td>'+entryTypeChip(e)+'</td><td>'+esc(summarizeEntry(e))+'</td><td>'+unitShortHtml(e.unit)+'</td></tr>'; }).join("")+
+        recent.map(function(e){ return '<tr><td class="tabular">'+fmtDate(e.date)+entryPodSuffix(e)+'</td><td>'+entryTypeChip(e)+'</td><td>'+esc(summarizeEntry(e))+'</td><td>'+unitShortHtml(e.unit)+'</td></tr>'; }).join("")+
       '</tbody></table></div>')+
     '</div>';
   }
@@ -3841,7 +4159,7 @@
       '<div class="entry-card'+(isOpen?' entry-card-open':'')+'" data-entries-search-text="'+esc(entrySearchText(e))+'">'+
         '<div class="entry-card-summary" role="button" tabindex="0" aria-expanded="'+(isOpen?"true":"false")+'" data-entry-toggle="'+esc(uiKey)+'" data-entry-id="'+esc(idStr)+'">'+
           '<span class="entry-card-num tabular muted">'+(i+1)+'</span>'+
-          '<span class="entry-card-date tabular">'+fmtDate(e.date)+'</span>'+
+          '<span class="entry-card-date tabular">'+fmtDate(e.date)+entryPodSuffix(e)+'</span>'+
           entryTypeChip(e)+
           '<span class="entry-card-main">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"—")+'</span>'+
           '<span class="entry-card-sub muted">'+esc(entryDiagnoses(e).join(", ")||summarizeEntry(e)||"")+'</span>'+
@@ -3870,10 +4188,13 @@
 
   function residentEntryMenuItems(e, rows){
     var items = [];
-    // A record from a completed stage is kept exactly as it was.
+    // A record from a completed stage is kept exactly as it was -- except
+    // logging a complication against it, which is independent of the
+    // stage/lock and can still matter months later.
     if(entryClosed(e) || stageDone()){
       if(isApprovable(e)) items.push('<button type="button" data-approval-history="'+e.id+'">Sign-off history</button>');
       items.push('<button type="button" data-view-history="'+e.id+'">Edit history</button>');
+      if(mayLogComplication(e)) items.push('<button type="button" data-cx-open="'+e.id+'">Log a Complication</button>');
       return items.join("");
     }
     var st = e.approvalState || "not_submitted";
@@ -3887,6 +4208,10 @@
       items.push('<button type="button" data-approval-history="'+e.id+'">Sign-off history</button>');
     }
     items.push('<button type="button" data-view-history="'+e.id+'">Edit history</button>');
+    // v8.0: next to Edit/Save-as-draft, as the spec asks -- independent of
+    // the record's own lock state, since a complication is logged AFTER
+    // the operative note, often once it's already signed off.
+    if(mayLogComplication(e)) items.push('<button type="button" data-cx-open="'+e.id+'">Log a Complication</button>');
     // An approved record is locked: the consultant attested to this exact
     // version. Edit and Delete are not offered at all rather than offered
     // and then refused by the server.
@@ -3947,6 +4272,298 @@
       '<div class="btn-row"><button class="btn" data-decide-cancel>Cancel</button>'+
         '<button class="btn '+(asking?"":"btn-primary")+'" data-decide-go>'+(asking?"Send back":"Sign off")+'</button></div>'+
     '</div></div>';
+  }
+
+  /* ============================================================
+     COMPLICATIONS (v8.0) -- rendering. Mirrors the submit/decide
+     dialogs and the entry sign-off queue just above, same patterns
+     throughout (navOpenOverlay, once(), vConfirmChange, toast).
+  ============================================================ */
+  function complicationRowHtml(entry, c){
+    var meMaybeDecider = c.authorUsername!==state.user.username &&
+      (c.approverUsername===state.user.username || hasPerm("signoff.approve") || hasPerm("signoff.delegate")
+       || (state.capabilities||{}).isDeveloper);
+    var actions = [];
+    if(c.canEdit){
+      actions.push('<button type="button" class="btn btn-sm" data-cx-edit="'+c.id+'">Edit</button>');
+      if(c.approvalState==="not_submitted" || c.approvalState==="changes_requested")
+        actions.push('<button type="button" class="btn btn-sm" data-cx-submit="'+c.id+'">Submit</button>');
+      if(c.approvalState==="pending")
+        actions.push('<button type="button" class="btn btn-sm" data-cx-withdraw="'+c.id+'">Withdraw</button>');
+      actions.push('<button type="button" class="btn btn-sm" data-cx-delreq="'+c.id+'">Request deletion</button>');
+    }
+    if(c.approvalState==="pending" && meMaybeDecider){
+      actions.push('<button type="button" class="btn btn-sm btn-primary" data-cx-approve="'+c.id+'">Approve</button>');
+      actions.push('<button type="button" class="btn btn-sm" data-cx-changes="'+c.id+'">Request changes</button>');
+    }
+    if(c.approvalState==="approved" && meMaybeDecider){
+      actions.push('<button type="button" class="btn btn-sm" data-cx-release="'+c.id+'">Release</button>');
+    }
+    // v8.0 (spec section 5): "in case the user wants to log the management
+    // of the complication as a surgery or procedure" -- offered to the
+    // same add/edit group as logging the complication itself, and only
+    // while nothing is linked yet.
+    if(!c.linkedEntryId && mayLogComplication(entry)){
+      actions.push('<button type="button" class="btn btn-sm" data-cx-log-entry="'+c.id+'">Log this as a new case/procedure →</button>');
+      actions.push('<button type="button" class="btn btn-sm" data-cx-link-existing="'+c.id+'">Link an existing record…</button>');
+    }
+    return '<div class="cx-row" style="border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px;">'+
+      '<div style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; align-items:center;">'+
+        '<b>'+esc(c.complicationName)+'</b>'+complicationApprovalChip(c.approvalState)+
+      '</div>'+
+      '<div class="muted" style="font-size:12px; margin-top:2px;">'+fmtDate(c.dateOfComplication)+
+        (c.timeOfComplication?" · "+esc(c.timeOfComplication):"")+" · "+podLabel(c.podDay)+
+        " · logged by "+esc(c.authorDisplayName||userDisplay(c.authorUsername))+'</div>'+
+      '<div style="font-size:13px; margin-top:4px;">Presented: '+esc(complicationOtherLabel(c.presentedAt,c.presentedAtOther))+
+        ' · Managed: '+esc(complicationOtherLabel(c.management,c.managementOther))+'</div>'+
+      (c.notes ? '<div class="muted" style="font-size:12.5px; margin-top:4px;">'+esc(c.notes)+'</div>' : '')+
+      (c.approverUsername ? '<div class="muted" style="font-size:12px; margin-top:2px;">Sent to '+esc(userDisplay(c.approverUsername))+'</div>' : '')+
+      (c.linkedEntryId ? '<div style="margin-top:6px;"><button type="button" class="case-link" data-view-entry="'+esc(c.linkedEntryId)+'">View linked record →</button></div>' : '')+
+      (actions.length ? '<div class="btn-row" style="margin-top:8px;">'+actions.join("")+'</div>' : '')+
+    '</div>';
+  }
+  // Shared by: the My Entries / roster inline expand, the consultant
+  // trainee-detail drill-down, and the entry detail modal -- one function
+  // so the three never drift apart (spec #5). Pulls from the lazy
+  // per-entry cache (complicationsFor), which fetches on first render of
+  // an open row and nothing before that.
+  function complicationsSectionHtml(e){
+    var t = normType(e);
+    // A draft has nothing to show here yet -- a complication can only be
+    // logged against a finalized entry (see create_complication), and
+    // fetching for every expanded draft row would just be wasted calls.
+    if((t!=="surgical" && t!=="other") || e.status==="draft") return "";
+    var list = complicationsFor(e.id);
+    var canLog = mayLogComplication(e);
+    var body;
+    if(list===undefined){
+      body = '<p class="muted" style="font-size:13px;">Loading…</p>';
+    } else if(!list.length){
+      body = '<p class="muted" style="font-size:13px;">None logged.</p>';
+    } else {
+      var canReleaseBulk = list.some(function(c){ return c.approvalState==="approved"; });
+      body = list.map(function(c){ return complicationRowHtml(e, c); }).join("")+
+        (canReleaseBulk ? '<button type="button" class="btn btn-sm" data-cx-unlock-open="'+e.id+'">Unlock…</button>' : '');
+    }
+    return '<div class="detail-row" style="grid-template-columns:1fr;">'+
+      '<div class="k" style="margin-bottom:6px;">Complications'+(list&&list.length?' ('+list.length+')':'')+'</div>'+
+      '<div>'+body+
+        (canLog ? '<div style="margin-top:8px;"><button type="button" class="btn btn-sm btn-primary" data-cx-open="'+e.id+'">Log a Complication</button></div>' : '')+
+      '</div></div>';
+  }
+
+  function renderComplicationDialog(){
+    var d = state.complicationDialog; if(!d) return "";
+    var f = d.fields, entry = d.entry || {};
+    var isEdit = !!d.editingId;
+    var preview = f.dateOfComplication ? podDayNum(entry.date, entry.unit, f.dateOfComplication) : null;
+    return '<div class="modal-overlay" data-cx-overlay><div class="modal-card" style="max-width:520px;">'+
+      '<button class="modal-close" data-cx-cancel aria-label="Close">&times;</button>'+
+      '<span class="eyebrow">'+(isEdit?"Edit complication":"Complication")+'</span>'+
+      '<h2>'+(isEdit?"Edit complication":"Log a Complication")+'</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">Against '+
+        esc(entryHospitalNumber(entry)||summarizeEntry(entry)||("entry #"+entry.id))+' · '+fmtDate(entry.date)+'</p>'+
+      '<div class="field"><label for="cx-name">Complication</label>'+
+        '<input id="cx-name" type="text" list="cx-name-list" value="'+esc(f.complicationName||"")+'" placeholder="e.g. Post-op haemorrhage">'+
+        '<datalist id="cx-name-list">'+(state.config.complicationNames||[]).map(function(n){ return '<option value="'+esc(n)+'">'; }).join("")+'</datalist></div>'+
+      '<div class="row2">'+
+        '<div class="field"><label for="cx-date">Date</label><input id="cx-date" type="date" min="'+esc(entry.date||"")+'" value="'+esc(f.dateOfComplication||"")+'" onchange="window.__entlog_cxDateChanged(this.value)"></div>'+
+        '<div class="field"><label for="cx-time">Time (optional)</label><input id="cx-time" type="time" value="'+esc(f.timeOfComplication||"")+'"></div>'+
+      '</div>'+
+      (preview!=null ? '<p class="muted" style="font-size:12.5px; margin:-6px 0 14px;">'+podLabel(preview)+'</p>' : '')+
+      '<div class="field"><label for="cx-presented">Presented at</label><select id="cx-presented" onchange="window.__entlog_cxToggle(\'presentedAt\',this.value)">'+
+        '<option value="" disabled'+(!f.presentedAt?' selected':'')+'>Choose…</option>'+
+        (state.config.complicationPresentedAt||[]).map(function(o){ return '<option '+(o===f.presentedAt?"selected":"")+'>'+esc(o)+'</option>'; }).join("")+
+        '<option '+(f.presentedAt==="Other"?"selected":"")+'>Other</option>'+
+      '</select></div>'+
+      fieldGroup("none", '<label for="cx-presented-other">Describe</label><input id="cx-presented-other" type="text" value="'+esc(f.presentedAtOther||"")+'">', "field", ' id="cx-presented-other-wrap" style="'+(f.presentedAt==="Other"?"":"display:none;")+'"')+
+      '<div class="field"><label for="cx-management">Management</label><select id="cx-management" onchange="window.__entlog_cxToggle(\'management\',this.value)">'+
+        '<option value="" disabled'+(!f.management?' selected':'')+'>Choose…</option>'+
+        (state.config.complicationManagement||[]).map(function(o){ return '<option '+(o===f.management?"selected":"")+'>'+esc(o)+'</option>'; }).join("")+
+        '<option '+(f.management==="Other"?"selected":"")+'>Other</option>'+
+      '</select></div>'+
+      fieldGroup("none", '<label for="cx-management-other">Describe</label><input id="cx-management-other" type="text" value="'+esc(f.managementOther||"")+'">', "field", ' id="cx-management-other-wrap" style="'+(f.management==="Other"?"":"display:none;")+'"')+
+      '<div class="field"><label for="cx-notes">Notes</label><textarea id="cx-notes" placeholder="Optional">'+esc(f.notes||"")+'</textarea></div>'+
+      '<div class="btn-row"><button class="btn" data-cx-cancel>Cancel</button>'+
+        '<button class="btn btn-primary" data-cx-save>'+(isEdit?"Save changes":"Save complication")+'</button></div>'+
+    '</div></div>';
+  }
+
+  // mode "new" (default): the dashboard quick link -- pick the record a
+  // fresh complication is against. mode "link": pick an ALREADY-LOGGED
+  // Surgical/Other record to attach to an existing complication (v8.0
+  // fallback for "log this as a new case/procedure" when the management
+  // was already entered separately -- see data-cx-link-existing).
+  function renderCxPickDialog(){
+    var d = state.cxPickDialog; if(!d) return "";
+    var linking = d.mode==="link";
+    var rows = (d.entries||[]).slice().sort(function(a,b){ return (b.date||"").localeCompare(a.date||""); });
+    return '<div class="modal-overlay" data-cxpick-overlay><div class="modal-card" style="max-width:520px;">'+
+      '<button class="modal-close" data-cxpick-cancel aria-label="Close">&times;</button>'+
+      '<h2>'+(linking?"Link an existing record":"Record a Complication")+'</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">'+
+        (linking?"Pick the finalized Surgical or Other Procedure record that already covers managing this complication.":"Pick the finalized Surgical or Other Procedure record it happened after.")+'</p>'+
+      (rows.length ? '<div style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">'+rows.map(function(e){
+        return '<button type="button" class="btn" style="display:block; width:100%; text-align:left;" data-cxpick-choose="'+e.id+'">'+
+          fmtDate(e.date)+entryPodSuffix(e)+' · '+esc(entryHospitalNumber(e)||summarizeEntry(e)||"")+'</button>';
+      }).join("")+'</div>' : '<p class="muted" style="font-size:13px;">'+(linking?"No finalized Surgical or Other Procedure records of yours to link.":"No finalized Surgical or Other Procedure records yet.")+'</p>')+
+      '<div class="btn-row" style="margin-top:14px;"><button class="btn" data-cxpick-cancel>Close</button></div>'+
+    '</div></div>';
+  }
+
+  function renderCxDeleteDialog(){
+    var d = state.cxDeleteDialog; if(!d) return "";
+    var c = d.complication;
+    return '<div class="modal-overlay" data-cxdel-overlay><div class="modal-card" style="max-width:460px;">'+
+      '<button class="modal-close" data-cxdel-cancel aria-label="Close">&times;</button>'+
+      '<h2>Request deletion</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">'+esc(c.complicationName)+' · '+fmtDate(c.dateOfComplication)+
+        (c.approvalState==="not_submitted" ? ' — never submitted, so this deletes it at once.' : ' — sent to the approver to decide.')+'</p>'+
+      '<div class="field"><label for="cxdel-reason">Reason (optional)</label><textarea id="cxdel-reason" placeholder="Why this should be removed"></textarea></div>'+
+      (c.linkedEntryId ? '<label style="display:flex; gap:8px; align-items:flex-start; font-size:13px; margin:10px 0;">'+
+        '<input type="checkbox" id="cxdel-also" style="margin-top:3px;">'+
+        '<span>Also delete the linked record (#'+esc(c.linkedEntryId)+'). <b style="color:var(--red);">This cannot be undone.</b></span></label>' : '')+
+      '<div class="btn-row"><button class="btn" data-cxdel-cancel>Cancel</button>'+
+        '<button class="btn btn-danger" data-cxdel-go>Request deletion</button></div>'+
+    '</div></div>';
+  }
+
+  function renderCxUnlockDialog(){
+    var d = state.cxUnlockDialog; if(!d) return "";
+    var approved = (d.list||[]).filter(function(c){ return c.approvalState==="approved"; });
+    return '<div class="modal-overlay" data-cxunlock-overlay><div class="modal-card" style="max-width:460px;">'+
+      '<button class="modal-close" data-cxunlock-cancel aria-label="Close">&times;</button>'+
+      '<h2>Unlock complications</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">Releasing moves a complication back to "Changes asked" and lets its author edit it again.</p>'+
+      (approved.length ? approved.map(function(c){
+        return '<label style="display:flex; gap:8px; align-items:flex-start; font-size:13.5px; padding:4px 0;">'+
+          '<input type="checkbox" data-cxunlock-pick="'+c.id+'"'+(d.picked[c.id]?" checked":"")+'>'+
+          '<span>'+esc(c.complicationName)+' <span class="muted">· '+fmtDate(c.dateOfComplication)+'</span></span></label>';
+      }).join("") : '<p class="muted" style="font-size:13px;">Nothing locked right now.</p>')+
+      '<div class="btn-row"><button class="btn" data-cxunlock-cancel>Cancel</button>'+
+        '<button class="btn btn-primary" data-cxunlock-go'+(approved.length?'':' disabled')+'>Release selected</button></div>'+
+    '</div></div>';
+  }
+
+  // v8.0: POD convention change request dialog (Developer only -- see
+  // podConventionChip above for why this is a request, not a plain edit).
+  function renderPodRequestDialog(){
+    var d = state.podRequestDialog; if(!d) return "";
+    var u = unitInfo(d.unit);
+    var current = !u || u.podDayZero !== false;
+    return '<div class="modal-overlay" data-podreq-overlay><div class="modal-card" style="max-width:460px;">'+
+      '<button class="modal-close" data-podreq-cancel aria-label="Close">&times;</button>'+
+      '<h2>Request POD convention change</h2>'+
+      '<p class="muted" style="font-size:13px; margin:6px 0 14px;">'+esc(u?u.fullName:d.unit)+' currently uses <b>'+(current?"POD 0":"POD 1")+'</b>. '+
+        'This needs the Head of Department’s approval, and relabels every complication and linked record ever logged in this unit.</p>'+
+      '<div class="field"><label for="podreq-value">New convention</label><select id="podreq-value">'+
+        '<option value="1"'+(!current?" selected":"")+'>Day of surgery/procedure is POD 0</option>'+
+        '<option value="0"'+(current?" selected":"")+'>Day of surgery/procedure is POD 1 (counting starts the day after)</option>'+
+      '</select></div>'+
+      '<div class="field"><label for="podreq-reason">Reason</label><textarea id="podreq-reason" placeholder="Why this unit should change"></textarea></div>'+
+      '<div class="btn-row"><button class="btn" data-podreq-cancel>Cancel</button>'+
+        '<button class="btn btn-primary" data-podreq-go>Send request</button></div>'+
+    '</div></div>';
+  }
+
+  /* ---------------- COMPLICATIONS -- consultant queue tab ---------------- */
+  function complicationQueueRow(item, delegated){
+    var e = item.entry || {};
+    return '<div class="q-row">'+
+      '<div class="q-main">'+
+        '<div class="q-top"><b>'+esc(item.complicationName)+'</b>'+complicationApprovalChip(item.approvalState)+
+          '<span class="muted">'+esc(entryHospitalNumber(e)||summarizeEntry(e)||"")+'</span></div>'+
+        '<div class="q-meta muted">'+esc(item.authorDisplayName||userDisplay(item.authorUsername))+' &middot; '+fmtDate(item.dateOfComplication)+
+          ' &middot; '+podLabel(item.podDay)+' &middot; '+unitShortHtml(e.unit)+
+          (delegated ? ' &middot; <span class="chip chip-violet">for '+esc(item.approverDisplayName||userDisplay(item.onBehalfOf))+'</span>' : '')+
+        '</div></div>'+
+      '<div class="q-act">'+
+        '<button class="btn btn-sm" data-view-entry="'+esc(e.id)+'">Open case</button>'+
+        '<button class="btn btn-sm" data-cx-changes="'+item.id+'">Changes</button>'+
+        '<button class="btn btn-sm btn-primary" data-cx-approve="'+item.id+'">Approve</button>'+
+      '</div></div>';
+  }
+  function renderComplicationsQueue(){
+    if(state.loading) return skeletonDash();
+    var q = state.complicationsQueue || { queue:[], delegated:[] };
+    if(!q.queue.length && !q.delegated.length){
+      return '<div class="card"><div class="empty-state">Nothing waiting for your decision on a complication.</div></div>';
+    }
+    function section(title, rows, delegated){
+      if(!rows.length) return "";
+      return '<div class="card"><div class="section-head"><h2>'+title+' ('+rows.length+')</h2></div>'+
+        '<div class="q-list">'+rows.map(function(it){ return complicationQueueRow(it, delegated); }).join("")+'</div></div>';
+    }
+    return section("Waiting for you", q.queue, false)+
+      section("You can also decide these", q.delegated, true);
+  }
+
+  // Shared by the entry detail "Log a Complication" button and the
+  // dashboard picker. `editing`, when given, is the complication being
+  // edited (its own entryId is used, and its fields pre-fill the form).
+  async function openComplicationDialog(entryId, editing){
+    var entry = findEntryAnywhere(+entryId) || (editing && editing.entry) || null;
+    if(!entry){
+      try{ entry = (await api("GET","/entries/"+entryId)).entry; }
+      catch(e){ toast("Could not open that entry."); return; }
+    }
+    navOpenOverlay(function(){
+      state.complicationDialog = {
+        entryId: entry.id, entry: entry, editingId: editing ? editing.id : null,
+        fields: editing ? {
+          complicationName: editing.complicationName, dateOfComplication: editing.dateOfComplication,
+          timeOfComplication: editing.timeOfComplication || "", presentedAt: editing.presentedAt,
+          presentedAtOther: editing.presentedAtOther || "", management: editing.management,
+          managementOther: editing.managementOther || "", notes: editing.notes || ""
+        } : {
+          complicationName: "", dateOfComplication: entry.date || todayISO(), timeOfComplication: "",
+          presentedAt: "", presentedAtOther: "", management: "", managementOther: "", notes: ""
+        }
+      };
+    }, function(){ state.complicationDialog = null; });
+    render();
+  }
+  // Dashboard quick link (spec #1): the viewer's own finalized Surgical/
+  // Other records, picked from, then handed straight to the same dialog
+  // the entry detail view's own button opens.
+  async function openComplicationPicker(){
+    if(!state.myEntriesLoaded){ try{ await loadMyEntries(); }catch(e){} }
+    var eligible = (state.myEntries||[]).filter(function(e){
+      var t = normType(e); return (t==="surgical"||t==="other") && e.status==="final";
+    });
+    navOpenOverlay(function(){ state.cxPickDialog = { entries: eligible, mode:"new" }; }, function(){ state.cxPickDialog = null; });
+    render();
+  }
+
+  // v8.0: "log the management of this complication as a surgery or
+  // procedure" (spec section 5). Primary path -- opens the ordinary new-
+  // entry wizard, pre-filled with the base case's demographics, for the
+  // viewer to fill in and save exactly as any other entry; once it saves,
+  // finishWizLogAsEntry (above) makes the link. Only offered to the base
+  // entry's add/edit group, and only while the complication has no linked
+  // record yet (both already checked by the caller before this is shown).
+  function openComplicationLogAsEntryWizard(c, entry){
+    var type = normType(entry)==="other" ? "other" : "surgical";
+    goView("resident-log");
+    startWizard(type, {
+      hospitalNumber: entry.hospitalNumber || "", age: entry.age || "",
+      sex: entry.sex || state.config.sexOptions[0],
+      logComplicationId: c.id, logComplicationEntryId: c.entryId
+    });
+  }
+  // Fallback (spec section 5, "already created it separately"): pick one of
+  // the viewer's own finalized Surgical/Other records and link it straight
+  // away, skipping the wizard entirely. Reuses the same picker the
+  // dashboard's "Record a Complication" tile uses, just in "link" mode.
+  async function openCxLinkExistingPicker(c){
+    if(!state.myEntriesLoaded){ try{ await loadMyEntries(); }catch(e){} }
+    var eligible = (state.myEntries||[]).filter(function(e){
+      var t = normType(e);
+      return (t==="surgical"||t==="other") && e.status==="final" && !e.cameFromComplication && e.id!==c.entryId;
+    });
+    navOpenOverlay(function(){ state.cxPickDialog = { entries: eligible, mode:"link", complicationId: c.id, baseEntryId: c.entryId }; },
+      function(){ state.cxPickDialog = null; });
+    render();
   }
 
   /* ============================================================
@@ -4062,6 +4679,7 @@
         }
         if(e.paperStatus!=null) extra += '<div class="detail-row"><div class="k">Write-up</div><div>'+paperStatusCell(e)+'</div></div>';
         extra += '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, rows)+'</div></div>';
+        extra += complicationsSectionHtml(e);
         return extra;
       }
     })+
@@ -4076,7 +4694,7 @@
     var t = normType(e);
     var rows = [];
     rows.push(["Type", entryTypeChip(e)]);
-    rows.push(["Date", fmtDate(e.date)]);
+    rows.push(["Date", fmtDate(e.date)+entryPodSuffix(e)]);
     if(entryHospitalNumber(e)) rows.push(["Hospital Number", esc(entryHospitalNumber(e))]);
     if(e.age || e.sex) rows.push(["Age/Sex", esc(entryAgeSex(e))]);
     if(t==="surgical" || t==="other" || t==="case"){
@@ -4132,6 +4750,7 @@
         photoBand(t, (t==="case" ? "Interesting Case" : esc(summarizeEntry(e))))+
         '<div style="margin-top:14px;">'+
           rows.map(function(r){ return '<div class="detail-row"><div class="k">'+esc(r[0])+'</div><div>'+r[1]+'</div></div>'; }).join("")+
+          complicationsSectionHtml(e)+
         '</div>'+
       '</div>'+
     '</div>';
@@ -4751,8 +5370,15 @@
       entries: entries,
       emptyText: "No entries visible to you.",
       sortFields: ENTRY_SORT_FIELDS.filter(function(f){ return f.key!=="consultant"; }),
-      actions: showHistory ? function(e){ return '<button type="button" data-view-history="'+e.id+'">History</button>'; } : null,
-      detail: function(e){ return '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, entries)+'</div></div>'; }
+      actions: function(e){
+        var items = showHistory ? '<button type="button" data-view-history="'+e.id+'">History</button>' : '';
+        if(mayLogComplication(e)) items += '<button type="button" data-cx-open="'+e.id+'">Log a Complication</button>';
+        return items;
+      },
+      detail: function(e){
+        return '<div class="detail-row"><div class="k">Case report</div><div>'+caseReportCell(e, entries)+'</div></div>'+
+          complicationsSectionHtml(e);
+      }
     })+
     '</div>';
   }
@@ -5224,15 +5850,46 @@
   /* ============================================================
      RENDER: DEVELOPER - UNITS & ROLES
   ============================================================ */
+  // v8.0: a unit's POD (Post-Op/Post-Procedure Day) convention, read-only
+  // here on purpose -- see _poddayzero_change_error in the backend. Changing
+  // it goes through the request-and-HOD-approval flow below instead.
+  function podConventionChip(u){
+    var zero = u.podDayZero !== false;
+    return '<span class="chip chip-grey" title="Day of surgery/procedure is '+(zero?"POD 0":"counted as POD 1 -- the day after is POD 0")+'">'+(zero?"POD 0 convention":"POD 1 convention")+'</span>';
+  }
+  function podRequestsSection(){
+    var caps = state.capabilities || {};
+    if(!(caps.isDeveloper || caps.isHod)) return "";
+    var rows = state.podRequests || [];
+    return '<div class="card"><h2 style="font-size:15px;">Pending POD convention requests</h2>'+
+      (rows.length ? rows.map(function(r){
+        return '<div class="proc-opt" style="align-items:flex-start; cursor:default;">'+
+          '<div><b>'+unitShortHtml(r.unit)+'</b> → '+(r.requestedValue?"POD 0":"POD 1")+
+            '<div class="muted" style="font-size:12px;">by '+esc(r.requestedByName||r.requestedBy)+' · '+fmtDateTime(r.requestedAt)+
+              (r.reason?' · “'+esc(r.reason)+'”':'')+'</div></div>'+
+          '<span style="display:flex; gap:6px; flex:0 0 auto;">'+
+            (caps.isHod ? '<button class="btn btn-sm btn-primary" data-pod-decide="'+r.id+'" data-pod-decision="approve">Approve</button>'+
+                          '<button class="btn btn-sm btn-danger" data-pod-decide="'+r.id+'" data-pod-decision="reject">Reject</button>' : '')+
+            (r.requestedBy===state.user.username ? '<button class="btn btn-sm" data-pod-withdraw="'+r.id+'">Withdraw</button>' : '')+
+          '</span></div>';
+      }).join("") : '<p class="muted" style="font-size:13px;">None pending.</p>')+
+    '</div>';
+  }
   function renderDeveloperRoles(){
     if(state.loading) return skeletonDash();
+    var caps = state.capabilities || {};
     var units = state.config.units || [];
     var groups = {}, order = [];
     units.forEach(function(u){ if(!groups[u.group]){ groups[u.group]=[]; order.push(u.group); } groups[u.group].push(u); });
     var unitSections = order.map(function(g){
       return '<div style="margin-bottom:14px;"><div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px;">'+esc(g||"Units")+'</div>'+
         groups[g].slice().sort(function(a,b){ return String(a.fullName).localeCompare(String(b.fullName), undefined, {sensitivity:"base"}); }).map(function(u){
-          return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;"><span><b class="short-form">'+esc(u.shortForm)+'</b> — '+esc(u.fullName)+'</span><button class="btn btn-sm btn-danger" data-remove-unit="'+esc(u.key)+'">Remove</button></div>';
+          return '<div class="proc-opt" style="display:flex; align-items:center; justify-content:space-between; gap:10px; cursor:default;">'+
+            '<span><b class="short-form">'+esc(u.shortForm)+'</b> — '+esc(u.fullName)+' '+podConventionChip(u)+'</span>'+
+            '<span style="display:flex; gap:6px; flex:0 0 auto;">'+
+              (caps.isDeveloper ? '<button class="btn btn-sm" data-pod-request="'+esc(u.key)+'">Request convention change</button>' : '')+
+              '<button class="btn btn-sm btn-danger" data-remove-unit="'+esc(u.key)+'">Remove</button>'+
+            '</span></div>';
         }).join("")+
       '</div>';
     }).join("");
@@ -5278,6 +5935,7 @@
       '</div>'+
       '<button class="btn btn-sm btn-primary" id="add-unit">Add unit</button>'+
     '</div>'+
+    podRequestsSection()+
     '<div class="card"><h2>Appoint HOD / Course Coordinator / Head of Unit</h2>'+
       '<p class="muted" style="margin-bottom:14px;">HOD and Course Coordinator see every resident’s entire progress across every unit while the appointment is active. Head of Unit sees only their assigned unit’s progress. All three are time-limited — access reverts automatically once the end date/time passes, no action needed.</p>'+
       (consultants.length===0 ? '<p class="muted" style="font-size:13px;">No consultant accounts yet — create one in the Users tab first.</p>' : (
@@ -5850,12 +6508,14 @@
     else if(state.view==="set-postings") inner = '<div class="card"><h2>Set postings</h2><p class="muted" style="margin:6px 0 0;">Add a batch of trainees to a unit for a set of dates. Before anything is saved, you see who would be added, who clashes with an existing posting and who is skipped.</p></div>'+renderBulkPostings();
     else if(state.view==="account") inner = renderMyAccount();
     else if(state.view==="approval-queue") inner = renderApprovalQueue();
+    else if(state.view==="complications-queue") inner = renderComplicationsQueue();
     else if(state.view==="feedback") inner = renderFeedback();
     else if(state.view==="account-requests") inner = renderAccountRequests();
     else if(state.view==="about") inner = renderAbout();
     app.innerHTML = renderShell(inner) + (state.viewingEntryId ? renderEntryDetailModal() : "")
       + (state.viewingHistoryEntryId!=null ? renderEntryHistoryModal() : "")
-      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog() + vAlertPanel() + renderTipDialog() + renderTourDialog();
+      + renderSubmitDialog() + renderDecideDialog() + renderExportDialog() + vAlertPanel() + renderTipDialog() + renderTourDialog()
+      + renderComplicationDialog() + renderCxPickDialog() + renderCxDeleteDialog() + renderCxUnlockDialog() + renderPodRequestDialog();
     // THE GATE. render() runs on every state change -- every keystroke in a
     // filter, every checkbox -- and replaces the entire DOM, so an entry
     // animation attached to these elements would re-fire constantly and the
@@ -5919,6 +6579,21 @@
   window.__entlog_toggleUnitField = function(val){
     var wrap = el("ra-unit-wrap");
     if(wrap) wrap.style.display = (val==="head_of_unit") ? "" : "none";
+  };
+  // v8.0: same "Other" + companion free-text pattern as academicType/
+  // seminarType above, just against the complication dialog's own field
+  // bag instead of the wizard's.
+  window.__entlog_cxToggle = function(field, val){
+    if(state.complicationDialog) state.complicationDialog.fields[field] = val;
+    var wrap = el(field==="presentedAt" ? "cx-presented-other-wrap" : "cx-management-other-wrap");
+    if(wrap) wrap.style.display = (val==="Other") ? "" : "none";
+  };
+  // The date field re-renders (same as wizDateChanged below) so the live
+  // POD preview updates -- a discrete onchange, not a keystroke, so this
+  // never costs a text field its cursor.
+  window.__entlog_cxDateChanged = function(val){
+    if(state.complicationDialog) state.complicationDialog.fields.dateOfComplication = val;
+    render();
   };
 
   function wireAuthEvents(){
@@ -5990,6 +6665,9 @@
           startWizard(target.replace("__new-",""));
           return;
         }
+        // v8.0 dashboard tile: a picker dialog, not a view -- see the
+        // "__new-" case just above for why this is intercepted here too.
+        if(target==="__cx-pick"){ openComplicationPicker(); return; }
         goView(target);
       };
     });
@@ -6206,6 +6884,251 @@
         toast(d.action==="approve" ? "Signed off." : "Sent back with your note.");
         render();
       }catch(e){ decGo.disabled=false; decGo.textContent="Save"; toast(e.message||"Could not save that."); }
+    });
+
+    /* ---------------- complications (v8.0) ---------------- */
+    document.querySelectorAll("[data-cx-open]").forEach(function(b){
+      b.onclick = function(){ state.openEntryMenu=null; openComplicationDialog(b.getAttribute("data-cx-open"), null); };
+    });
+    document.querySelectorAll("[data-cx-edit]").forEach(function(b){
+      b.onclick = function(){
+        var c = findComplicationById(b.getAttribute("data-cx-edit"));
+        if(c) openComplicationDialog(c.entryId, c);
+      };
+    });
+    document.querySelectorAll("[data-cx-cancel]").forEach(function(b){ b.onclick = navBack; });
+    var cxOv = document.querySelector("[data-cx-overlay]");
+    if(cxOv) cxOv.onclick = function(ev){ if(ev.target===cxOv) navBack(); };
+    var cxSave = document.querySelector("[data-cx-save]");
+    if(cxSave) cxSave.onclick = once("cx-save", async function(){
+      var d = state.complicationDialog;
+      var name = (el("cx-name")||{}).value || "";
+      var date = (el("cx-date")||{}).value || "";
+      var time = (el("cx-time")||{}).value || "";
+      var presented = (el("cx-presented")||{}).value || "";
+      var presentedOther = (el("cx-presented-other")||{}).value || "";
+      var mgmt = (el("cx-management")||{}).value || "";
+      var mgmtOther = (el("cx-management-other")||{}).value || "";
+      var notes = (el("cx-notes")||{}).value || "";
+      if(!name.trim()){ toast("Name the complication."); return; }
+      if(!date){ toast("Give a date."); return; }
+      if(!presented){ toast("Say where the patient presented."); return; }
+      if(!mgmt){ toast("Say how it was managed."); return; }
+      var payload = {
+        complicationName: name.trim(), dateOfComplication: date, timeOfComplication: time || undefined,
+        presentedAt: presented, presentedAtOther: presented==="Other" ? presentedOther.trim() : undefined,
+        management: mgmt, managementOther: mgmt==="Other" ? mgmtOther.trim() : undefined,
+        notes: notes || undefined
+      };
+      if(!vConfirmChange(d.editingId ? "Save changes to this complication?" : "Log this complication?")) return;
+      cxSave.disabled = true; cxSave.innerHTML = '<span class="spin"></span>Saving…';
+      try{
+        if(d.editingId) await cxUpdate(d.editingId, payload); else await cxCreate(d.entryId, payload);
+        invalidateComplicationCaches(d.entryId);
+        state.complicationDialog = null; navDrop("overlay");
+        await refreshComplicationsBadge();
+        toast(d.editingId ? "Complication updated." : "Complication logged.");
+        render();
+      }catch(e){ cxSave.disabled=false; cxSave.textContent = d.editingId?"Save changes":"Save complication"; toast(e.message||"Could not save that."); }
+    });
+    document.querySelectorAll("[data-cx-submit]").forEach(function(b){
+      b.onclick = once("cx-submit-"+b.getAttribute("data-cx-submit"), async function(){
+        var id = b.getAttribute("data-cx-submit");
+        if(!vConfirmChange("Send this complication for sign-off?")) return;
+        try{ await cxSubmit(id); await afterComplicationAction(id); toast("Sent for sign-off."); }
+        catch(e){ toast(e.message||"Could not send that."); }
+      });
+    });
+    document.querySelectorAll("[data-cx-withdraw]").forEach(function(b){
+      b.onclick = once("cx-withdraw-"+b.getAttribute("data-cx-withdraw"), async function(){
+        var id = b.getAttribute("data-cx-withdraw");
+        if(!vConfirmChange("Withdraw this complication from sign-off?")) return;
+        try{ await cxWithdraw(id); await afterComplicationAction(id); toast("Withdrawn."); }
+        catch(e){ toast(e.message||"Could not withdraw that."); }
+      });
+    });
+    document.querySelectorAll("[data-cx-approve]").forEach(function(b){
+      b.onclick = once("cx-approve-"+b.getAttribute("data-cx-approve"), async function(){
+        var id = b.getAttribute("data-cx-approve");
+        if(!vConfirmChange("Sign off this complication? It will be locked to further editing.")) return;
+        try{ await cxApprove(id); await afterComplicationAction(id); toast("Signed off."); }
+        catch(e){ toast(e.message||"Could not sign that off."); }
+      });
+    });
+    document.querySelectorAll("[data-cx-changes]").forEach(function(b){
+      b.onclick = once("cx-changes-"+b.getAttribute("data-cx-changes"), async function(){
+        var id = b.getAttribute("data-cx-changes");
+        var why = window.prompt("What needs changing? The author sees this.");
+        if(why===null) return;
+        if(!why.trim()){ toast("Say what needs changing."); return; }
+        try{ await cxRequestChanges(id, why); await afterComplicationAction(id); toast("Sent back with your note."); }
+        catch(e){ toast(e.message||"Could not send that."); }
+      });
+    });
+    document.querySelectorAll("[data-cx-release]").forEach(function(b){
+      b.onclick = once("cx-release-"+b.getAttribute("data-cx-release"), async function(){
+        var id = b.getAttribute("data-cx-release");
+        if(!vConfirmChange("Release this complication? It unlocks for editing again.")) return;
+        try{ await cxRelease(id); await afterComplicationAction(id); toast("Released."); }
+        catch(e){ toast(e.message||"Could not release that."); }
+      });
+    });
+    // "log this as a new case/procedure" / "link an existing record"
+    document.querySelectorAll("[data-cx-log-entry]").forEach(function(b){
+      b.onclick = async function(){
+        var c = findComplicationById(b.getAttribute("data-cx-log-entry"));
+        if(!c) return;
+        var entry = findEntryAnywhere(c.entryId) || findEntryById(c.entryId);
+        if(!entry){
+          try{ entry = (await api("GET","/entries/"+c.entryId)).entry; }
+          catch(e){ toast("Could not open the original case."); return; }
+        }
+        openComplicationLogAsEntryWizard(c, entry);
+      };
+    });
+    document.querySelectorAll("[data-cx-link-existing]").forEach(function(b){
+      b.onclick = function(){
+        var c = findComplicationById(b.getAttribute("data-cx-link-existing"));
+        if(c) openCxLinkExistingPicker(c);
+      };
+    });
+    // deletion request dialog
+    document.querySelectorAll("[data-cx-delreq]").forEach(function(b){
+      b.onclick = function(){
+        var c = findComplicationById(b.getAttribute("data-cx-delreq"));
+        if(!c) return;
+        navOpenOverlay(function(){ state.cxDeleteDialog = { complication: c }; }, function(){ state.cxDeleteDialog = null; });
+        render();
+      };
+    });
+    document.querySelectorAll("[data-cxdel-cancel]").forEach(function(b){ b.onclick = navBack; });
+    var cxdelOv = document.querySelector("[data-cxdel-overlay]");
+    if(cxdelOv) cxdelOv.onclick = function(ev){ if(ev.target===cxdelOv) navBack(); };
+    var cxdelGo = document.querySelector("[data-cxdel-go]");
+    if(cxdelGo) cxdelGo.onclick = once("cxdel-go", async function(){
+      var d = state.cxDeleteDialog, c = d.complication;
+      var reason = (el("cxdel-reason")||{}).value || "";
+      var also = !!(el("cxdel-also")||{}).checked;
+      if(!vConfirmChange(also ? "Request deletion of this complication AND its linked record? This cannot be undone." : "Request deletion of this complication?")) return;
+      cxdelGo.disabled = true; cxdelGo.innerHTML = '<span class="spin"></span>Sending…';
+      try{
+        var r = await cxRequestDeletion(c.id, reason, also);
+        invalidateComplicationCaches(c.entryId);
+        state.cxDeleteDialog = null; navDrop("overlay");
+        toast(r.autoDeleted ? "Deleted." : "Deletion requested.");
+        render();
+      }catch(e){ cxdelGo.disabled=false; cxdelGo.textContent="Request deletion"; toast(e.message||"Could not send that."); }
+    });
+    // bulk unlock dialog
+    document.querySelectorAll("[data-cx-unlock-open]").forEach(function(b){
+      b.onclick = function(){
+        var entryId = b.getAttribute("data-cx-unlock-open");
+        var list = state.complicationsByEntry[entryId] || [];
+        navOpenOverlay(function(){ state.cxUnlockDialog = { entryId: entryId, list: list, picked: {} }; }, function(){ state.cxUnlockDialog = null; });
+        render();
+      };
+    });
+    document.querySelectorAll("[data-cxunlock-pick]").forEach(function(cb){
+      cb.onchange = function(){
+        var id = cb.getAttribute("data-cxunlock-pick");
+        if(!state.cxUnlockDialog) return;
+        if(cb.checked) state.cxUnlockDialog.picked[id] = true; else delete state.cxUnlockDialog.picked[id];
+      };
+    });
+    document.querySelectorAll("[data-cxunlock-cancel]").forEach(function(b){ b.onclick = navBack; });
+    var cxuOv = document.querySelector("[data-cxunlock-overlay]");
+    if(cxuOv) cxuOv.onclick = function(ev){ if(ev.target===cxuOv) navBack(); };
+    var cxuGo = document.querySelector("[data-cxunlock-go]");
+    if(cxuGo) cxuGo.onclick = once("cxunlock-go", async function(){
+      var d = state.cxUnlockDialog;
+      var ids = Object.keys(d.picked).filter(function(k){ return d.picked[k]; });
+      if(!ids.length){ toast("Pick at least one."); return; }
+      if(!vConfirmChange("Release "+ids.length+" complication"+(ids.length===1?"":"s")+"? Each one unlocks for editing again.")) return;
+      cxuGo.disabled = true; cxuGo.innerHTML = '<span class="spin"></span>Releasing…';
+      try{
+        var r = await cxReleaseBulk(d.entryId, ids);
+        invalidateComplicationCaches(d.entryId);
+        state.cxUnlockDialog = null; navDrop("overlay");
+        toast("Released "+r.released.length+(r.skipped.length?" — "+r.skipped.length+" skipped":"")+".");
+        render();
+      }catch(e){ cxuGo.disabled=false; cxuGo.textContent="Release selected"; toast(e.message||"Could not release those."); }
+    });
+    // dashboard picker dialog (mode "new") / link-existing picker (mode "link")
+    document.querySelectorAll("[data-cxpick-cancel]").forEach(function(b){ b.onclick = navBack; });
+    var cxpOv = document.querySelector("[data-cxpick-overlay]");
+    if(cxpOv) cxpOv.onclick = function(ev){ if(ev.target===cxpOv) navBack(); };
+    document.querySelectorAll("[data-cxpick-choose]").forEach(function(b){
+      b.onclick = once("cxpick-choose", async function(){
+        var id = b.getAttribute("data-cxpick-choose");
+        var d = state.cxPickDialog;
+        if(d && d.mode==="link"){
+          try{
+            await cxLogAsEntry(d.complicationId, id);
+            invalidateComplicationCaches(d.baseEntryId);
+            await refreshComplicationsBadge();
+            state.cxPickDialog = null; navDrop("overlay");
+            toast("Linked.");
+            render();
+          }catch(e){ toast(e.message||"Could not link that record."); }
+          return;
+        }
+        state.cxPickDialog = null; navDrop("overlay");
+        openComplicationDialog(id, null);
+      });
+    });
+    // POD convention request/decide
+    document.querySelectorAll("[data-pod-request]").forEach(function(b){
+      b.onclick = function(){
+        var unit = b.getAttribute("data-pod-request");
+        navOpenOverlay(function(){ state.podRequestDialog = { unit: unit }; }, function(){ state.podRequestDialog = null; });
+        render();
+      };
+    });
+    document.querySelectorAll("[data-podreq-cancel]").forEach(function(b){ b.onclick = navBack; });
+    var podreqOv = document.querySelector("[data-podreq-overlay]");
+    if(podreqOv) podreqOv.onclick = function(ev){ if(ev.target===podreqOv) navBack(); };
+    var podreqGo = document.querySelector("[data-podreq-go]");
+    if(podreqGo) podreqGo.onclick = once("podreq-go", async function(){
+      var d = state.podRequestDialog;
+      var val = (el("podreq-value")||{}).value === "1";
+      var reason = (el("podreq-reason")||{}).value || "";
+      if(!vConfirmChange("Send this POD convention change request to the Head of Department?")) return;
+      podreqGo.disabled = true; podreqGo.innerHTML = '<span class="spin"></span>Sending…';
+      try{
+        await dPodRequestChange(d.unit, val, reason);
+        state.podRequestDialog = null; navDrop("overlay");
+        try{ state.podRequests = await dPodRequests("pending"); }catch(e){}
+        toast("Request sent.");
+        render();
+      }catch(e){ podreqGo.disabled=false; podreqGo.textContent="Send request"; toast(e.message||"Could not send that."); }
+    });
+    document.querySelectorAll("[data-pod-withdraw]").forEach(function(b){
+      b.onclick = once("pod-withdraw-"+b.getAttribute("data-pod-withdraw"), async function(){
+        var id = b.getAttribute("data-pod-withdraw");
+        if(!vConfirmChange("Withdraw this request?")) return;
+        try{ await dPodWithdrawRequest(id); state.podRequests = await dPodRequests("pending"); toast("Withdrawn."); render(); }
+        catch(e){ toast(e.message||"Could not withdraw that."); }
+      });
+    });
+    document.querySelectorAll("[data-pod-decide]").forEach(function(b){
+      b.onclick = once("pod-decide-"+b.getAttribute("data-pod-decide"), async function(){
+        var id = b.getAttribute("data-pod-decide"), decision = b.getAttribute("data-pod-decision");
+        var note = "";
+        if(decision==="reject"){
+          note = window.prompt("Say why, so the Developer knows what to do next.");
+          if(note===null) return;
+          if(!note.trim()){ toast("Say why."); return; }
+        } else {
+          if(!vConfirmChange("Approve this POD convention change? It relabels every complication and linked record in this unit.")) return;
+        }
+        try{
+          await dPodDecideRequest(id, decision, note);
+          state.podRequests = await dPodRequests("pending");
+          try{ state.config = await dGetConfig(); }catch(e){}
+          toast(decision==="approve" ? "Approved." : "Rejected.");
+          render();
+        }catch(e){ toast(e.message||"Could not save that."); }
+      });
     });
 
     /* ---------------- account lifecycle ---------------- */
@@ -6782,6 +7705,8 @@
         render();
       };
     });
+    var expIncCx = el("exp-include-cx");
+    if(expIncCx) expIncCx.onchange = function(){ syncExpDates(); expSel().includeComplications = expIncCx.checked; render(); };
     document.querySelectorAll("[data-export-cancel]").forEach(function(b){
       b.onclick = navBack;
     });
