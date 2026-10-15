@@ -293,14 +293,32 @@
   // Leaving a frame when the caller has ALREADY undone the state itself
   // -- a successful save, say. The frame is dropped first, so navOnPop's
   // unwind loop finds nothing left to do and cannot undo it twice.
+  // v8.0.2: history.go(-1) below doesn't fire its popstate synchronously --
+  // the browser queues it for the next turn. navDrop is always called by
+  // code that has ALREADY decided what state.view should be next (a save
+  // that's sending the user on to My Entries, say) and sets it right after
+  // calling this, in the same synchronous block. Without this flag,
+  // navOnPop's own restore-the-old-view branch below (which exists for a
+  // REAL Back-button press) runs a moment later, sees state.view no longer
+  // matches what was recorded when the frame was pushed, and "corrects" it
+  // back -- silently discarding the view the save just chose and landing
+  // the user back where they started instead. Previously this made every
+  // successful save in the wizard (draft or final) dead-end back on the
+  // "Log a new entry" picker instead of My Entries, no matter what the
+  // on-screen toast said.
+  var navDroppedByCode = false;
+
   function navDrop(tag){
     var t = navTop();
     if(!t || (tag && t.tag !== tag)) return;
     navFrames.pop();
+    navDroppedByCode = true;
     try{ history.go(-1); }catch(e){}
   }
 
   function navOnPop(ev){
+    var wasCodeDrop = navDroppedByCode;
+    navDroppedByCode = false;
     var st = (ev && ev.state && ev.state.entlog) ? ev.state : { d:0, v:null };
     var target = st.d || 0;
     while(navFrames.length > target){
@@ -314,7 +332,7 @@
       // view it was recorded on and rewrite the entry to match reality.
       navReplace();
     }
-    if(navFrames.length === 0 && st.v && st.v !== state.view){
+    if(!wasCodeDrop && navFrames.length === 0 && st.v && st.v !== state.view){
       state.view = st.v;
       state.mobileNavOpen = false;
       render();
@@ -1264,7 +1282,10 @@
     if(!e) return false;
     var t = normType(e);
     if(t!=="surgical" && t!=="other") return false;
-    if(e.status!=="final") return false;
+    // v8.0.2: drafts are allowed too -- a complication logged against a
+    // draft just sits as not-yet-submitted and rides along "as a whole"
+    // once the entry itself is finalized and sent for approval (see
+    // complication_routes.bundle_submit_for_entry on the backend).
     var caps = state.capabilities || {};
     if(caps.isDeveloper) return true;
     var me = state.user.username;
@@ -3849,12 +3870,25 @@
     var isDraftEdit = state.wiz.editingId && state.wiz.status === "draft";
     var showDraftBtn = !state.wiz.editingId || isDraftEdit;
     var finalizeLabel = state.wiz.editingId && !isDraftEdit ? "Save changes" : "Finalize entry";
+    // v8.0.2: "Log a Complication" lives right here, next to "Save as
+    // draft" -- that's where it's actually needed, while the record is
+    // being worked on, not buried in My Entries afterwards. It needs a
+    // real saved entry to attach to (complications are a child record of
+    // one), so it only appears once this record has an id -- i.e. after
+    // the first save, draft or otherwise -- and only for the two entry
+    // types that take complications at all. A complication logged here on
+    // a still-draft entry just waits and goes out for approval along with
+    // the entry itself once it's finalized and sent on (see
+    // bundle_submit_for_entry on the backend).
+    var canLogCx = state.wiz.editingId &&
+      (state.wiz.entryType==="surgical" || state.wiz.entryType==="other");
     // "Discard", not "Cancel". Cancel is ambiguous about whether the work
     // survives; this button is the only one that destroys anything, and the
     // Back bar above the form is the way out that does not.
     return '<div class="btn-row">'+
       wizBackButton()+
       (showDraftBtn ? '<button class="btn" id="wiz-save-draft">Save as draft</button>' : '')+
+      (canLogCx ? '<button type="button" class="btn" data-cx-open="'+state.wiz.editingId+'">Log a Complication</button>' : '')+
       '<button class="btn btn-primary" id="wiz-submit">'+finalizeLabel+'</button>'+
     '</div>'+wizDiscardLine();
   }
@@ -4337,9 +4371,14 @@
       (c.approverUsername===state.user.username || hasPerm("signoff.approve") || hasPerm("signoff.delegate")
        || (state.capabilities||{}).isDeveloper);
     var actions = [];
+    var entryIsDraft = entry.status==="draft";
     if(c.canEdit){
       actions.push('<button type="button" class="btn btn-sm" data-cx-edit="'+c.id+'">Edit</button>');
-      if(c.approvalState==="not_submitted" || c.approvalState==="changes_requested")
+      // v8.0.2: while the base entry is still a draft, a complication has
+      // no "Submit" of its own -- it goes out automatically, bundled with
+      // the entry, the moment the entry itself is sent for approval (see
+      // the hint below instead of the button).
+      if(!entryIsDraft && (c.approvalState==="not_submitted" || c.approvalState==="changes_requested"))
         actions.push('<button type="button" class="btn btn-sm" data-cx-submit="'+c.id+'">Submit</button>');
       if(c.approvalState==="pending")
         actions.push('<button type="button" class="btn btn-sm" data-cx-withdraw="'+c.id+'">Withdraw</button>');
@@ -4371,6 +4410,8 @@
         ' · Managed: '+esc(complicationOtherLabel(c.management,c.managementOther))+'</div>'+
       (c.notes ? '<div class="muted" style="font-size:12.5px; margin-top:4px;">'+esc(c.notes)+'</div>' : '')+
       (c.approverUsername ? '<div class="muted" style="font-size:12px; margin-top:2px;">Sent to '+esc(userDisplay(c.approverUsername))+'</div>' : '')+
+      (entryIsDraft && (c.approvalState==="not_submitted" || c.approvalState==="changes_requested")
+        ? '<div class="muted" style="font-size:12px; margin-top:2px;">Will be sent for approval along with the entry once it\'s finalized.</div>' : '')+
       (c.linkedEntryId ? '<div style="margin-top:6px;"><button type="button" class="case-link" data-view-entry="'+esc(c.linkedEntryId)+'">View linked record →</button></div>' : '')+
       (actions.length ? '<div class="btn-row" style="margin-top:8px;">'+actions.join("")+'</div>' : '')+
     '</div>';
@@ -4382,10 +4423,10 @@
   // an open row and nothing before that.
   function complicationsSectionHtml(e){
     var t = normType(e);
-    // A draft has nothing to show here yet -- a complication can only be
-    // logged against a finalized entry (see create_complication), and
-    // fetching for every expanded draft row would just be wasted calls.
-    if((t!=="surgical" && t!=="other") || e.status==="draft") return "";
+    // v8.0.2: a draft CAN have complications now -- they just sit as
+    // not-yet-submitted until the entry itself is finalized and sent for
+    // approval (create_complication no longer requires status=="final").
+    if(t!=="surgical" && t!=="other") return "";
     var list = complicationsFor(e.id);
     var canLog = mayLogComplication(e);
     var body;
@@ -4581,9 +4622,10 @@
   // the entry detail view's own button opens.
   async function openComplicationPicker(){
     if(!state.myEntriesLoaded){ try{ await loadMyEntries(); }catch(e){} }
-    var eligible = (state.myEntries||[]).filter(function(e){
-      var t = normType(e); return (t==="surgical"||t==="other") && e.status==="final";
-    });
+    // v8.0.2: drafts are eligible too now -- a complication can be logged
+    // against one and simply rides along once the entry is finalized and
+    // sent for approval.
+    var eligible = (state.myEntries||[]).filter(mayLogComplication);
     navOpenOverlay(function(){ state.cxPickDialog = { entries: eligible, mode:"new" }; }, function(){ state.cxPickDialog = null; });
     render();
   }
@@ -6041,6 +6083,17 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "8.0.2", date: "2026-10-16", title: "Complications on drafts, bundled with the entry's own sign-off",
+      note: "Relaxes a status check in backend/complication_routes.py and adds a bundling step inside backend/api.py's entry-submission helper; also fixes two frontend navigation/state bugs surfaced while browser-testing this release. No schema change. Replace backend/api.py, backend/complication_routes.py and static/app.js.",
+      changes: [
+        ["fixed", "<b>“Log a Complication” wasn't showing up on most real records</b> because it required the entry to already be finalized first — and in practice, entries routinely sit as drafts for a while before that happens. A complication can now be logged against a draft Surgical or Other Procedure record too."],
+        ["added", "<b>The button now lives inside the record itself,</b> next to “Save as draft”, as soon as the record has been saved once — not only afterwards, from My Entries or the record's own detail view (both still work exactly as before)."],
+        ["changed", "<b>A complication logged on a draft is sent for approval “as a whole” together with the entry,</b> not as a separate step: it simply waits, and the moment the entry itself is finalized and sent for sign-off, every complication still waiting on it goes out to that same consultant automatically. Submitting a complication by hand is still there, but only once the entry is finalized — before that, there's nothing to send it against on its own."],
+        ["fixed", "<b>Saving a Surgical/Other record — as a draft or finalized — could silently land you back on the “Log a new entry” picker</b> instead of My Entries, whatever the on-screen confirmation said. A timing gap between the page's own back-navigation bookkeeping and the save finishing let the former quietly win; found while clicking through this release's own change in a real browser, not from a report."],
+        ["fixed", "<b>Typing a complication's name and then changing its date could silently clear the name you'd just typed,</b> failing the save with “Name the complication” and no visible reason why. Also found during this release's own browser testing, not from a report."]
+      ]
+    },
+    {
       version: "8.0.1", date: "2026-10-15", title: "Complications launch fixes: identifiers, POD defaults, a release checklist",
       note: "Corrects a v8.0 config default (one-time, self-correcting migration) and adds a POD-convention choice to the “Add unit” form; no schema change. Replace backend/db.py, backend/api.py and static/app.js.",
       changes: [
@@ -6678,10 +6731,37 @@
     var wrap = el(field==="presentedAt" ? "cx-presented-other-wrap" : "cx-management-other-wrap");
     if(wrap) wrap.style.display = (val==="Other") ? "" : "none";
   };
+  // v8.0.2: same failure syncWizFieldsFromDom() above exists to prevent --
+  // the Complication dialog's own text fields (name, time, notes, the two
+  // "Other" descriptions) are never copied into state.complicationDialog
+  // .fields as they're typed, only read off the DOM at Save. That's fine
+  // right up until something else forces a re-render while the dialog is
+  // still open (changing the date, below, to update the live POD preview)
+  // -- render() rebuilds the dialog from state.complicationDialog.fields,
+  // and anything typed that was never copied back is silently wiped. A
+  // real sequence this actually happened on: type the complication name,
+  // then change the date to when it was actually noticed (often a day or
+  // more after the procedure) -- the name vanished and Save failed with
+  // "Name the complication," with no visible reason why. Snapshot the live
+  // values into state immediately before any such re-render so nothing is
+  // lost, exactly as the wizard's own form already does.
+  function syncComplicationFieldsFromDom(){
+    if(!state.complicationDialog) return;
+    var f = state.complicationDialog.fields;
+    var ids = ["cx-name","cx-time","cx-presented-other","cx-management-other","cx-notes"];
+    var fieldFor = { "cx-name":"complicationName", "cx-time":"timeOfComplication",
+      "cx-presented-other":"presentedAtOther", "cx-management-other":"managementOther",
+      "cx-notes":"notes" };
+    ids.forEach(function(id){
+      var node = el(id);
+      if(node) f[fieldFor[id]] = node.value;
+    });
+  }
   // The date field re-renders (same as wizDateChanged below) so the live
   // POD preview updates -- a discrete onchange, not a keystroke, so this
   // never costs a text field its cursor.
   window.__entlog_cxDateChanged = function(val){
+    syncComplicationFieldsFromDom();
     if(state.complicationDialog) state.complicationDialog.fields.dateOfComplication = val;
     render();
   };
