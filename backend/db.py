@@ -51,14 +51,19 @@ DEFAULT_PROCEDURES = {
     "trauma": ["Nasal bone fracture reduction", "Zygomatic / orbital fracture repair", "Mandible fracture fixation (ENT-assisted)", "Foreign body removal – ear", "Foreign body removal – nose", "Foreign body removal – throat / airway", "Peritonsillar abscess drainage", "Deep neck space abscess drainage"],
 }
 
+# podDayZero: this unit's Post-Op/Post-Procedure Day convention -- true means
+# the day of the surgery/procedure itself is POD 0 (the department-wide norm),
+# false means it's POD 1 (some peripheral postings count this way). Changing
+# it after the fact is NOT a plain Developer edit like every other field here
+# -- see pod_convention_requests in schema_sqlite.sql and complications.py.
 DEFAULT_UNITS = [
-    {"key": "ent1", "fullName": "Oto-laryngology Unit 1 – General ENT with specialization in Skull Base Surgery & Head and Neck Surgery", "shortForm": "ENT 1", "group": "Oto-laryngology Units"},
-    {"key": "ent2", "fullName": "Oto-laryngology Unit 2 – General ENT with specialization in Pediatric ENT and Cochlear Implant Unit", "shortForm": "ENT 2", "group": "Oto-laryngology Units"},
-    {"key": "ent3", "fullName": "Oto-laryngology Unit 3 – General ENT, Rhinology & Anterior Skull Base Surgery", "shortForm": "ENT 3", "group": "Oto-laryngology Units"},
-    {"key": "ent4", "fullName": "Oto-laryngology Unit 4 – General ENT with specialization in Otology, Neurotology & Implant Otology", "shortForm": "ENT 4", "group": "Oto-laryngology Units"},
-    {"key": "ent5", "fullName": "Oto-laryngology Unit 5 – General ENT with specialization in Laryngology, Airway and Phono Surgery", "shortForm": "ENT 5", "group": "Oto-laryngology Units"},
-    {"key": "hns1", "fullName": "Head and Neck Surgery Unit 1", "shortForm": "HNS 1", "group": "Peripheral Postings"},
-    {"key": "hns2", "fullName": "Head and Neck Surgery Unit 2", "shortForm": "HNS 2", "group": "Peripheral Postings"},
+    {"key": "ent1", "fullName": "Oto-laryngology Unit 1 – General ENT with specialization in Skull Base Surgery & Head and Neck Surgery", "shortForm": "ENT 1", "group": "Oto-laryngology Units", "podDayZero": True},
+    {"key": "ent2", "fullName": "Oto-laryngology Unit 2 – General ENT with specialization in Pediatric ENT and Cochlear Implant Unit", "shortForm": "ENT 2", "group": "Oto-laryngology Units", "podDayZero": True},
+    {"key": "ent3", "fullName": "Oto-laryngology Unit 3 – General ENT, Rhinology & Anterior Skull Base Surgery", "shortForm": "ENT 3", "group": "Oto-laryngology Units", "podDayZero": True},
+    {"key": "ent4", "fullName": "Oto-laryngology Unit 4 – General ENT with specialization in Otology, Neurotology & Implant Otology", "shortForm": "ENT 4", "group": "Oto-laryngology Units", "podDayZero": True},
+    {"key": "ent5", "fullName": "Oto-laryngology Unit 5 – General ENT with specialization in Laryngology, Airway and Phono Surgery", "shortForm": "ENT 5", "group": "Oto-laryngology Units", "podDayZero": True},
+    {"key": "hns1", "fullName": "Head and Neck Surgery Unit 1", "shortForm": "HNS 1", "group": "Peripheral Postings", "podDayZero": True},
+    {"key": "hns2", "fullName": "Head and Neck Surgery Unit 2", "shortForm": "HNS 2", "group": "Peripheral Postings", "podDayZero": True},
 ]
 
 DEFAULT_CONFIG = {
@@ -86,6 +91,16 @@ DEFAULT_CONFIG = {
     "otherProcedureSettings": ["OPD procedure", "Bedside procedure", "Emergency department procedure", "Treatment room procedure"],
     "sexOptions": ["Male", "Female", "Other"],
     "seminarTypes": ["Seminar", "Lecture", "Case presentation", "Guest talk"],
+    # v8.0: Post-Operative / Post-Procedure complications. complicationNames
+    # is a free-typed, sortable pool like diagnoses -- typing a name not yet
+    # here adds it, same as diagnoses does. The other two are short,
+    # single-select lists with an "other" catch-all, like otherProcedureSettings.
+    "complicationNames": ["Surgical site infection", "Hematoma", "Flap necrosis", "CSF leak", "Facial nerve palsy", "Hearing loss", "Bleeding / hemorrhage", "Wound dehiscence"],
+    # "Other" is not stored here -- same convention as academicTypes/
+    # seminarTypes: the frontend always appends its own literal "Other"
+    # option after this list, paired with a *Other free-text column.
+    "complicationPresentedAt": ["Ward", "OPD", "Emergency Department"],
+    "complicationManagement": ["Conservative – managed on OP basis", "Conservative – managed on IP basis", "Procedural", "Surgical", "Advised but deferred"],
 }
 
 
@@ -366,6 +381,28 @@ def migrate_v78(conn):
     conn.commit()
 
 
+def migrate_v79(conn):
+    """v8.0: a Surgical/Other entry created to manage a complication needs to
+    remember the ORIGINAL case even after the complication record that linked
+    them is gone (which happens the moment the original case is deleted --
+    entry_complications cascades with it). came_from_complication is a plain
+    flag because ON DELETE SET NULL on the id column below makes "the
+    pointer is NULL" ambiguous on its own -- it would otherwise mean either
+    "never had one" or "had one, now gone," and the UI needs to tell those
+    apart to show "the original case was deleted" rather than nothing."""
+    if "entries" not in _existing_tables(conn):
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(entries)").fetchall()}
+    if "came_from_complication" not in cols:
+        conn.execute("ALTER TABLE entries ADD COLUMN came_from_complication INTEGER NOT NULL DEFAULT 0")
+    if "complication_origin_entry_id" not in cols:
+        conn.execute(
+            "ALTER TABLE entries ADD COLUMN complication_origin_entry_id "
+            "INTEGER REFERENCES entries(id) ON DELETE SET NULL"
+        )
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     migrate_users_table(conn)
@@ -384,6 +421,7 @@ def init_db():
     migrate_v76(conn)
     migrate_v77(conn)
     migrate_v78(conn)
+    migrate_v79(conn)
     row = conn.execute("SELECT id, data FROM config WHERE id = 'lists'").fetchone()
     if row is None:
         conn.execute("INSERT INTO config (id, data) VALUES ('lists', ?)", (json.dumps(DEFAULT_CONFIG),))
@@ -397,6 +435,14 @@ def init_db():
         for k, v in DEFAULT_CONFIG.items():
             if k not in current:
                 current[k] = v
+                changed = True
+        # v8.0: "units" already existed, so the loop above never touches it --
+        # every unit inside it needs its own explicit POD convention, defaulting
+        # to the department-wide norm (day of surgery = POD 0) rather than
+        # silently having none.
+        for u in (current.get("units") or []):
+            if isinstance(u, dict) and "podDayZero" not in u:
+                u["podDayZero"] = True
                 changed = True
         if changed:
             conn.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(current),))

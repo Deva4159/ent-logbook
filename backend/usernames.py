@@ -88,6 +88,17 @@ USERNAME_COLUMNS = [
     ("consultant_postings", "created_by", None),
     ("unit_requests", "requester", None),
     ("unit_requests", "decided_by", None),
+    # v8.0: complications.
+    ("entry_complications", "author_username", None),
+    ("entry_complications", "approver_username", None),
+    ("complication_edits", "edited_by", None),
+    ("complication_approvals", "actor_username", None),
+    ("complication_approvals", "approver_username", None),
+    ("complication_approvals", "on_behalf_of", None),
+    ("pod_convention_requests", "requested_by", None),
+    ("pod_convention_requests", "decided_by", None),
+    ("complication_deletion_requests", "requested_by", None),
+    ("complication_deletion_requests", "decided_by", None),
 ]
 
 # Columns that look like usernames and are not, or are deliberately left.
@@ -100,6 +111,10 @@ IGNORED_COLUMNS = {
     ("entries", "approver_doctor_id"),
     ("entries", "approver_name"),
     ("entry_approvals", "approver_label"),
+    # v8.0: a role name ("resident", "consultant"), frozen on the
+    # complication's approval row, not a username -- same precedent as
+    # entry_approvals.actor_role above.
+    ("complication_approvals", "actor_role"),
 }
 
 _SUSPECT = re.compile(r"username|_by$|^on_behalf_of$|approver|actor|^target$")

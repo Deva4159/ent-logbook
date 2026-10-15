@@ -8,6 +8,7 @@ import os
 from flask import Flask, g, jsonify, request, send_from_directory
 
 from admin_routes import admin
+from complication_routes import cx
 from doctor_routes import dr
 from guide_routes import gd
 from stage_routes import st
@@ -217,6 +218,7 @@ app.register_blueprint(dr)
 app.register_blueprint(gd)
 app.register_blueprint(st)
 app.register_blueprint(ur)
+app.register_blueprint(cx)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))

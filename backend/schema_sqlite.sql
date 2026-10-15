@@ -539,3 +539,111 @@ CREATE TABLE IF NOT EXISTS unit_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_ureq_status ON unit_requests(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_ureq_user ON unit_requests(requester);
+
+-- v8.0: Post-Operative / Post-Procedure complications. A complication is a
+-- child record of the Surgical/Other Procedure entry it happened after --
+-- never a column on `entries` itself, so the base case stays untouched by
+-- anything logged, approved, disputed or later deleted here. Its own
+-- append-only edit/approval log mirrors entry_edits/entry_approvals exactly,
+-- for the same reason: "was this signed off, by whom, of which version" has
+-- to stay answerable after it's been edited since.
+CREATE TABLE IF NOT EXISTS entry_complications (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_id              INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  author_username       TEXT NOT NULL,
+  complication_name     TEXT NOT NULL,
+  date_of_complication  TEXT NOT NULL,
+  time_of_complication  TEXT,
+  presented_at          TEXT NOT NULL,
+  presented_at_other    TEXT,
+  management            TEXT NOT NULL,
+  management_other      TEXT,
+  notes                 TEXT,
+  -- The follow-up Surgical/Other entry created to manage this, if any (see
+  -- entries.came_from_complication). A pointer, not a parent: deleting this
+  -- complication (or its case) never cascades onto that entry.
+  linked_entry_id       INTEGER REFERENCES entries(id) ON DELETE SET NULL,
+  created_at            TEXT NOT NULL,
+  -- Cache of complication_approvals below, maintained by the same code that
+  -- writes it, exactly mirroring entries.approval_state.
+  approval_state        TEXT NOT NULL DEFAULT 'not_submitted',
+  approver_username     TEXT
+  -- No pod_day column on purpose: the POD day is always computed live from
+  -- entries.entry_date and that unit's CURRENT podDayZero setting, so a
+  -- later correction to either applies retroactively instead of only to
+  -- new records -- see complications.py:pod_day().
+);
+CREATE INDEX IF NOT EXISTS idx_entry_complications_entry ON entry_complications(entry_id);
+CREATE INDEX IF NOT EXISTS idx_entry_complications_approver ON entry_complications(approver_username, approval_state);
+
+CREATE TABLE IF NOT EXISTS complication_edits (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  complication_id  INTEGER NOT NULL REFERENCES entry_complications(id) ON DELETE CASCADE,
+  edited_by        TEXT NOT NULL,
+  edited_at        TEXT NOT NULL,
+  changes          TEXT NOT NULL   -- JSON: {"field": {"old":..., "new":...}, ...}
+);
+CREATE INDEX IF NOT EXISTS idx_complication_edits_complication ON complication_edits(complication_id);
+
+CREATE TABLE IF NOT EXISTS complication_approvals (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  complication_id    INTEGER NOT NULL REFERENCES entry_complications(id) ON DELETE CASCADE,
+  -- submitted | approved | changes_requested | released | withdrawn
+  action             TEXT NOT NULL,
+  actor_username     TEXT NOT NULL,
+  actor_role         TEXT,
+  approver_username  TEXT,
+  on_behalf_of       TEXT,
+  comment            TEXT,
+  edits_at_action    INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_complication_approvals_complication ON complication_approvals(complication_id);
+
+-- A unit's Day-Zero/Day-One convention (config.units[].podDayZero) is the
+-- one Developer-editable setting in the whole app that isn't Developer's
+-- alone to change: flipping it silently changes how every complication
+-- under that unit reads, past and future, retroactively. The Developer can
+-- only request it; only the HOD can make it take effect.
+CREATE TABLE IF NOT EXISTS pod_convention_requests (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  unit              TEXT NOT NULL,
+  requested_value   INTEGER NOT NULL,   -- the proposed podDayZero, 0 or 1
+  requested_by      TEXT NOT NULL,
+  requested_at      TEXT NOT NULL,
+  reason            TEXT,
+  status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','withdrawn')),
+  decided_by        TEXT,
+  decided_at        TEXT,
+  decision_note     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pod_convention_status ON pod_convention_requests(status, requested_at);
+
+-- Deleting a complication is a request, not a unilateral action -- it needs
+-- the approving consultant's (or a delegate's) sign-off even before the
+-- complication has ever itself been approved. Mirrors account_requests.
+-- complication_id is nullable with ON DELETE SET NULL, not CASCADE, and
+-- deliberately so: an APPROVED request's whole purpose is to be the durable
+-- proof that a complication's deletion was authorized, and by whom. If this
+-- cascaded with entry_complications the way complication_edits/approvals do
+-- (correct for THOSE -- they are the deleted record's own history, gone
+-- with it by design, same precedent as entries/entry_approvals), the one row
+-- that is supposed to outlive the deletion would be destroyed by the very
+-- deletion it authorized. The two snapshot columns keep the request legible
+-- once complication_id has gone NULL.
+CREATE TABLE IF NOT EXISTS complication_deletion_requests (
+  id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+  complication_id           INTEGER REFERENCES entry_complications(id) ON DELETE SET NULL,
+  entry_id                  INTEGER REFERENCES entries(id) ON DELETE SET NULL,
+  complication_name_snapshot TEXT,
+  requested_by              TEXT NOT NULL,
+  requested_at              TEXT NOT NULL,
+  reason                    TEXT,
+  also_delete_linked_entry  INTEGER NOT NULL DEFAULT 0,
+  status                    TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','withdrawn')),
+  decided_by                TEXT,
+  decided_at                TEXT,
+  decision_note             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_complication_deletion_status ON complication_deletion_requests(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_complication_deletion_complication ON complication_deletion_requests(complication_id);

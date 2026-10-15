@@ -225,6 +225,31 @@ def get_config():
     return json.loads(row["data"]) if row else {}
 
 
+# v8.0: Post-Operative/Post-Procedure Day. Computed live, every time, off the
+# unit's CURRENT podDayZero setting -- never cached on a row -- which is
+# exactly what lets a later correction to either the procedure date or the
+# unit's convention apply retroactively to every existing complication and
+# linked entry (the department's explicit requirement: a convention change
+# "should affect all existing/old/deleted/new entries").
+def unit_pod_zero(unit_key, cfg=None):
+    cfg = cfg if cfg is not None else get_config()
+    for u in (cfg.get("units") or []):
+        if isinstance(u, dict) and u.get("key") == unit_key:
+            return bool(u.get("podDayZero", True))
+    return True  # unknown/legacy unit: department-wide default
+
+
+def pod_day(entry_date, unit_key, target_date, cfg=None):
+    """Which POD/POD the `target_date` falls on, counting from `entry_date`
+    (day zero) under `unit_key`'s convention. None if either date is bad."""
+    try:
+        d0 = datetime.date.fromisoformat(str(entry_date)[:10])
+        d1 = datetime.date.fromisoformat(str(target_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    return (d1 - d0).days + (0 if unit_pod_zero(unit_key, cfg) else 1)
+
+
 def get_postings(username):
     rows = get_db().execute(
         "SELECT id, unit, start_date, end_date FROM postings WHERE username = ? ORDER BY start_date",
@@ -381,6 +406,14 @@ def entry_row_to_dict(row):
         "involved": _involved_list(d.get("involved")),
         "status": d.get("status") or "final",
         "courseId": d.get("course_id"),
+        # v8.0: set only on a Surgical/Other entry CREATED to manage a
+        # complication (see complication_routes.log_as_entry). Raw
+        # pass-through -- the POD-day arithmetic that uses these two fields
+        # runs client-side (the universal POD label, and the two-counter
+        # display on a linked entry), not here, so this function stays a
+        # pure, cheap row->dict mapper with no extra query per entry.
+        "cameFromComplication": bool(d.get("came_from_complication")),
+        "complicationOriginEntryId": d.get("complication_origin_entry_id"),
     }
 
 
@@ -1918,6 +1951,19 @@ EXPORT_COLUMN_CATALOGUE = [
     ("details",     ("details", "Details")),
     ("comments",    ("comments", "Comments/Complications")),
     ("paperStatus", ("paperStatus", "Paper Status")),
+    # v8.0. The first of these is on an ordinary Surgical/Other entry (set
+    # when that entry was logged to manage a complication -- see
+    # complication_routes.log_as_entry); the rest are only ever present on
+    # the synthetic "complication" rows _expand_with_complications adds,
+    # never on an ordinary entry row, so they are blank everywhere else via
+    # the same r.get(key, "") every other column already relies on.
+    ("followupOriginPod", ("complicationCounterLabel", "POD (from original case)")),
+    ("complicationName", ("complicationName", "Complication")),
+    ("complicationPod",  ("complicationPodLabel", "Complication POD")),
+    ("complicationPresentedAt", ("presentedAtFull", "Complication - Presented At")),
+    ("complicationManagement", ("managementFull", "Complication - Management")),
+    ("complicationNotes", ("complicationNotesText", "Complication - Notes")),
+    ("complicationApproval", ("complicationApprovalState", "Complication - Approval")),
 ]
 EXPORT_COLUMN_MAP = dict(EXPORT_COLUMN_CATALOGUE)
 EXPORT_COLUMN_ORDER = [k for k, _ in EXPORT_COLUMN_CATALOGUE]
@@ -1966,6 +2012,60 @@ def _csv_list_arg(name):
     return [v for v in (p.strip() for p in raw.split(",")) if v]
 
 
+def _complication_other_label(value, other):
+    if value == "Other" and other:
+        return "%s (%s)" % (value, other)
+    return value or ""
+
+
+def _annotate_followup_pod(db, rows):
+    """For every visible row that is itself a Surgical/Other entry created
+    to manage a complication, fill in the live counter-2 label (spec
+    section 5) -- relative to the ORIGINAL case, not this entry's own date.
+    Mutates and returns `rows`."""
+    for e in rows:
+        if not e.get("cameFromComplication"):
+            continue
+        origin_id = e.get("complicationOriginEntryId")
+        origin = db.execute("SELECT entry_date, unit FROM entries WHERE id = ?", (origin_id,)).fetchone() \
+            if origin_id else None
+        if not origin:
+            e["complicationCounterLabel"] = "Original case deleted"
+            continue
+        pd = pod_day(origin["entry_date"], origin["unit"], e["date"])
+        e["complicationCounterLabel"] = ("POD %d" % pd) if pd is not None else ""
+    return rows
+
+
+def _expand_with_complications(db, rows):
+    """"Include complications": one extra row per complication, directly
+    under its case's row -- never in place of it, and never duplicating a
+    linked management entry (that already exports as its own ordinary row,
+    per the fixed catalogue above, counter-2 included)."""
+    out = []
+    for e in rows:
+        out.append(e)
+        if e.get("entryType") not in PROCEDURE_BLOCK_TYPES or not e.get("id"):
+            continue
+        comps = db.execute(
+            "SELECT * FROM entry_complications WHERE entry_id = ? ORDER BY date_of_complication, id",
+            (e["id"],)).fetchall()
+        for c in comps:
+            pd = pod_day(e.get("date"), e.get("unit"), c["date_of_complication"])
+            out.append({
+                "date": c["date_of_complication"], "authorUsername": c["author_username"],
+                "entryType": "complication", "unit": e.get("unit"), "approvalState": "",
+                "hospitalNumber": e.get("hospitalNumber"), "age": e.get("age"), "sex": e.get("sex"),
+                "complicationName": c["complication_name"],
+                "complicationPodLabel": ("POD %d" % pd) if pd is not None else "",
+                "presentedAtFull": _complication_other_label(c["presented_at"], c["presented_at_other"]),
+                "managementFull": _complication_other_label(c["management"], c["management_other"]),
+                "complicationNotesText": c["notes"] or "",
+                "complicationApprovalState": c["approval_state"],
+            })
+    return out
+
+
 @api.get("/entries/export/custom.csv")
 @login_required()
 def export_custom_csv():
@@ -2010,6 +2110,9 @@ def export_custom_csv():
         return True
 
     rows = [e for e in rows if keep(e)]
+    rows = _annotate_followup_pod(db, rows)
+    if (request.args.get("includeComplications") or "").strip().lower() in ("1", "true", "yes"):
+        rows = _expand_with_complications(db, rows)
 
     picked = [k for k in _csv_list_arg("columns") if k in EXPORT_COLUMN_MAP]
     if not picked:
@@ -2042,6 +2145,12 @@ def export_options():
         "hasUnattributed": "" in units,   # rendered as the "__none__" sentinel
         "authors": [{"username": a, "displayName": _display_name(db, a)} for a in authors],
         "total": len(rows),
+        # v8.0: the Export dialog's "Which entries" section offers this as an
+        # on-demand, off-by-default checkbox (spec section 7) -- a static
+        # flag rather than a per-caller one, since every caller who can
+        # export anything may also choose to include the complications on
+        # what they can already see.
+        "supportsIncludeComplications": True,
     })
 
 
@@ -2739,6 +2848,7 @@ CONFIG_LIST_KEYS = {
     "categories", "units", "diagnoses", "comorbidities", "roleLevels", "settings",
     "laterality", "pgYears", "academicTypes", "seminarTypes", "sexOptions",
     "otherProcedureSettings", "consultantDesignations", "deactivationReasons",
+    "complicationNames", "complicationPresentedAt", "complicationManagement",
 }
 
 
@@ -2765,6 +2875,30 @@ def _config_shape_error(body):
     return None
 
 
+def _poddayzero_change_error(body, current_cfg):
+    """A unit's POD-day convention is the one field inside `units` that this
+    plain edit must never move -- changing it retroactively relabels every
+    complication logged under that unit, which is exactly why it has its own
+    request-and-HOD-approval flow (pod_convention_requests) instead. Without
+    this check, anyone who can edit units at all (config.edit_units) could
+    flip it with a plain PATCH and skip that entirely."""
+    if "units" not in body or not isinstance(body["units"], list):
+        return None
+    current_by_key = {u.get("key"): u for u in (current_cfg.get("units") or []) if isinstance(u, dict)}
+    for u in body["units"]:
+        if not isinstance(u, dict):
+            continue
+        existing = current_by_key.get(u.get("key"))
+        if existing is None:
+            continue  # a brand new unit: nothing to protect yet
+        old = existing.get("podDayZero", True)
+        new = u.get("podDayZero", old)
+        if bool(new) != bool(old):
+            return ("The POD (Post-Op/Post-Procedure Day) convention can't be changed here -- "
+                    "use the POD convention request, which needs the HOD's approval.")
+    return None
+
+
 @api.patch("/config")
 @login_required()
 def update_config():
@@ -2781,8 +2915,12 @@ def update_config():
     shape_error = _config_shape_error(body)
     if shape_error:
         return jsonify({"error": shape_error}), 400
+    current_cfg = get_config()
+    pod_error = _poddayzero_change_error(body, current_cfg)
+    if pod_error:
+        return jsonify({"error": pod_error}), 403
     db = get_db()
-    cfg = _prune_orphan_procedures(_merge_config(get_config(), body))
+    cfg = _prune_orphan_procedures(_merge_config(current_cfg, body))
     db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
     db.commit()
     return jsonify({"config": cfg})
@@ -2816,6 +2954,134 @@ def restore_procedure_defaults():
     db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
     db.commit()
     return jsonify({"config": cfg, "restored": restored})
+
+
+# ============================================================ v8.0: POD convention
+# A unit's POD-day convention (day of surgery = POD 0, or POD 1) is frozen
+# across that unit on purpose -- changing it retroactively relabels every
+# complication and linked follow-up ever logged there. Spec: the Developer
+# REQUESTS a change, only the HOD DECIDES it (never delegable to a
+# Coordinator or Head of Unit -- this is the one sign-off in the app that is
+# deliberately NOT covered by signoff.delegate). _poddayzero_change_error
+# above is what stops the plain config PATCH from being used to skip this.
+def _is_hod(username):
+    return any(a["assignment_role"] == "hod" for a in perms.active_role_assignments(username))
+
+
+def _pod_request_dict(db, r):
+    return {
+        "id": r["id"], "unit": r["unit"], "requestedValue": bool(r["requested_value"]),
+        "requestedBy": r["requested_by"], "requestedByName": _display_name(db, r["requested_by"]),
+        "requestedAt": r["requested_at"], "reason": r["reason"], "status": r["status"],
+        "decidedBy": r["decided_by"], "decidedByName": _display_name(db, r["decided_by"]) if r["decided_by"] else None,
+        "decidedAt": r["decided_at"], "decisionNote": r["decision_note"],
+    }
+
+
+@api.post("/config/pod-convention/request")
+@login_required(role="developer")
+def request_pod_convention_change():
+    db = get_db()
+    body = request.get_json(force=True, silent=True) or {}
+    unit = _text(body.get("unit"), 60)
+    if not unit or unit not in known_unit_keys():
+        return bad_unit_response(unit)
+    if "requestedValue" not in body or isinstance(body["requestedValue"], (str, type(None))):
+        return jsonify({"error": "Say which convention this unit should use."}), 400
+    requested = bool(body.get("requestedValue"))
+    current = next((u for u in (get_config().get("units") or []) if isinstance(u, dict) and u.get("key") == unit), None)
+    if current is not None and bool(current.get("podDayZero", True)) == requested:
+        return jsonify({"error": "That unit already uses that convention."}), 400
+    open_existing = db.execute(
+        "SELECT id FROM pod_convention_requests WHERE unit = ? AND status = 'pending'", (unit,)).fetchone()
+    if open_existing:
+        return jsonify({"error": "There is already an open request for this unit."}), 409
+    reason = _text(body.get("reason"), 1000)
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    cur = db.execute(
+        "INSERT INTO pod_convention_requests (unit, requested_value, requested_by, requested_at, reason, status)"
+        " VALUES (?,?,?,?,?,'pending')",
+        (unit, int(requested), g.user["username"], now, reason))
+    db.commit()
+    return jsonify({"request": _pod_request_dict(
+        db, db.execute("SELECT * FROM pod_convention_requests WHERE id = ?", (cur.lastrowid,)).fetchone())}), 201
+
+
+@api.get("/config/pod-convention/requests")
+@login_required()
+def list_pod_convention_requests():
+    me = g.user["username"]
+    if not (_is_hod(me) or g.user["role"] == "developer"):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_db()
+    status = request.args.get("status")
+    sql = "SELECT * FROM pod_convention_requests"
+    args = []
+    if status in ("pending", "approved", "rejected", "withdrawn"):
+        sql += " WHERE status = ?"
+        args.append(status)
+    sql += " ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC LIMIT 300"
+    return jsonify({"requests": [_pod_request_dict(db, r) for r in db.execute(sql, args).fetchall()]})
+
+
+@api.post("/config/pod-convention/requests/<int:rid>/withdraw")
+@login_required(role="developer")
+def withdraw_pod_convention_request(rid):
+    db = get_db()
+    r = db.execute("SELECT * FROM pod_convention_requests WHERE id = ?", (rid,)).fetchone()
+    if not r or r["requested_by"] != g.user["username"]:
+        return jsonify({"error": "not_found"}), 404
+    if r["status"] != "pending":
+        return jsonify({"error": "This request has already been decided."}), 409
+    db.execute("UPDATE pod_convention_requests SET status = 'withdrawn' WHERE id = ?", (rid,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@api.post("/config/pod-convention/requests/<int:rid>/decide")
+@login_required()
+def decide_pod_convention_request(rid):
+    me = g.user["username"]
+    if not _is_hod(me):
+        return jsonify({"error": "forbidden",
+                        "detail": "Only the Head of Department can decide a POD convention change."}), 403
+    db = get_db()
+    r = db.execute("SELECT * FROM pod_convention_requests WHERE id = ?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"error": "not_found"}), 404
+    if r["status"] != "pending":
+        return jsonify({"error": "This request has already been decided."}), 409
+    body = request.get_json(force=True, silent=True) or {}
+    decision = body.get("decision")
+    note = _text(body.get("note"), 500)
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    if decision not in ("approve", "reject"):
+        return jsonify({"error": "Choose approve or reject."}), 400
+    if decision == "reject":
+        if not (note or "").strip():
+            return jsonify({"error": "Say why, so the Developer knows what to do next."}), 400
+        db.execute("UPDATE pod_convention_requests SET status='rejected', decided_by=?, decided_at=?,"
+                   " decision_note=? WHERE id=?", (me, now, note, rid))
+        db.commit()
+        return jsonify({"request": _pod_request_dict(
+            db, db.execute("SELECT * FROM pod_convention_requests WHERE id = ?", (rid,)).fetchone())})
+    cfg = get_config()
+    units = cfg.get("units") or []
+    found = False
+    for u in units:
+        if isinstance(u, dict) and u.get("key") == r["unit"]:
+            u["podDayZero"] = bool(r["requested_value"])
+            found = True
+    if not found:
+        return jsonify({"error": "That unit no longer exists."}), 409
+    cfg["units"] = units
+    db.execute("UPDATE config SET data = ? WHERE id = 'lists'", (json.dumps(cfg),))
+    db.execute("UPDATE pod_convention_requests SET status='approved', decided_by=?, decided_at=?,"
+               " decision_note=? WHERE id=?", (me, now, note, rid))
+    db.commit()
+    return jsonify({"request": _pod_request_dict(
+        db, db.execute("SELECT * FROM pod_convention_requests WHERE id = ?", (rid,)).fetchone()),
+        "config": cfg})
 
 
 # ---------------------------------------------------------- role assigns
