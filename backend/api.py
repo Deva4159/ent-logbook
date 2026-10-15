@@ -3267,11 +3267,23 @@ def _submit_one(db, entry_id, target, comment=None):
                       approver_username=target.get("username"), approver_label=label,
                       on_behalf_of=row["approver_username"], on_behalf_label=row["approver_name"])
         _set_approval(db, entry_id, "pending", target)
+        _bundle_complications_on_submit(db, entry_id, target, g.user, comment)
         return True, None, 200
     _log_approval(db, entry_id, "submitted", g.user, comment=comment,
                   approver_username=target.get("username"), approver_label=label)
     _set_approval(db, entry_id, "pending", target)
+    _bundle_complications_on_submit(db, entry_id, target, g.user, comment)
     return True, None, 200
+
+
+def _bundle_complications_on_submit(db, entry_id, target, actor, comment):
+    """Local import -- complication_routes imports from this module at
+    load time, so importing it back at the top of api.py would be
+    circular. By the time any request is being served, app.py has already
+    imported complication_routes in full, so this import is just a name
+    lookup, not a re-execution of that module."""
+    from complication_routes import bundle_submit_for_entry
+    bundle_submit_for_entry(db, entry_id, target, actor, comment)
 
 
 @api.post("/entries/<int:entry_id>/submit")

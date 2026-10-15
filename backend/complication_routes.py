@@ -186,6 +186,40 @@ def _log_complication_approval(db, complication_id, action, actor, comment=None,
     )
 
 
+def bundle_submit_for_entry(db, entry_id, target, actor, comment=None):
+    """Called from api.py's _submit_one, the moment a Surgical/Other entry
+    itself is sent for approval (first submission, or re-submission to a
+    different consultant). Any complication still sitting at
+    not_submitted/changes_requested rides along to that SAME consultant,
+    'as a whole' with the entry -- see the v8.0.2 note on create_complication
+    above -- rather than needing a submission step of its own.
+
+    Deliberately NOT touched: a complication already `pending` elsewhere.
+    Reassigning the entry doesn't reach in and redirect a complication that
+    is already out for its own, separate sign-off; the person logging it
+    decides that one on its own terms.
+
+    Best-effort: `target` can name someone with no account on this system
+    (a free-text-only nominee) -- entries allow that, complications don't,
+    so there's nobody with an account to hand it to. In that case nothing
+    here is submitted; it stays logged and waiting for the author to send
+    by hand once a real approver is available."""
+    approver = target.get("username") if isinstance(target, dict) else None
+    if not approver:
+        return
+    rows = db.execute(
+        "SELECT * FROM entry_complications WHERE entry_id = ?"
+        " AND approval_state IN ('not_submitted','changes_requested')", (entry_id,)
+    ).fetchall()
+    for c in rows:
+        action = "reassigned" if (c["approval_state"] == "changes_requested" and c["approver_username"]
+                                  and c["approver_username"] != approver) else \
+            ("resubmitted" if c["approval_state"] == "changes_requested" else "submitted")
+        _log_complication_approval(db, c["id"], action, actor, comment=comment, approver_username=approver)
+        db.execute("UPDATE entry_complications SET approval_state='pending', approver_username=? WHERE id=?",
+                  (approver, c["id"]))
+
+
 # ------------------------------------------------------------- serialising
 def complication_row_to_dict(db, c, entry_row=None):
     d = dict(c)
@@ -257,8 +291,13 @@ def create_complication(entry_id):
         return jsonify({"error": "not_found"}), 404
     if entry["entry_type"] not in COMPLICATION_ENTRY_TYPES:
         return jsonify({"error": "Complications can only be logged on Surgical or Other Procedure entries."}), 400
-    if entry["status"] != "final":
-        return jsonify({"error": "Finish this entry before logging a complication against it."}), 400
+    # v8.0.2: a complication can be logged against a draft, not only a
+    # finalized entry -- most of this unit's real entries sit as drafts for
+    # a while, and making them wait defeats the point of logging a
+    # complication as soon as it happens. It simply rides along as
+    # not_submitted until the entry itself is finalized and sent for
+    # approval (see _bundle_submit_for_entry below and api.py's
+    # _submit_one), rather than needing a submission step of its own.
     if not _may_log_complication(g.user, entry):
         return jsonify({"error": "forbidden"}), 403
     b = _json()
@@ -361,6 +400,9 @@ def submit_complication(cid):
         return jsonify({"error": "not_found"}), 404
     if not _may_log_complication(g.user, entry):
         return jsonify({"error": "forbidden"}), 403
+    if entry["status"] != "final":
+        return jsonify({"error": "This entry is still a draft. Finish the entry and send it for approval "
+                                  "-- its complications go out for sign-off along with it, as a whole."}), 400
     if c["approval_state"] not in ("not_submitted", "changes_requested"):
         return jsonify({"error": "This complication has already been submitted."}), 409
     b = _json()
