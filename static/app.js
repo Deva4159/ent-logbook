@@ -371,6 +371,29 @@
     render();
   }
 
+  // v8.0.3: replacing one already-open overlay with another (the "Record a
+  // Complication" picker handing off to the complication dialog itself,
+  // say) -- NOT navDrop(prev) followed by navOpenOverlay(next). That pops
+  // one history entry (history.go(-1), whose popstate fires asynchronously
+  // -- see navDroppedByCode above) and then immediately pushes a new one
+  // before that pop has actually happened. navFrames ends up one frame
+  // deeper than the stale popstate's own recorded depth expects, so when it
+  // finally arrives, navOnPop's unwind loop sees "too many frames" and pops
+  // the brand-new one right back off -- silently calling ITS undo() and
+  // erasing the dialog that had just been opened a moment before (the
+  // picker "handing off" to the complication dialog looked, from the
+  // outside, exactly like clicking an entry and nothing happening). Doing
+  // the swap as a single replaceState instead -- same history entry,
+  // updated frame -- never fires a popstate at all, so there's nothing left
+  // to race.
+  function navSwapOverlay(open, close){
+    if(navFrames.length) navFrames.pop();
+    open();
+    navFrames.push({ tag:"overlay", label:"", undo:close });
+    navReplace();
+    render();
+  }
+
   function backBar(){
     for(var i=navFrames.length-1;i>=0;i--){
       if(navFrames[i].label){
@@ -3417,11 +3440,12 @@
       }).join("")+
     '</div></div>')+
     // v8.0: quick link into the complication form (spec section 9.1) --
-    // picks one of this trainee's own finalized Surgical/Other records,
-    // then opens the same dialog the entry detail view's own "Log a
-    // Complication" button does.
+    // picks one of this trainee's own Surgical/Other records (v8.0.2: a
+    // draft is eligible too, same as the wizard's own button and My
+    // Entries'), then opens the same dialog the entry detail view's own
+    // "Log a Complication" button does.
     '<div class="card"><h2>Post-Op/Post-Procedure</h2><div class="dash-grid">'+
-      dashCard("__cx-pick","Record a Complication","Log a complication against one of your finalized Surgical or Other Procedure records.",null,"other","var(--red)")+
+      dashCard("__cx-pick","Record a Complication","Log a complication against one of your Surgical or Other Procedure records.",null,"other","var(--red)")+
     '</div></div>'+
     '<div class="card"><div class="section-head"><h2>Recent entries</h2></div>'+
       (recent.length===0 ? '<div class="empty-state">'+artPlate("hands","es-plate")+'Nothing logged yet.</div>' :
@@ -4496,11 +4520,11 @@
       '<button class="modal-close" data-cxpick-cancel aria-label="Close">&times;</button>'+
       '<h2>'+(linking?"Link an existing record":"Record a Complication")+'</h2>'+
       '<p class="muted" style="font-size:13px; margin:6px 0 14px;">'+
-        (linking?"Pick the finalized Surgical or Other Procedure record that already covers managing this complication.":"Pick the finalized Surgical or Other Procedure record it happened after.")+'</p>'+
+        (linking?"Pick the finalized Surgical or Other Procedure record that already covers managing this complication.":"Pick the Surgical or Other Procedure record it happened after — a draft is fine; the complication goes out for approval along with it once it's finalized.")+'</p>'+
       (rows.length ? '<div style="max-height:360px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">'+rows.map(function(e){
         return '<button type="button" class="btn" style="display:block; width:100%; text-align:left;" data-cxpick-choose="'+e.id+'">'+
-          fmtDate(e.date)+entryPodSuffix(e)+' · '+esc(entryIdentifier(e))+'</button>';
-      }).join("")+'</div>' : '<p class="muted" style="font-size:13px;">'+(linking?"No finalized Surgical or Other Procedure records of yours to link.":"No finalized Surgical or Other Procedure records yet.")+'</p>')+
+          fmtDate(e.date)+entryPodSuffix(e)+' · '+esc(entryIdentifier(e))+(e.status==="draft"?' <span class="chip chip-amber" style="vertical-align:middle;">Draft</span>':"")+'</button>';
+      }).join("")+'</div>' : '<p class="muted" style="font-size:13px;">'+(linking?"No finalized Surgical or Other Procedure records of yours to link.":"No Surgical or Other Procedure records yet — log one first, from Log Entry.")+'</p>')+
       '<div class="btn-row" style="margin-top:14px;"><button class="btn" data-cxpick-cancel>Close</button></div>'+
     '</div></div>';
   }
@@ -4595,13 +4619,18 @@
   // Shared by the entry detail "Log a Complication" button and the
   // dashboard picker. `editing`, when given, is the complication being
   // edited (its own entryId is used, and its fields pre-fill the form).
-  async function openComplicationDialog(entryId, editing){
+  // `replacingOverlay`: true when this is handing off from an overlay
+  // that's already open (the picker below, choosing an entry) rather than
+  // opening fresh over an ordinary page -- see navSwapOverlay above for why
+  // that can't just be navDrop(prev) then this doing its usual
+  // navOpenOverlay push.
+  async function openComplicationDialog(entryId, editing, replacingOverlay){
     var entry = findEntryAnywhere(+entryId) || (editing && editing.entry) || null;
     if(!entry){
       try{ entry = (await api("GET","/entries/"+entryId)).entry; }
       catch(e){ toast("Could not open that entry."); return; }
     }
-    navOpenOverlay(function(){
+    var open = function(){
       state.complicationDialog = {
         entryId: entry.id, entry: entry, editingId: editing ? editing.id : null,
         fields: editing ? {
@@ -4614,7 +4643,9 @@
           presentedAt: "", presentedAtOther: "", management: "", managementOther: "", notes: ""
         }
       };
-    }, function(){ state.complicationDialog = null; });
+    };
+    var close = function(){ state.complicationDialog = null; };
+    if(replacingOverlay) navSwapOverlay(open, close); else navOpenOverlay(open, close);
     render();
   }
   // Dashboard quick link (spec #1): the viewer's own finalized Surgical/
@@ -6083,6 +6114,14 @@
   ============================================================ */
   var CHANGELOG = [
     {
+      version: "8.0.3", date: "2026-10-16", title: "Fix: the dashboard's “Record a Complication” link going nowhere",
+      note: "Frontend only, static/app.js. No backend change, no schema change.",
+      changes: [
+        ["fixed", "<b>The Dashboard's “Record a Complication” link (and My Entries' own header button, which shares the same picker) could silently do nothing after you picked a record</b> — the complication form would open for an instant and then vanish before you could see it, with no error. Caused by the picker's own “close, then open the next dialog” handoff racing the browser's back-navigation handling; logging a complication directly from an already-open record (the entry wizard, My Entries' per-record button, the entry detail view) was never affected, which is why it worked from there. Fixed by making that handoff a single in-place swap instead of a pop-then-push."],
+        ["changed", "<b>The picker's wording and the dashboard tile's description no longer say “finalized”</b> — a draft is eligible here too, same as everywhere else complications were opened up to drafts in 8.0.2; a draft row in the picker is now tagged accordingly."]
+      ]
+    },
+    {
       version: "8.0.2", date: "2026-10-16", title: "Complications on drafts, bundled with the entry's own sign-off",
       note: "Relaxes a status check in backend/complication_routes.py and adds a bundling step inside backend/api.py's entry-submission helper; also fixes two frontend navigation/state bugs surfaced while browser-testing this release. No schema change. Replace backend/api.py, backend/complication_routes.py and static/app.js.",
       changes: [
@@ -7242,8 +7281,12 @@
           }catch(e){ toast(e.message||"Could not link that record."); }
           return;
         }
-        state.cxPickDialog = null; navDrop("overlay");
-        openComplicationDialog(id, null);
+        // v8.0.3: NOT navDrop + openComplicationDialog's own push -- that's
+        // the pop-then-immediately-push race navSwapOverlay exists to
+        // avoid (see its comment). state.cxPickDialog is cleared here
+        // either way; openComplicationDialog does the frame swap itself.
+        state.cxPickDialog = null;
+        openComplicationDialog(id, null, true);
       });
     });
     // POD convention request/decide
